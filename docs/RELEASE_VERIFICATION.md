@@ -1,4 +1,4 @@
-# Release verification: 2026.10.22.7
+# Release verification: 2026.10.23.1
 
 Unless a section records live verification explicitly, the Pascal below has
 been checked by FPC and the linter but **not executed by Altium's DelphiScript engine**. The two are not the
@@ -105,6 +105,7 @@ works elsewhere cannot be an undeclared identifier:
 | 37, pin labels | `ShowName`, `ShowDesignator` on a pin | yes, `Library.pas` | low |
 | 37, pin text | `Name_FontMode`, `Name_CustomFontID`, `Name_CustomColor`, `Designator_FontMode`, `Designator_CustomFontID`, `Designator_CustomColor` on a pin | no, nowhere | medium, read live; the writes are not run live |
 | 38, stack-up apply | `CopperThickness`, `DielectricHeight`, `DielectricConstant`, `DielectricType` on a board layer | yes, `PCB_ModifyLayer` | low, the same writes pcb_modify_layer makes, each read back |
+| 39, entry label font | `TextFontID` on a sheet entry and a harness entry | no, nowhere | highest, a new identifier on two interfaces, checked only against Altium.Sch.Interfaces.dll; step 39 item 2 stops at the first fault |
 
 Steps 5 and 2 are the ones that justify a live session. The bottom rows
 write properties this codebase already exercises, so they are checking
@@ -280,7 +281,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.10.22.7`, `version_match` =
+Expect `altium_script_version` = `2026.10.23.1`, `version_match` =
 `true`, and `mcp_server_version` = `0.7.1`.
 
 Those are two different versions and they fail differently.
@@ -2298,6 +2299,65 @@ the board Altium resolves as current.
 
 Not yet run live: the documents open on the test machine at the time
 included unsaved boards that were not ours to risk.
+
+## 39. FontId on a sheet entry, entry label fonts, and paths inside process strings
+
+Two field fixes:
+
+* `obj_query object_type=eSheetEntry properties=Name,FontId` raised
+  "Undeclared identifier: FontId" as a modal, and the polling loop
+  stopped. `SchObjectHasFontId` now gates `FontId` in the reader, the
+  writer and the preflight. Sheet and harness entries, pins, components,
+  sheet symbols, harness connectors, wires, buses, bus entries, junctions,
+  no-ERC markers, lines, rectangles and images answer `unreadable` /
+  `unknown`;
+* an entry's label font had no property at all. It is the new
+  `TextFontId` on eSheetEntry and eHarnessEntry, read and written only
+  through typed `ISch_SheetEntry` / `ISch_HarnessEntry` locals.
+  `GetState_TextFontID` / `SetState_TextFontID` are in
+  `Altium.Sch.Interfaces.dll` and the SchDoc record field is `TextFontID`,
+  but the identifier is new here, so **it is the risk in this section**.
+
+On the Python side, `CanonicalPathValue` (step 37) never sees a path inside
+a process parameter string. `sch_template._focus` opened a library it could
+not focus with `ObjectKind=Document|FileName=R:/...` built from the caller's
+path, and Altium filed the copy as "/Hardware/.../Passive.SchLib": a second
+document that read as modified, raised "Save changes?" on every reload and
+broke AutoSave. The bridge now writes `FileName=` in a `parameters` /
+`params` string, and lists under a `*paths` key, with backslashes (the
+Pascal rule exactly). `_focus` also reuses a document Altium already has
+open under another drive letter mapped to the same share.
+
+On a scratch sheet with one sheet symbol and one entry:
+
+1. **Names that would fault.** `obj_query object_type=eSheetEntry
+   properties=Name,FontId`: FontId empty and `unreadable`, and `app_ping`
+   still answers. `obj_modify` on the entry with `FontId=3`: `unknown`,
+   nothing changed.
+2. **Entry font.** `obj_query ... properties=Name,TextFontId` reads a
+   number. `obj_modify ... set=TextFontId=<obj_get_font_id Arial 7>` reads
+   back, and the entry label redraws in Arial 7 after a refresh. If either
+   call faults, the identifier is wrong: stop and record it.
+3. **Harness entry.** The same read and write on an eHarnessEntry, if a
+   harness connector can be placed on the scratch sheet.
+4. **Objects that have FontId still work.** `FontId` read and written on a
+   port and a net label reads back.
+5. **Process string.** With a scratch SchLib closed, `obj_run_process
+   process_name=WorkspaceManager:OpenObject
+   parameters=ObjectKind=Document|FileName=<drive>:/<dir>/x.SchLib`:
+   `app_list_documents` lists it once, with backslashes, and closing it
+   raises no save prompt.
+6. **Template focus.** `sch_preview_template` with a forward-slash
+   `library_path` on a closed library: opened once, no save prompt.
+7. **Alias.** With the library open as `R:\...`, the same call through
+   another drive letter mapped to the same share: focused, not opened a
+   second time. This depends on `application.get_open_documents` listing
+   free documents, which it reads from `DM_Projects`.
+
+Not yet run live: the bridge was down on the test machine when the fixes
+were made. They are checked only by source-level tests
+(`tests/test_sch_fontid.py`, `tests/test_docpaths.py`) and the linter;
+FPC was not run.
 
 ---
 

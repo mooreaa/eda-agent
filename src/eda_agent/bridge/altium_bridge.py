@@ -35,6 +35,7 @@ from eda_agent.atomicfile import discard, replace_with_retry
 
 from ..config import get_config
 from .process_manager import AltiumProcessManager
+from .docpaths import normalize_params
 from .exceptions import (
     AltiumNotRunningError,
     AltiumTimeoutError,
@@ -1137,7 +1138,7 @@ class AltiumBridge:
         if timeout is None:
             timeout = self.config.poll_timeout
         self._ensure_keepalive()
-        return self._execute_command(command, params or {}, timeout)
+        return self._execute_command(command, normalize_params(params or {}), timeout)
 
     async def send_command_async(
         self,
@@ -1159,7 +1160,7 @@ class AltiumBridge:
             _executor,
             self._execute_command,
             command,
-            params or {},
+            normalize_params(params or {}),
             timeout,
         )
 

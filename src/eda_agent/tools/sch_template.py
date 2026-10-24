@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ..bridge import get_bridge
+from ..bridge.docpaths import normalize_doc_path, same_file
 from ..bridge.exceptions import AltiumError
 from ..bridge.payload import payload_safe
 from ..config import get_config
@@ -44,10 +45,34 @@ def _failed(reply: dict) -> bool:
     return reply.get("success") is False
 
 
+async def _open_alias(bridge, path: str) -> Optional[str]:
+    """The path under which Altium already has this file open, if any.
+
+    One file can be reachable through two drive letters mapped to the same
+    share (M:\\SCM\\Hardware\\... and R:\\Hardware\\...). Altium treats them
+    as two documents, so opening the second name made a duplicate copy of a
+    library that was already open (2026-10-23)."""
+    reply = await _send(bridge, "application.get_open_documents", {})
+    docs = reply.get("reply") or reply.get("result") or reply.get("documents") or []
+    for doc in docs if isinstance(docs, list) else []:
+        other = doc.get("file_path") if isinstance(doc, dict) else None
+        if other and doc.get("loaded", True) and same_file(other, path):
+            return normalize_doc_path(other)
+    return None
+
+
 async def _focus(bridge, path: str) -> dict:
-    """Focus a document, opening it first if Altium has not loaded it."""
+    """Focus a document, opening it first if Altium has not loaded it.
+
+    The path is put in backslash form first, and a file Altium already has
+    open under another name is reused rather than opened a second time; see
+    bridge/docpaths.py for the phantom documents a forward-slash path made."""
+    path = normalize_doc_path(path)
     reply = await _send(bridge, "application.set_active_document", {"file_path": path})
     if _failed(reply) and "not loaded" in str(reply.get("error", "")).lower():
+        alias = await _open_alias(bridge, path)
+        if alias:
+            return await _send(bridge, "application.set_active_document", {"file_path": alias})
         await _send(bridge, "application.run_process", {
             "process_name": "WorkspaceManager:OpenObject",
             "parameters": f"ObjectKind=Document|FileName={path}"})
