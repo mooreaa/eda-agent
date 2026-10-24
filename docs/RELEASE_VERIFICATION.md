@@ -1,4 +1,4 @@
-# Release verification: 2026.10.23.1
+# Release verification: 2026.10.24.1
 
 Unless a section records live verification explicitly, the Pascal below has
 been checked by FPC and the linter but **not executed by Altium's DelphiScript engine**. The two are not the
@@ -106,6 +106,9 @@ works elsewhere cannot be an undeclared identifier:
 | 37, pin text | `Name_FontMode`, `Name_CustomFontID`, `Name_CustomColor`, `Designator_FontMode`, `Designator_CustomFontID`, `Designator_CustomColor` on a pin | no, nowhere | medium, read live; the writes are not run live |
 | 38, stack-up apply | `CopperThickness`, `DielectricHeight`, `DielectricConstant`, `DielectricType` on a board layer | yes, `PCB_ModifyLayer` | low, the same writes pcb_modify_layer makes, each read back |
 | 39, entry label font | `TextFontID` on a sheet entry and a harness entry | no, nowhere | highest, a new identifier on two interfaces, checked only against Altium.Sch.Interfaces.dll; step 39 item 2 stops at the first fault |
+| 40, display mode | `DisplayMode` written on a placed component | yes, `Library.pas`, on library symbols | high, new on a placed part, where the pins move and the wires do not; step 40 item 3 is the first live write |
+| 40, mode count | `DisplayModeCount` read on a component | no, nowhere | medium, read only, but a wrong member stops the loop; two public SchLib scripts read it |
+| 40, footprint pin map | `MapAsString` on a placed part's footprint implementation | no, nowhere | highest, a new identifier whose string format comes from the API reference alone; the write is read back and undone on a mismatch, and step 40 item 5 reads a hand-set map first |
 
 Steps 5 and 2 are the ones that justify a live session. The bottom rows
 write properties this codebase already exercises, so they are checking
@@ -281,7 +284,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.10.23.1`, `version_match` =
+Expect `altium_script_version` = `2026.10.24.1`, `version_match` =
 `true`, and `mcp_server_version` = `0.7.1`.
 
 Those are two different versions and they fail differently.
@@ -2358,6 +2361,100 @@ Not yet run live: the bridge was down on the test machine when the fixes
 were made. They are checked only by source-level tests
 (`tests/test_sch_fontid.py`, `tests/test_docpaths.py`) and the linter;
 FPC was not run.
+
+## 40. Display mode and footprint pin map on a placed part
+
+Two properties on eSchComponent, for the house style that draws every
+MOSFET on the generic NMOS symbol in its compact alternate (display mode 1)
+and maps G/D/S to numbered pads through the footprint model's pin map.
+Until now both had to be set by hand in Properties → Mode and the PCB Model
+dialog.
+
+* `DisplayMode`, read and written, and `DisplayModeCount`, read only.
+  `obj_modify object_type=eSchComponent filter=Designator.Text=Q1
+  set=DisplayMode=1`. The value must be 0 to `DisplayModeCount - 1`;
+  anything else is reported `failed` and nothing is written. The pins move
+  to the new mode's pin ends and the wires stay put, so a switched part
+  needs re-wiring, and the compiled netlist is stale until the sheet is
+  saved and reloaded.
+* `FootprintPinMap`, read and written: the pin map of the part's current
+  PCB footprint model. Altium's own form, `(G:1),(D:2),(S:3)`, or the PCB
+  Model dialog's, `G->1;D->2;S->3`, which the bridge rewrites into the
+  first. The old map is read first, and after the write the map is read
+  back; unless it holds exactly the entries asked for (order and spaces
+  aside), the old map is put back and the write is reported `failed`.
+  `FootprintPinMap=` clears the map. A part with no footprint model
+  reads `''` and refuses the write.
+
+Both are gated to eSchComponent in the reader, the writer and the
+preflight, so every other type answers `unreadable` / `unknown` instead of
+raising the undeclared-identifier modal that stops the loop. Typed
+`ISch_Component` and `ISch_Implementation` locals are the only access.
+
+The names were confirmed, not guessed:
+
+* the script engine's property table in `ScriptingSystem.dll` (the same
+  table is in `EditScript.dll`) declares `DisplayMode` (`GetState_DisplayMode`
+  / `SetState_DisplayMode`, type `TDisplayMode`), `DisplayModeCount`
+  (`GetState_DisplayModeCount` / `SetState_DisplayModeCount_Check`) and
+  `MapAsString` (`GetState_MapAsString` / `SetState_MapAsString`) on the
+  interfaces above;
+* `SCH.ISch_Component` and `SCH.ISch_Implementation` in
+  `Altium.SDK.Interfaces.dll`, reflected, carry the same accessors;
+* the Schematic API reference
+  (altium-dxp-developer/schematic-api-design-objects-interfaces-reference)
+  declares the three properties with those accessors, and gives the map
+  format as `(SchematicPinNumber:ModelPinNumber)`, e.g. `(1:1),(2:2)`;
+* public scripts read `Component.DisplayModeCount` (two SchLib utilities)
+  and `SchModel.MapAsString` (the Altium-Designer-addons OpenLib scripts),
+  and `Library.pas` already writes `Component.DisplayMode`.
+
+**The risk is the map's format.** Nothing seen so far shows a map read off
+an AD 25 part, and no format string for it is among `AdvSch.dll`'s
+strings, so the binary does not confirm the reference either. `Map_Import_FromUser`
+and `DefinerByInterfaceDesignator` are left alone: the first opens the
+dialog, and the second is an indexed property the bridge has never used.
+
+On a scratch sheet with one NMOS, Q1 (display modes 0 and 1), on a
+three-pad footprint, and for item 5 only, a part whose map was set by hand:
+
+1. **Names that would fault.** `obj_query object_type=eNetLabel
+   properties=Text,DisplayMode,DisplayModeCount,FootprintPinMap`: the three
+   empty and `unreadable`, and `app_ping` still answers. `obj_modify` on
+   the label with `DisplayMode=1`: `unknown`, nothing changed.
+2. **Mode read.** `obj_query object_type=eSchComponent
+   filter=Designator.Text=Q1 properties=DisplayMode,DisplayModeCount` reads
+   `0` and `2`. If it faults, the identifier is wrong: stop and record it.
+3. **Mode write.** `set=DisplayMode=1`: no `failed`, `DisplayMode` reads
+   `1`, the part redraws as the compact symbol with nothing left of the old
+   body, and `ePin` `ConnectionX,ConnectionY` give the mode-1 pin ends.
+   Save, close and reload: still mode 1. Set it back to 0.
+4. **Range.** `DisplayMode=2`, `DisplayMode=-1` and `DisplayMode=x`: each
+   `failed`, `DisplayMode` unchanged.
+5. **Map read, before any write.** `obj_query ...
+   properties=Designator.Text,FootprintPinMap` on a placed part whose map
+   was set by hand in the PCB Model dialog to G→1, D→2, S→3. Record the
+   exact string. If
+   it is not `(G:1),(D:2),(S:3)` up to order and spaces, the reference's
+   format is wrong for AD 25: stop, and change `PinMapAsAltium` to the
+   string read here before item 6.
+6. **Map write.** On Q1, `set=FootprintPinMap=G->1;D->2;S->3`: no
+   `failed`, the read-back is item 5's form, and the PCB Model dialog shows
+   the map. Save, close and reload: still mapped. Compile, and Update PCB's
+   ECO preview pairs G, D and S with pads 1, 2 and 3.
+7. **Refusals.** `FootprintPinMap=G->;D->2` and the same on a part with no
+   footprint model: `failed`, map unchanged. `FootprintPinMap=(G:9)` on the
+   three-pad footprint: record whether Altium takes it (the read-back
+   decides what is reported). `FootprintPinMap=`: record whether the map
+   clears.
+
+A relink or Update from Libraries replaces a placed part's models with the
+library's, map included, so a map set here on a placed part lasts until
+then; the durable fix for a wrong map is in the library symbol.
+
+Not yet run live: the bridge was in use by another session when the
+change was made. It is checked only by source-level tests
+(`tests/test_sch_display_mode.py`) and the linter; FPC was not run.
 
 ---
 

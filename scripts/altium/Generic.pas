@@ -393,7 +393,9 @@ Begin
                 Or ((PropName = 'TextColor') And (Not SchObjectHasTextColor(Obj)))
                 Or ((PropName = 'FontId') And (Not SchObjectHasFontId(Obj)))
                 Or ((PropName = 'TextFontId') And (Obj.ObjectId <> eSheetEntry)
-                    And (Obj.ObjectId <> eHarnessEntry)) Then
+                    And (Obj.ObjectId <> eHarnessEntry))
+                Or (((PropName = 'DisplayMode') Or (PropName = 'DisplayModeCount')
+                    Or (PropName = 'FootprintPinMap')) And (Obj.ObjectId <> eSchComponent)) Then
             Begin
                 Result := PropName;
                 Exit;
@@ -703,6 +705,213 @@ Begin
         Result := IntToStr(CoordToMils(Vtx.Y));
 End;
 
+{..............................................................................}
+{ The current PCBLIB implementation of a placed part, or the first one.        }
+{..............................................................................}
+Function CurrentFootprintImpl(Comp : ISch_Component) : ISch_Implementation;
+Var
+    ImplIter : ISch_Iterator;
+    Impl, FirstFp : ISch_Implementation;
+    MT : String;
+    IsCur : Boolean;
+Begin
+    Result := Nil;
+    FirstFp := Nil;
+    ImplIter := Comp.SchIterator_Create;
+    Try
+        ImplIter.AddFilter_ObjectSet(MkSet(eImplementation));
+        Impl := ImplIter.FirstSchObject;
+        While Impl <> Nil Do
+        Begin
+            MT := '';
+            Try MT := Impl.ModelType; Except End;
+            If UpperCase(MT) = 'PCBLIB' Then
+            Begin
+                If FirstFp = Nil Then FirstFp := Impl;
+                IsCur := False;
+                Try IsCur := Impl.IsCurrent; Except End;
+                If IsCur Then
+                Begin
+                    Result := Impl;
+                    Break;
+                End;
+            End;
+            Impl := ImplIter.NextSchObject;
+        End;
+    Finally
+        Comp.SchIterator_Destroy(ImplIter);
+    End;
+    If Result = Nil Then Result := FirstFp;
+End;
+
+{..............................................................................}
+{ Footprint pin maps (FootprintPinMap on eSchComponent).                       }
+{                                                                              }
+{ The map is ISch_Implementation.MapAsString: WideString, read                 }
+{ GetState_MapAsString, write SetState_MapAsString (the script engine's        }
+{ property table in ScriptingSystem.dll, Altium.SDK.Interfaces.dll and the     }
+{ Schematic API reference agree). The reference gives its format as            }
+{ '(SchematicPin:ModelPin)' entries, e.g. '(1:1),(2:2)'. That format has not   }
+{ been read off a live part yet, so a write is read back and the old map put   }
+{ back unless the read-back holds exactly the entries asked for.               }
+{..............................................................................}
+
+{ 'G->1;D->2;S->3', the way the PCB Model dialog reads, as Altium's
+  '(G:1),(D:2),(S:3)'. A value without '->' is passed through as given.
+  '' when an arrow entry has no pin on either side. }
+Function PinMapAsAltium(Value : String) : String;
+Var
+    Remaining, Entry : String;
+    SepPos, ArrowPos : Integer;
+Begin
+    Result := Trim(Value);
+    If Pos('->', Result) = 0 Then Exit;
+    Remaining := Result;
+    Result := '';
+    While Remaining <> '' Do
+    Begin
+        SepPos := Pos(';', Remaining);
+        If SepPos > 0 Then
+        Begin
+            Entry := Trim(Copy(Remaining, 1, SepPos - 1));
+            Remaining := Copy(Remaining, SepPos + 1, Length(Remaining));
+        End
+        Else
+        Begin
+            Entry := Trim(Remaining);
+            Remaining := '';
+        End;
+        If Entry = '' Then Continue;
+        ArrowPos := Pos('->', Entry);
+        If (ArrowPos < 2) Or (ArrowPos + 1 >= Length(Entry)) Then
+        Begin
+            Result := '';
+            Exit;
+        End;
+        If Result <> '' Then Result := Result + ',';
+        Result := Result + '(' + Trim(Copy(Entry, 1, ArrowPos - 1)) + ':'
+            + Trim(Copy(Entry, ArrowPos + 2, Length(Entry))) + ')';
+    End;
+End;
+
+{ A pin map's entries as ';(G:1);(D:2);', spaces dropped, so two maps can
+  be compared without regard to order or spacing. A map with no
+  parenthesised entries keys as its whole text; an empty one as ';'. }
+Function PinMapKey(Map : String) : String;
+Var
+    I, Depth : Integer;
+    Ch, Entry, Bare : String;
+Begin
+    Result := ';';
+    Bare := '';
+    Entry := '';
+    Depth := 0;
+    { DelphiScript quirk (see ClassifyPassivePrefix): index a string with
+      a 1-char Copy rather than S[I], which is not a Char here. }
+    For I := 1 To Length(Map) Do
+    Begin
+        Ch := Copy(Map, I, 1);
+        If Ch <> ' ' Then
+        Begin
+            Bare := Bare + Ch;
+            If Ch = '(' Then
+            Begin
+                Depth := 1;
+                Entry := '';
+            End;
+            If Depth > 0 Then Entry := Entry + Ch;
+            If (Ch = ')') And (Depth > 0) Then
+            Begin
+                Depth := 0;
+                Result := Result + Entry + ';';
+            End;
+        End;
+    End;
+    If (Result = ';') And (Bare <> '') Then Result := ';' + Bare + ';';
+End;
+
+{ Is every entry of pin-map key KeyA also in KeyB? }
+Function PinMapKeyWithin(KeyA : String; KeyB : String) : Boolean;
+Var
+    Rest, Entry : String;
+    SepPos : Integer;
+Begin
+    Result := True;
+    Rest := Copy(KeyA, 2, Length(KeyA));
+    While Rest <> '' Do
+    Begin
+        SepPos := Pos(';', Rest);
+        If SepPos = 0 Then Break;
+        Entry := Copy(Rest, 1, SepPos - 1);
+        Rest := Copy(Rest, SepPos + 1, Length(Rest));
+        If Pos(';' + Entry + ';', KeyB) = 0 Then
+        Begin
+            Result := False;
+            Exit;
+        End;
+    End;
+End;
+
+{ Do two pin maps hold the same entries, each way round? }
+Function SamePinMap(A : String; B : String) : Boolean;
+Var
+    KeyA, KeyB : String;
+Begin
+    KeyA := PinMapKey(A);
+    KeyB := PinMapKey(B);
+    Result := PinMapKeyWithin(KeyA, KeyB) And PinMapKeyWithin(KeyB, KeyA);
+End;
+
+{ A placed part's footprint pin map, '' when it has no footprint model. }
+Function ReadPlacedPinMap(Comp : ISch_Component) : String;
+Var
+    Impl : ISch_Implementation;
+Begin
+    Result := '';
+    Impl := CurrentFootprintImpl(Comp);
+    If Impl = Nil Then Exit;
+    Try Result := Impl.MapAsString; Except Result := ''; End;
+End;
+
+{ Set a placed part's footprint pin map. False, with the part as it was,
+  when the value is malformed, the part has no footprint model, the old
+  map cannot be read (it could not be put back), or the read-back does
+  not hold the entries asked for. '' clears the map. }
+Function WritePlacedPinMap(Comp : ISch_Component; Value : String) : Boolean;
+Var
+    Impl : ISch_Implementation;
+    Wanted, Old, Back : String;
+    HaveOld : Boolean;
+Begin
+    Result := False;
+    Wanted := PinMapAsAltium(Value);
+    If (Wanted = '') And (Trim(Value) <> '') Then Exit;
+    Impl := CurrentFootprintImpl(Comp);
+    If Impl = Nil Then Exit;
+    Old := '';
+    HaveOld := False;
+    Try
+        Old := Impl.MapAsString;
+        HaveOld := True;
+    Except
+        HaveOld := False;
+    End;
+    If Not HaveOld Then Exit;
+
+    SchBeginModify(Impl);
+    Try Impl.MapAsString := Wanted; Except End;
+    SchEndModify(Impl);
+    Back := '';
+    Try Back := Impl.MapAsString; Except Back := Old; End;
+    Result := SamePinMap(Back, Wanted);
+    If Not Result Then
+    Begin
+        SchBeginModify(Impl);
+        Try Impl.MapAsString := Old; Except End;
+        SchEndModify(Impl);
+    End;
+End;
+
 Function GetSchProperty(Obj : ISch_GraphicalObject; PropName : String) : String;
 Var
     R : ISch_Rectangle;
@@ -858,6 +1067,40 @@ Begin
         Begin
             Comp := Obj;
             Try Result := IntToStr(Comp.PartCount); Except Result := ''; End;
+        End
+        { Which of a component's symbols is drawn (0 = Normal, 1 = the first
+          alternate) and how many it has. ISch_Component only: DisplayMode
+          is TDisplayMode (a Byte), read GetState_DisplayMode, write
+          SetState_DisplayMode; DisplayModeCount is read
+          GetState_DisplayModeCount (ScriptingSystem.dll's property table,
+          Altium.SDK.Interfaces.dll, the Schematic API reference). On any
+          other type the name is an undeclared identifier, a modal that
+          Try/Except cannot contain, so the type is checked first and the
+          typed local is the only access. }
+        Else If (PropName = 'DisplayMode') Or (PropName = 'DisplayModeCount') Then
+        Begin
+            If Obj.ObjectId = eSchComponent Then
+            Begin
+                Comp := Obj;
+                If PropName = 'DisplayMode' Then
+                    Result := IntToStr(Comp.DisplayMode)
+                Else
+                    Result := IntToStr(Comp.DisplayModeCount);
+            End
+            Else
+                NotePropertyDiag('unreadable', PropName);
+        End
+        { The current footprint model's pin map, Altium's MapAsString. '' on
+          a part with no footprint model, and on a map with no entries. }
+        Else If PropName = 'FootprintPinMap' Then
+        Begin
+            If Obj.ObjectId = eSchComponent Then
+            Begin
+                Comp := Obj;
+                Result := ReadPlacedPinMap(Comp);
+            End
+            Else
+                NotePropertyDiag('unreadable', PropName);
         End
 
         // Sub-object string properties (compound interfaces, typed cast required).
@@ -1105,6 +1348,7 @@ Var
     PortObj : ISch_Port;
     EntryObj : ISch_SheetEntry;
     HarnessEntryObj : ISch_HarnessEntry;
+    ModeCount, NewMode : Integer;
     Matched : Boolean;
     { Separate from Matched on purpose. Matched says the property NAME is
       one this build writes; WroteOK says the value actually landed, read
@@ -1270,6 +1514,45 @@ Begin
               identifiers raise a modal that bypasses Try/Except. }
             Comp := Obj;
             Try Comp.PartCount := StrToIntDef(Value, 1); Except End;
+        End
+        { Switch a component to another of its symbols. ISch_Component only
+          (see GetSchProperty). The mode must be one the part has, 0 to
+          DisplayModeCount - 1; anything else is refused unwritten, as a
+          failed write. Pins move with the mode and wires do not, so a part
+          switched on a sheet needs re-wiring to its new pin ends.
+          DisplayModeCount is not written: a placed part's modes come from
+          its library symbol. }
+        Else If PropName = 'DisplayMode' Then
+        Begin
+            If Obj.ObjectId = eSchComponent Then
+            Begin
+                Comp := Obj;
+                ModeCount := Comp.DisplayModeCount;
+                If ModeCount < 1 Then ModeCount := 1;
+                NewMode := StrToIntDef(Trim(Value), -1);
+                If (NewMode < 0) Or (NewMode >= ModeCount) Then
+                    WroteOK := False
+                Else
+                Begin
+                    Comp.DisplayMode := NewMode;
+                    WroteOK := (Comp.DisplayMode = NewMode);
+                End;
+            End
+            Else
+                Matched := False;
+        End
+        { The current footprint model's pin map: '(G:1),(D:2),(S:3)' or
+          'G->1;D->2;S->3'. Read back, and the old map restored, by
+          WritePlacedPinMap. }
+        Else If PropName = 'FootprintPinMap' Then
+        Begin
+            If Obj.ObjectId = eSchComponent Then
+            Begin
+                Comp := Obj;
+                WroteOK := WritePlacedPinMap(Comp, Value);
+            End
+            Else
+                Matched := False;
         End
 
         // Sub-object string properties (compound interfaces, typed cast required)
@@ -12479,44 +12762,8 @@ Begin
         ',"synced_design_item_id":' + IntToStr(Synced) + '}');
 End;
 
-{..............................................................................}
-{ The current PCBLIB implementation of a placed part, or the first one.        }
-{..............................................................................}
-Function CurrentFootprintImpl(Comp : ISch_Component) : ISch_Implementation;
-Var
-    ImplIter : ISch_Iterator;
-    Impl, FirstFp : ISch_Implementation;
-    MT : String;
-    IsCur : Boolean;
-Begin
-    Result := Nil;
-    FirstFp := Nil;
-    ImplIter := Comp.SchIterator_Create;
-    Try
-        ImplIter.AddFilter_ObjectSet(MkSet(eImplementation));
-        Impl := ImplIter.FirstSchObject;
-        While Impl <> Nil Do
-        Begin
-            MT := '';
-            Try MT := Impl.ModelType; Except End;
-            If UpperCase(MT) = 'PCBLIB' Then
-            Begin
-                If FirstFp = Nil Then FirstFp := Impl;
-                IsCur := False;
-                Try IsCur := Impl.IsCurrent; Except End;
-                If IsCur Then
-                Begin
-                    Result := Impl;
-                    Break;
-                End;
-            End;
-            Impl := ImplIter.NextSchObject;
-        End;
-    Finally
-        Comp.SchIterator_Destroy(ImplIter);
-    End;
-    If Result = Nil Then Result := FirstFp;
-End;
+{ CurrentFootprintImpl, the current PCBLIB implementation of a placed part, }
+{ is defined above GetSchProperty, which reads FootprintPinMap through it.  }
 
 { Give a placed part with no footprint model one, the way                }
 { Lib_LinkFootprint does on a symbol: AddSchImplementation, PCBLIB,      }

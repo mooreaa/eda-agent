@@ -287,7 +287,11 @@ def register_generic_tools(mcp):
                 "Designator.Text,Comment.Text,LibReference" for
                 components. A managed component also reads
                 "LibraryIdentifier,DesignItemId,ItemGUID,RevisionGUID"
-                and the other Vault/Symbol GUIDs.
+                and the other Vault/Symbol GUIDs. "DisplayMode" and
+                "DisplayModeCount" say which of a component's symbols is
+                drawn (0 = Normal, 1 = the first alternate), and
+                "FootprintPinMap" is its current footprint model's pin
+                map, e.g. "(G:1),(D:2),(S:3)"; obj_modify writes both.
 
                 PCB PRIMITIVES ARE FLAT, NOT DOTTED: a track's net is
                 "Net", never "Net.Name". "Net,Layer,Width" for tracks;
@@ -456,6 +460,13 @@ def register_generic_tools(mcp):
         Example - edit a pin on any part of a multi-part SchLib symbol:
             obj_modify(object_type="ePin", scope="lib_component:R_0402",
                        filter="Designator=1", set="Name=A")
+        Example - draw a MOSFET as its compact alternate symbol and map
+        its G/D/S pins to pads 1-3. DisplayMode must be below the part's
+        DisplayModeCount; its pins move and wires do not, so re-wire it.
+        A pin map that does not read back is undone and reported failed:
+            obj_modify(object_type="eSchComponent",
+                       filter="Designator.Text=M201",
+                       set="DisplayMode=1|FootprintPinMap=G->1;D->2;S->3")
         """
         bad = filter_problem(filter)
         if bad:

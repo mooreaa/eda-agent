@@ -127,8 +127,12 @@ is `Designator.Text` (e.g. `'U?'`). **`NameOn : Boolean`** toggles its visibilit
 **`CurrentPartID : Integer`**: the active part of a multi-part symbol; **set to 1
 before adding any primitive** so the primitive's owner-part binding resolves. A
 primitive added while this is 0 reports success but lands on an invisible bucket.
-**`DisplayMode : Integer`**: the display mode (0 = normal); set alongside
-`CurrentPartID`.
+**`DisplayMode : TDisplayMode`** (a byte): the display mode (0 = normal, 1 =
+the first alternate); set alongside `CurrentPartID`. On a placed part it picks
+which symbol is drawn, and the pins move with it.
+**`DisplayModeCount : Integer`**: how many display modes the symbol has, so the
+valid modes are 0 to `DisplayModeCount - 1`. Read it; a placed part's modes come
+from its library symbol.
 **`PartCount : Integer`**: the number of sub-parts (quad op-amp = 4); set
 **before** adding pins so each pin can address a real sub-part.
 
@@ -340,4 +344,8 @@ Comp.AddSchObject(Impl);
 backs the model).
 **`UseComponentLibrary : Boolean`**: whether the model is resolved from the
 component's own library.
+**`MapAsString : WideString`**: the model's pin map, schematic pin to model pin,
+documented as `(SchematicPin:ModelPin)` entries such as `(G:1),(D:2),(S:3)`.
+`Map_Import_FromUser` edits the same map through the dialog, so scripts write
+the string instead.
 **`LibraryIdentifier : String`**: the library the model is resolved from.
