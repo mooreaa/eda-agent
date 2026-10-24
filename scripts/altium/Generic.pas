@@ -8951,9 +8951,238 @@ Begin
 End;
 
 {..............................................................................}
-{ SetPlacedFootprintName - point a placed component's footprint model at        }
-{ another footprint, and say what it reads afterwards.                          }
+{ Choosing a placed part's footprint among the models its symbol carries.     }
+{                                                                              }
+{ A symbol can carry many PCBLIB models (the generic NMOS in Mosfet.SchLib    }
+{ has twenty), and LoadComponentFromLibrary keeps the one the library marks   }
+{ current. A named footprint is looked up by ModelName among the part's       }
+{ PCBLIB models, first match ignoring case, and made the ONLY current one:    }
+{ IsCurrent False on every other PCBLIB model, then True on it, then every    }
+{ flag read back. FootprintPinMap and the other readers go through            }
+{ CurrentFootprintImpl, which takes the first current model it meets, so a   }
+{ second current one would leave the answer to iteration order. Clearing     }
+{ first ends the same way whether or not Altium's setter clears the siblings  }
+{ itself. Other model types (SIM and the rest) keep their own current model   }
+{ and are not touched.                                                         }
+{                                                                              }
+{ IsCurrent (GetState_IsCurrent / SetState_IsCurrent) is in the script        }
+{ engine's property table in ScriptingSystem.dll, next to MapAsString, and on }
+{ SCH.ISch_Implementation in Altium.SDK.Interfaces.dll; Library.pas writes it }
+{ both ways on library symbols, AddPlacedFootprintModel True on placed parts. }
+{..............................................................................}
+
+{ The index, among a part's PCBLIB models in iteration order, of the first
+  one named Name (ignoring case), or -1. Names gets every PCBLIB model's
+  name, comma separated, for the reply when nothing matches. }
+Function FootprintModelIndex(Comp : ISch_Component; Name : String; Var Names : String) : Integer;
+Var
+    ImplIter : ISch_Iterator;
+    Impl : ISch_Implementation;
+    MT, MN : String;
+    K : Integer;
+Begin
+    Result := -1;
+    Names := '';
+    K := 0;
+    ImplIter := Comp.SchIterator_Create;
+    Try
+        ImplIter.AddFilter_ObjectSet(MkSet(eImplementation));
+        Impl := ImplIter.FirstSchObject;
+        While Impl <> Nil Do
+        Begin
+            MT := '';
+            Try MT := Impl.ModelType; Except End;
+            If UpperCase(MT) = 'PCBLIB' Then
+            Begin
+                MN := '';
+                Try MN := Impl.ModelName; Except End;
+                If Names <> '' Then Names := Names + ', ';
+                Names := Names + MN;
+                If Result < 0 Then
+                    If SameText(Trim(MN), Trim(Name)) Then Result := K;
+                Inc(K);
+            End;
+            Impl := ImplIter.NextSchObject;
+        End;
+    Finally
+        Comp.SchIterator_Destroy(ImplIter);
+    End;
+End;
+
+{ Make the part's PCBLIB model at ModelIdx the only current one. Pass 0 clears
+  the others, pass 1 sets it, pass 2 reads every flag back: True only when
+  it is current and no other PCBLIB model is. }
+Function MakeFootprintModelCurrent(Comp : ISch_Component; ModelIdx : Integer) : Boolean;
+Var
+    ImplIter : ISch_Iterator;
+    Impl : ISch_Implementation;
+    MT : String;
+    K, Pass, Currents : Integer;
+    IsCur, TargetCur : Boolean;
+Begin
+    Result := False;
+    If ModelIdx < 0 Then Exit;
+    Currents := 0;
+    TargetCur := False;
+    For Pass := 0 To 2 Do
+    Begin
+        K := 0;
+        ImplIter := Comp.SchIterator_Create;
+        Try
+            ImplIter.AddFilter_ObjectSet(MkSet(eImplementation));
+            Impl := ImplIter.FirstSchObject;
+            While Impl <> Nil Do
+            Begin
+                MT := '';
+                Try MT := Impl.ModelType; Except End;
+                If UpperCase(MT) = 'PCBLIB' Then
+                Begin
+                    If (Pass = 0) And (K <> ModelIdx) Then
+                    Begin
+                        SchBeginModify(Impl);
+                        Try Impl.IsCurrent := False; Except End;
+                        SchEndModify(Impl);
+                    End
+                    Else If (Pass = 1) And (K = ModelIdx) Then
+                    Begin
+                        SchBeginModify(Impl);
+                        Try Impl.IsCurrent := True; Except End;
+                        SchEndModify(Impl);
+                    End
+                    Else If Pass = 2 Then
+                    Begin
+                        IsCur := False;
+                        Try IsCur := Impl.IsCurrent; Except End;
+                        If IsCur Then Inc(Currents);
+                        If IsCur And (K = ModelIdx) Then TargetCur := True;
+                    End;
+                    Inc(K);
+                End;
+                Impl := ImplIter.NextSchObject;
+            End;
+        Finally
+            Comp.SchIterator_Destroy(ImplIter);
+        End;
+    End;
+    Result := TargetCur And (Currents = 1);
+End;
+
+{ Make the PCBLIB model named Name a placed part's only current footprint.
+  False when the part has no model of that name, or the flags or the
+  current model's name do not read back as asked. }
+Function SelectPlacedFootprint(Comp : ISch_Component; Name : String) : Boolean;
+Var
+    Impl : ISch_Implementation;
+    Names, Back : String;
+    ModelIdx : Integer;
+Begin
+    ModelIdx := FootprintModelIndex(Comp, Name, Names);
+    Result := MakeFootprintModelCurrent(Comp, ModelIdx);
+    If Not Result Then Exit;
+    Back := '';
+    Impl := CurrentFootprintImpl(Comp);
+    If Impl <> Nil Then
+    Begin
+        Try Back := Impl.ModelName; Except End;
+    End;
+    Result := SameText(Trim(Back), Trim(Name));
+End;
+
+{ A part's PCBLIB models' IsCurrent flags in iteration order, one character
+  each, '1' current and '0' not: '10000' for five models, the first current. }
+Function FootprintCurrentFlags(Comp : ISch_Component) : String;
+Var
+    ImplIter : ISch_Iterator;
+    Impl : ISch_Implementation;
+    MT : String;
+    IsCur : Boolean;
+Begin
+    Result := '';
+    ImplIter := Comp.SchIterator_Create;
+    Try
+        ImplIter.AddFilter_ObjectSet(MkSet(eImplementation));
+        Impl := ImplIter.FirstSchObject;
+        While Impl <> Nil Do
+        Begin
+            MT := '';
+            Try MT := Impl.ModelType; Except End;
+            If UpperCase(MT) = 'PCBLIB' Then
+            Begin
+                IsCur := False;
+                Try IsCur := Impl.IsCurrent; Except End;
+                If IsCur Then Result := Result + '1' Else Result := Result + '0';
+            End;
+            Impl := ImplIter.NextSchObject;
+        End;
+    Finally
+        Comp.SchIterator_Destroy(ImplIter);
+    End;
+End;
+
+{ Put back flags FootprintCurrentFlags read: the cleared ones first, then the
+  current ones, the same order MakeFootprintModelCurrent writes in. Best
+  effort: a setter that refused the choice may refuse this too, which is why
+  the caller reports the choice failed either way. }
+Procedure RestoreFootprintCurrentFlags(Comp : ISch_Component; Flags : String);
+Var
+    ImplIter : ISch_Iterator;
+    Impl : ISch_Implementation;
+    MT, Want : String;
+    K, Pass : Integer;
+Begin
+    For Pass := 0 To 1 Do
+    Begin
+        K := 0;
+        ImplIter := Comp.SchIterator_Create;
+        Try
+            ImplIter.AddFilter_ObjectSet(MkSet(eImplementation));
+            Impl := ImplIter.FirstSchObject;
+            While Impl <> Nil Do
+            Begin
+                MT := '';
+                Try MT := Impl.ModelType; Except End;
+                If UpperCase(MT) = 'PCBLIB' Then
+                Begin
+                    { DelphiScript quirk (see ClassifyPassivePrefix): a 1-char
+                      Copy, not Flags[K + 1]. }
+                    Want := Copy(Flags, K + 1, 1);
+                    If (Pass = 0) And (Want = '0') Then
+                    Begin
+                        SchBeginModify(Impl);
+                        Try Impl.IsCurrent := False; Except End;
+                        SchEndModify(Impl);
+                    End
+                    Else If (Pass = 1) And (Want = '1') Then
+                    Begin
+                        SchBeginModify(Impl);
+                        Try Impl.IsCurrent := True; Except End;
+                        SchEndModify(Impl);
+                    End;
+                    Inc(K);
+                End;
+                Impl := ImplIter.NextSchObject;
+            End;
+        Finally
+            Comp.SchIterator_Destroy(ImplIter);
+        End;
+    End;
+End;
+
+{..............................................................................}
+{ SetPlacedFootprintName - put a placed component on another footprint, and    }
+{ say what its current footprint model reads before and after.                }
 {                                                                               }
+{ A MODEL OF THAT NAME ALREADY ON THE PART IS CHOSEN, NOT RENAMED INTO.        }
+{ This used to rename the current model whatever the part carried, so on the  }
+{ generic NMOS a Footprint of PowerPAK SC-70 (S) turned LFPAK33-8's model,    }
+{ its library link and its pin map (D->3, G->2, S->1) included, into a second }
+{ "PowerPAK SC-70 (S)" beside the real one (2026-10-24). Now the existing     }
+{ model, found by name ignoring case, becomes the only current one            }
+{ (SelectPlacedFootprint), with its own link and map. A choice that does not  }
+{ read back puts the flags back as they were and is reported, never followed  }
+{ by a rename.                                                                 }
+{                                                                               }
+{ Only when the part has no model of that name is the current one renamed.   }
 { CurrentFootprintModelName is read-only (assigning it is an undeclared         }
 { identifier the loop cannot survive), so the write goes to the footprint       }
 { ISch_Implementation's ModelName, and each of its datafile links gets the new  }
@@ -8970,13 +9199,32 @@ Var
     ImplIter : ISch_Iterator;
     Impl, Target, FirstFp : ISch_Implementation;
     Link : ISch_ModelDatafileLink;
-    MT : String;
+    MT, Names, OldFlags : String;
     IsCur : Boolean;
     J, LinkCount : Integer;
 Begin
     Result := False;
     Before := '';
     After := '';
+
+    If FootprintModelIndex(Comp, NewName, Names) >= 0 Then
+    Begin
+        Impl := CurrentFootprintImpl(Comp);
+        If Impl <> Nil Then
+        Begin
+            Try Before := Impl.ModelName; Except End;
+        End;
+        OldFlags := FootprintCurrentFlags(Comp);
+        Result := SelectPlacedFootprint(Comp, NewName);
+        If Not Result Then RestoreFootprintCurrentFlags(Comp, OldFlags);
+        Impl := CurrentFootprintImpl(Comp);
+        If Impl <> Nil Then
+        Begin
+            Try After := Impl.ModelName; Except End;
+        End;
+        Exit;
+    End;
+
     Target := Nil;
     FirstFp := Nil;
     ImplIter := Comp.SchIterator_Create;
@@ -9031,8 +9279,9 @@ End;
 {                                                                                }
 { For each (name, value) entry in parameters:                                    }
 {   - "Value" writes to Comp.Comment.Text (convention: Comment field IS Value). }
-{   - "Footprint" repoints the footprint model (SetPlacedFootprintName) and     }
-{     counts only when the model reads back the new name.                       }
+{   - "Footprint" chooses the part's model of that name, or repoints the      }
+{     current one when it has none (SetPlacedFootprintName), and counts only   }
+{     when that reads back.                                                     }
 {   - everything else is a regular ISch_Parameter on the component, modified    }
 {     in place if present, created via SchObjectFactory(eParameter) otherwise.  }
 {                                                                                }
@@ -9051,6 +9300,7 @@ Var
     P, Applied, Created : Integer;
     SrvDoc : IServerDocument;
     FpBefore, FpAfter, FpJson : String;
+    FpOk : Boolean;
 Begin
     DesigStr := ExtractJsonValue(Params, 'designator');
     SheetPath := ExtractJsonValue(Params, 'sheet_path');
@@ -9149,13 +9399,19 @@ Begin
             Else If Key = 'Footprint' Then
             Begin
                 { Counted only when the model reads back the new name. This
-                  used to count as applied and write nothing. }
+                  used to count as applied and write nothing. The helper's
+                  own verdict decides: a model chosen by name reads back in
+                  its own case, which need not be the caller's. }
+                FpOk := False;
                 If SetPlacedFootprintName(TargetComp, Val, FpBefore, FpAfter) Then
+                Begin
+                    FpOk := True;
                     Inc(Applied);
+                End;
                 FpJson := ',"footprint":{"requested":"' + EscapeJsonString(Val)
                     + '","before":"' + EscapeJsonString(FpBefore)
                     + '","after":"' + EscapeJsonString(FpAfter)
-                    + '","applied":' + BoolToJsonStr(FpAfter = Val) + '}';
+                    + '","applied":' + BoolToJsonStr(FpOk) + '}';
             End
             Else
             Begin
@@ -10053,144 +10309,6 @@ Begin
         Try Comp.Designator.Text := Desig; Except End;
     End;
     SchRegisterObject(SchDoc, Comp);
-End;
-
-{..............................................................................}
-{ Choosing a placed part's footprint among the models its symbol carries.     }
-{                                                                              }
-{ A symbol can carry many PCBLIB models (the generic NMOS in Mosfet.SchLib    }
-{ has twenty), and LoadComponentFromLibrary keeps the one the library marks   }
-{ current. A named footprint is looked up by ModelName among the part's       }
-{ PCBLIB models, first match ignoring case, and made the ONLY current one:    }
-{ IsCurrent False on every other PCBLIB model, then True on it, then every    }
-{ flag read back. FootprintPinMap and the other readers go through            }
-{ CurrentFootprintImpl, which takes the first current model it meets, so a   }
-{ second current one would leave the answer to iteration order. Clearing     }
-{ first ends the same way whether or not Altium's setter clears the siblings  }
-{ itself. Other model types (SIM and the rest) keep their own current model   }
-{ and are not touched.                                                         }
-{                                                                              }
-{ IsCurrent (GetState_IsCurrent / SetState_IsCurrent) is in the script        }
-{ engine's property table in ScriptingSystem.dll, next to MapAsString, and on }
-{ SCH.ISch_Implementation in Altium.SDK.Interfaces.dll; Library.pas writes it }
-{ both ways on library symbols, AddPlacedFootprintModel True on placed parts. }
-{..............................................................................}
-
-{ The index, among a part's PCBLIB models in iteration order, of the first
-  one named Name (ignoring case), or -1. Names gets every PCBLIB model's
-  name, comma separated, for the reply when nothing matches. }
-Function FootprintModelIndex(Comp : ISch_Component; Name : String; Var Names : String) : Integer;
-Var
-    ImplIter : ISch_Iterator;
-    Impl : ISch_Implementation;
-    MT, MN : String;
-    K : Integer;
-Begin
-    Result := -1;
-    Names := '';
-    K := 0;
-    ImplIter := Comp.SchIterator_Create;
-    Try
-        ImplIter.AddFilter_ObjectSet(MkSet(eImplementation));
-        Impl := ImplIter.FirstSchObject;
-        While Impl <> Nil Do
-        Begin
-            MT := '';
-            Try MT := Impl.ModelType; Except End;
-            If UpperCase(MT) = 'PCBLIB' Then
-            Begin
-                MN := '';
-                Try MN := Impl.ModelName; Except End;
-                If Names <> '' Then Names := Names + ', ';
-                Names := Names + MN;
-                If Result < 0 Then
-                    If SameText(Trim(MN), Trim(Name)) Then Result := K;
-                Inc(K);
-            End;
-            Impl := ImplIter.NextSchObject;
-        End;
-    Finally
-        Comp.SchIterator_Destroy(ImplIter);
-    End;
-End;
-
-{ Make the part's PCBLIB model at ModelIdx the only current one. Pass 0 clears
-  the others, pass 1 sets it, pass 2 reads every flag back: True only when
-  it is current and no other PCBLIB model is. }
-Function MakeFootprintModelCurrent(Comp : ISch_Component; ModelIdx : Integer) : Boolean;
-Var
-    ImplIter : ISch_Iterator;
-    Impl : ISch_Implementation;
-    MT : String;
-    K, Pass, Currents : Integer;
-    IsCur, TargetCur : Boolean;
-Begin
-    Result := False;
-    If ModelIdx < 0 Then Exit;
-    Currents := 0;
-    TargetCur := False;
-    For Pass := 0 To 2 Do
-    Begin
-        K := 0;
-        ImplIter := Comp.SchIterator_Create;
-        Try
-            ImplIter.AddFilter_ObjectSet(MkSet(eImplementation));
-            Impl := ImplIter.FirstSchObject;
-            While Impl <> Nil Do
-            Begin
-                MT := '';
-                Try MT := Impl.ModelType; Except End;
-                If UpperCase(MT) = 'PCBLIB' Then
-                Begin
-                    If (Pass = 0) And (K <> ModelIdx) Then
-                    Begin
-                        SchBeginModify(Impl);
-                        Try Impl.IsCurrent := False; Except End;
-                        SchEndModify(Impl);
-                    End
-                    Else If (Pass = 1) And (K = ModelIdx) Then
-                    Begin
-                        SchBeginModify(Impl);
-                        Try Impl.IsCurrent := True; Except End;
-                        SchEndModify(Impl);
-                    End
-                    Else If Pass = 2 Then
-                    Begin
-                        IsCur := False;
-                        Try IsCur := Impl.IsCurrent; Except End;
-                        If IsCur Then Inc(Currents);
-                        If IsCur And (K = ModelIdx) Then TargetCur := True;
-                    End;
-                    Inc(K);
-                End;
-                Impl := ImplIter.NextSchObject;
-            End;
-        Finally
-            Comp.SchIterator_Destroy(ImplIter);
-        End;
-    End;
-    Result := TargetCur And (Currents = 1);
-End;
-
-{ Make the PCBLIB model named Name a placed part's only current footprint.
-  False when the part has no model of that name, or the flags or the
-  current model's name do not read back as asked. }
-Function SelectPlacedFootprint(Comp : ISch_Component; Name : String) : Boolean;
-Var
-    Impl : ISch_Implementation;
-    Names, Back : String;
-    ModelIdx : Integer;
-Begin
-    ModelIdx := FootprintModelIndex(Comp, Name, Names);
-    Result := MakeFootprintModelCurrent(Comp, ModelIdx);
-    If Not Result Then Exit;
-    Back := '';
-    Impl := CurrentFootprintImpl(Comp);
-    If Impl <> Nil Then
-    Begin
-        Try Back := Impl.ModelName; Except End;
-    End;
-    Result := SameText(Trim(Back), Trim(Name));
 End;
 
 {..............................................................................}

@@ -916,10 +916,12 @@ def register_generic_tools(mcp):
         Returns:
             ``{updated, failed, total}``; ``failed`` counts stamps that
             could not be applied (designator not found and the like).
-            A ``Footprint`` key repoints the part's footprint model;
-            ``footprints_applied`` counts the ones that read back the
-            new name and ``footprints_not_applied`` lists designators
-            whose part has no footprint model or did not take it.
+            A ``Footprint`` key chooses the part's own footprint model of
+            that name (case aside) as its only current one; only a part
+            with no model of that name has its current one renamed.
+            ``footprints_applied`` counts the ones that read back and
+            ``footprints_not_applied`` lists designators whose part has
+            no footprint model or did not take it.
         """
         # Encode the list-of-dicts into the Pascal handler's expected
         # wire format: stamps separated by `~~`, fields within a stamp
@@ -2059,7 +2061,8 @@ def register_generic_tools(mcp):
         The kind follows ``library_path``: a .SchLib or .IntLib links the
         symbol (``lib_ref``) from that file; a .DbLib links a database row
         (``dblib_table`` and ``dblib_key``, the row's key). ``footprint``
-        and ``footprint_library`` repoint the current footprint model.
+        chooses the part's own model of that name, or renames the current
+        one when it has none; ``footprint_library`` then repoints it.
         Only the link changes: the symbol drawn on the sheet stays until
         Altium updates from the library (``app_update_from_libraries``);
         ``proj_replace_component`` swaps the symbol itself.
@@ -2078,7 +2081,7 @@ def register_generic_tools(mcp):
             lib_ref: the symbol name in that library.
             dblib_table: DbLib table.
             dblib_key: the row's key, which becomes the Design Item ID.
-            footprint: footprint name for the current footprint model.
+            footprint: footprint model to make current (see above).
             footprint_library: .PcbLib the footprint model points at.
             sheet_path: open .SchDoc; empty = the focused sheet.
             all_sheets: every open schematic of the focused project.

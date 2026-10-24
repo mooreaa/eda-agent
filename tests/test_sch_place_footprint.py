@@ -22,9 +22,18 @@ property table in ScriptingSystem.dll next to MapAsString, and on
 SCH.ISch_Implementation in Altium.SDK.Interfaces.dll; Library.pas already
 writes it both ways.
 
-The selection is also run: a line-for-line Python mirror of the three
-helpers against implementations whose setter behaves in each way Altium's
-might, since which of those it is has not been measured.
+The same defect had a second form on a part already placed. The
+``Footprint`` key of sch_set_components_parameters (both handlers) and
+sch_relink_components' ``footprint`` go through SetPlacedFootprintName,
+which RENAMED the current model whatever the part carried. On the NMOS that
+turned LFPAK33-8's model, library link and pin map included, into a second
+"PowerPAK SC-70 (S)" beside the real one. It now chooses a model of that
+name when the part has one, puts the flags back if the choice does not
+read back, and renames only when there is none.
+
+The selection is also run: a line-for-line Python mirror of the helpers
+against implementations whose setter behaves in each way Altium's might,
+since which of those it is has not been measured.
 """
 from __future__ import annotations
 
@@ -120,11 +129,54 @@ def _assert_select(code):
               "Result := SameText(Trim(Back), Trim(Name));")
 
 
+def _assert_choose_before_rename(code):
+    body = _routine(code, "SetPlacedFootprintName")
+    _in_order(body,
+              "If FootprintModelIndex(Comp, NewName, Names) >= 0 Then",
+              "Try Before := Impl.ModelName; Except End;",
+              "OldFlags := FootprintCurrentFlags(Comp);",
+              "Result := SelectPlacedFootprint(Comp, NewName);",
+              "If Not Result Then RestoreFootprintCurrentFlags(Comp, OldFlags);",
+              "Try After := Impl.ModelName; Except End;",
+              "Exit;",
+              "Target.ModelName := NewName",
+              "Result := (After = NewName);")
+    # The choice ends the routine: a failed one is reported, not renamed into.
+    assert re.search(r"Try After := Impl\.ModelName; Except End;\s+End;\s+Exit;\s+End;",
+                     body)
+
+    restore = _routine(code, "RestoreFootprintCurrentFlags")
+    _in_order(restore,
+              "For Pass := 0 To 1 Do",
+              "If UpperCase(MT) = 'PCBLIB' Then",
+              "Want := Copy(Flags, K + 1, 1);",
+              "If (Pass = 0) And (Want = '0') Then",
+              "Try Impl.IsCurrent := False; Except End;",
+              "Else If (Pass = 1) And (Want = '1') Then",
+              "Try Impl.IsCurrent := True; Except End;",
+              "Inc(K);")
+    flags = _routine(code, "FootprintCurrentFlags")
+    _in_order(flags, "If UpperCase(MT) = 'PCBLIB' Then",
+              "Try IsCur := Impl.IsCurrent; Except End;",
+              "If IsCur Then Result := Result + '1' Else Result := Result + '0';")
+    assert ".IsCurrent :=" not in flags
+
+    # Every footprint-by-name write on a placed part goes through it.
+    for func in ("Gen_SetSchComponentParameters", "Gen_SetSchComponentsParameters",
+                 "Gen_RelinkComponents"):
+        assert "SetPlacedFootprintName(" in _routine(code, func), func
+    single = _routine(code, "Gen_SetSchComponentParameters")
+    _in_order(single, "FpOk := False;",
+              "If SetPlacedFootprintName(TargetComp, Val, FpBefore, FpAfter) Then",
+              "FpOk := True;", "'\",\"applied\":' + BoolToJsonStr(FpOk)")
+
+
 def _assert_all(code):
     _assert_handler(code)
     _assert_index(code)
     _assert_make_current(code)
     _assert_select(code)
+    _assert_choose_before_rename(code)
 
 
 def test_the_placement_chooses_the_footprint_it_was_given():
@@ -142,11 +194,14 @@ def test_helpers_are_defined_before_the_handler():
     """DelphiScript resolves names top-down and has no Forward."""
     code = _source()
     names = ["CurrentFootprintImpl", "FootprintModelIndex", "MakeFootprintModelCurrent",
-             "SelectPlacedFootprint", HANDLER]
-    at = [re.search(rf"(?m)^Function {n}\b", code).start() for n in names]
+             "SelectPlacedFootprint", "FootprintCurrentFlags",
+             "RestoreFootprintCurrentFlags", "SetPlacedFootprintName",
+             "Gen_SetSchComponentParameters", HANDLER,
+             "Gen_SetSchComponentsParameters", "Gen_RelinkComponents"]
+    at = [re.search(rf"(?m)^(?:Function|Procedure) {n}\b", code).start() for n in names]
     assert at == sorted(at)
-    for n in names[1:4]:
-        assert len(re.findall(rf"(?m)^Function {n}\b", code)) == 1
+    for n in names[1:7]:
+        assert len(re.findall(rf"(?m)^(?:Function|Procedure) {n}\b", code)) == 1
 
 
 def test_is_current_is_written_only_through_a_typed_implementation():
@@ -206,6 +261,18 @@ _MUTATIONS = {
                       "Result := SameText(Trim(Back), Trim(Name));", ""),
     "case_sensitive": ("FootprintModelIndex",
                        "If SameText(Trim(MN), Trim(Name)) Then", "If MN = Name Then"),
+    "renamed_again": ("SetPlacedFootprintName",
+                      "If FootprintModelIndex(Comp, NewName, Names) >= 0 Then",
+                      "If False Then"),
+    "flags_not_restored": ("SetPlacedFootprintName",
+                           "If Not Result Then RestoreFootprintCurrentFlags(Comp, OldFlags);",
+                           ""),
+    "falls_through_to_rename": ("SetPlacedFootprintName", "        Exit;\n", "\n"),
+    "restore_sets_first": ("RestoreFootprintCurrentFlags",
+                           "If (Pass = 0) And (Want = '0') Then",
+                           "If (Pass = 1) And (Want = '0') Then"),
+    "applied_by_name": ("Gen_SetSchComponentParameters",
+                        "BoolToJsonStr(FpOk)", "BoolToJsonStr(FpAfter = Val)"),
 }
 
 
@@ -213,7 +280,7 @@ _MUTATIONS = {
 def test_the_checks_detect_each_removed_safeguard(mutation):
     routine, old, new = _MUTATIONS[mutation]
     code = _source()
-    start = re.search(rf"(?m)^Function {routine}\b", code).start()
+    start = re.search(rf"(?m)^(?:Function|Procedure) {routine}\b", code).start()
     at = code.index(old, start)
     mutant = code[:at] + new + code[at + len(old):]
     with pytest.raises((AssertionError, ValueError)):
@@ -396,3 +463,111 @@ def test_a_choice_that_does_not_hold_is_reported(setter):
     """Not claimed: the handler then takes the part off the sheet."""
     part = _part(setter=setter)
     assert not select_placed_footprint(part, "PowerPAK SC-70 (S)")
+
+
+# ---------------------------------------------------------------------------
+# A part already placed: choose the model it has, rename only when it has none.
+# ---------------------------------------------------------------------------
+
+def footprint_current_flags(impls):
+    """Mirror: Generic.pas FootprintCurrentFlags."""
+    return "".join("1" if i.is_current else "0"
+                   for i in impls if i.model_type.upper() == "PCBLIB")
+
+
+def restore_footprint_current_flags(impls, flags):
+    """Mirror: Generic.pas RestoreFootprintCurrentFlags."""
+    for pass_ in range(2):
+        k = 0
+        for impl in impls:
+            if impl.model_type.upper() == "PCBLIB":
+                want = flags[k:k + 1]
+                if pass_ == 0 and want == "0":
+                    impl.is_current = False
+                elif pass_ == 1 and want == "1":
+                    impl.is_current = True
+                k += 1
+
+
+def set_placed_footprint_name(impls, new_name):
+    """Mirror: Generic.pas SetPlacedFootprintName. Returns (ok, before, after)."""
+    before = after = ""
+    index, _ = footprint_model_index(impls, new_name)
+    if index >= 0:
+        impl = current_footprint_impl(impls)
+        if impl is not None:
+            before = impl.model_name
+        old_flags = footprint_current_flags(impls)
+        ok = select_placed_footprint(impls, new_name)
+        if not ok:
+            restore_footprint_current_flags(impls, old_flags)
+        impl = current_footprint_impl(impls)
+        if impl is not None:
+            after = impl.model_name
+        return ok, before, after
+    target = current_footprint_impl(impls)      # the current one, else the first
+    if target is None:
+        return False, before, after
+    before = target.model_name
+    target.model_name = new_name
+    after = target.model_name
+    return after == new_name, before, after
+
+
+def _names(impls):
+    return [i.model_name for i in impls if i.model_type == "PCBLIB"]
+
+
+@pytest.mark.parametrize("setter", ["plain", "exclusive"])
+def test_a_footprint_the_part_has_is_chosen_not_renamed_into(setter):
+    """The M201 hazard: no second PowerPAK SC-70 (S), LFPAK33-8 left intact."""
+    part = _part(setter=setter)
+    assert set_placed_footprint_name(part, "PowerPAK SC-70 (S)") == (
+        True, "LFPAK33-8", "PowerPAK SC-70 (S)")
+    assert _names(part) == NMOS_MODELS
+    assert _currents(part) == ["PowerPAK SC-70 (S)"]
+
+
+def test_the_chosen_model_reads_back_in_its_own_case():
+    part = _part()
+    assert set_placed_footprint_name(part, "powerpak sc-70 (s)") == (
+        True, "LFPAK33-8", "PowerPAK SC-70 (S)")
+    assert _names(part) == NMOS_MODELS
+
+
+def test_a_footprint_the_part_lacks_still_renames_the_current_model():
+    """Unchanged: a plan's Footprint stamp on a one-model part repoints it."""
+    part = _part(names=["RESC1608X55N"], current="RESC1608X55N")
+    assert set_placed_footprint_name(part, "R0603") == (True, "RESC1608X55N", "R0603")
+    assert _names(part) == ["R0603"]
+
+
+def test_a_part_with_no_footprint_model_is_refused_as_before():
+    part = _part(names=[], extra=[("SIM", "NMOS", True)])
+    assert set_placed_footprint_name(part, "SOT-23") == (False, "", "")
+
+
+def test_a_relinked_part_given_its_first_model_is_chosen():
+    """sch_relink_components adds a model to a part with none, then names it."""
+    part = _part(names=["SOT-23"], current="SOT-23")
+    assert set_placed_footprint_name(part, "SOT-23") == (True, "SOT-23", "SOT-23")
+
+
+@pytest.mark.parametrize("setter", ["ignores", "promotes"])
+def test_a_choice_that_does_not_hold_puts_the_flags_back_and_renames_nothing(setter):
+    part = _part(setter=setter)
+    ok, before, after = set_placed_footprint_name(part, "PowerPAK SC-70 (S)")
+    assert not ok and before == "LFPAK33-8" and after == "LFPAK33-8"
+    assert _names(part) == NMOS_MODELS
+    assert _currents(part) == ["LFPAK33-8"]
+
+
+def test_restore_puts_back_several_current_models_and_none():
+    part = _part(names=["A", "B", "C"], current=None)
+    part[0]._current = part[2]._current = True
+    restore_footprint_current_flags(part, "010")
+    assert footprint_current_flags(part) == "010"
+    restore_footprint_current_flags(part, "101")
+    assert footprint_current_flags(part) == "101"
+    restore_footprint_current_flags(part, "000")
+    assert footprint_current_flags(part) == "000"
