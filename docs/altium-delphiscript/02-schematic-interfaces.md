@@ -345,7 +345,10 @@ backs the model).
 **`UseComponentLibrary : Boolean`**: whether the model is resolved from the
 component's own library.
 **`MapAsString : WideString`**: the model's pin map, schematic pin to model pin,
-documented as `(SchematicPin:ModelPin)` entries such as `(G:1),(D:2),(S:3)`.
-`Map_Import_FromUser` edits the same map through the dialog, so scripts write
-the string instead.
+as `(SchematicPin:ModelPin)` entries such as `(G:1),(D:2),(S:3)` (read that way
+on AD 25.8). Writing it merges by schematic pin: pins it does not name keep
+their entries, so `''` changes nothing, and pad numbers are not checked against
+the footprint. It reads back sorted after a write and in record order after a
+reload. `Map_Import_FromUser` edits the same map through the dialog, so scripts
+write the string instead.
 **`LibraryIdentifier : String`**: the library the model is resolved from.

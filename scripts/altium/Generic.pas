@@ -751,9 +751,10 @@ End;
 { GetState_MapAsString, write SetState_MapAsString (the script engine's        }
 { property table in ScriptingSystem.dll, Altium.SDK.Interfaces.dll and the     }
 { Schematic API reference agree). The reference gives its format as            }
-{ '(SchematicPin:ModelPin)' entries, e.g. '(1:1),(2:2)'. That format has not   }
-{ been read off a live part yet, so a write is read back and the old map put   }
-{ back unless the read-back holds exactly the entries asked for.               }
+{ '(SchematicPin:ModelPin)' entries, e.g. '(1:1),(2:2)', and a map set by hand }
+{ on AD 25.8 read '(G:1),(D:2),(S:3)'. Altium sorts the entries after a write  }
+{ and keeps record order after a reload, so a write is read back and compared  }
+{ as a set, and the old map put back unless it holds exactly those entries.    }
 {..............................................................................}
 
 { 'G->1;D->2;S->3', the way the PCB Model dialog reads, as Altium's
@@ -876,7 +877,9 @@ End;
 { Set a placed part's footprint pin map. False, with the part as it was,
   when the value is malformed, the part has no footprint model, the old
   map cannot be read (it could not be put back), or the read-back does
-  not hold the entries asked for. '' clears the map. }
+  not hold the entries asked for. Altium merges the string into the old
+  map pin by pin (AD 25.8, 2026-10-24), so a partial map or '' reads back
+  with the old entries still in it and is refused: write the whole map. }
 Function WritePlacedPinMap(Comp : ISch_Component; Value : String) : Boolean;
 Var
     Impl : ISch_Implementation;

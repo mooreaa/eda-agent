@@ -106,9 +106,9 @@ works elsewhere cannot be an undeclared identifier:
 | 37, pin text | `Name_FontMode`, `Name_CustomFontID`, `Name_CustomColor`, `Designator_FontMode`, `Designator_CustomFontID`, `Designator_CustomColor` on a pin | no, nowhere | medium, read live; the writes are not run live |
 | 38, stack-up apply | `CopperThickness`, `DielectricHeight`, `DielectricConstant`, `DielectricType` on a board layer | yes, `PCB_ModifyLayer` | low, the same writes pcb_modify_layer makes, each read back |
 | 39, entry label font | `TextFontID` on a sheet entry and a harness entry | no, nowhere | highest, a new identifier on two interfaces, checked only against Altium.Sch.Interfaces.dll; step 39 item 2 stops at the first fault |
-| 40, display mode | `DisplayMode` written on a placed component | yes, `Library.pas`, on library symbols | high, new on a placed part, where the pins move and the wires do not; step 40 item 3 is the first live write |
-| 40, mode count | `DisplayModeCount` read on a component | no, nowhere | medium, read only, but a wrong member stops the loop; two public SchLib scripts read it |
-| 40, footprint pin map | `MapAsString` on a placed part's footprint implementation | no, nowhere | highest, a new identifier whose string format comes from the API reference alone; the write is read back and undone on a mismatch, and step 40 item 5 reads a hand-set map first |
+| 40, display mode | `DisplayMode` written on a placed component | yes, `Library.pas`, on library symbols | low, written, saved and reloaded live; the pins move and the wires do not |
+| 40, mode count | `DisplayModeCount` read on a component | no, nowhere | low, read live on two parts |
+| 40, footprint pin map | `MapAsString` on a placed part's footprint implementation | no, nowhere | low, read and written live; Altium merges by pin and does not check pads, and the read-back catches the first |
 
 Steps 5 and 2 are the ones that justify a live session. The bottom rows
 write properties this codebase already exercises, so they are checking
@@ -2383,8 +2383,10 @@ dialog.
   first. The old map is read first, and after the write the map is read
   back; unless it holds exactly the entries asked for (order and spaces
   aside), the old map is put back and the write is reported `failed`.
-  `FootprintPinMap=` clears the map. A part with no footprint model
-  reads `''` and refuses the write.
+  Altium merges the string into the old map pin by pin, so write the
+  whole map: a partial one, and `FootprintPinMap=`, read back with the old
+  entries in them and are refused. A part with no footprint model reads
+  `''` and refuses the write.
 
 Both are gated to eSchComponent in the reader, the writer and the
 preflight, so every other type answers `unreadable` / `unknown` instead of
@@ -2409,9 +2411,9 @@ The names were confirmed, not guessed:
   and `SchModel.MapAsString` (the Altium-Designer-addons OpenLib scripts),
   and `Library.pas` already writes `Component.DisplayMode`.
 
-**The risk is the map's format.** Nothing seen so far shows a map read off
-an AD 25 part, and no format string for it is among `AdvSch.dll`'s
-strings, so the binary does not confirm the reference either. `Map_Import_FromUser`
+**The risk was the map's format.** No format string for it is among
+`AdvSch.dll`'s strings, so only the reference vouched for it until item 5
+read `(G:1),(D:2),(S:3)` off a hand-mapped part on AD 25.8. `Map_Import_FromUser`
 and `DefinerByInterfaceDesignator` are left alone: the first opens the
 dialog, and the second is an indexed property the bridge has never used.
 
@@ -2452,9 +2454,39 @@ A relink or Update from Libraries replaces a placed part's models with the
 library's, map included, so a map set here on a placed part lasts until
 then; the durable fix for a wrong map is in the library symbol.
 
-Not yet run live: the bridge was in use by another session when the
-change was made. It is checked only by source-level tests
-(`tests/test_sch_display_mode.py`) and the linter; FPC was not run.
+Run live on AD 25.8.1.18 with 2026.10.24.1 on 2026-10-24, on a free scratch
+sheet holding one NMOS from `Mosfet.SchLib` (two display modes, twenty PCB
+models). `app_ping` answered after every item and no dialog opened:
+
+1. Passed. On a net label the three reads came back empty under
+   `unreadable`, and `DisplayMode=1` under `unknown`.
+2. Passed: `0` and `2`.
+3. Passed. `DisplayMode` read `1`; the pins reported the mode-1 ends
+   (G 1900,2000, D 2000,2100, S 2000,1900 against 1800,2000, 2000,2200,
+   2000,1800 in mode 0); a screenshot showed the compact symbol on exactly
+   those ends with nothing left of the old body. The saved record carried
+   `DisplayMode=1`, and it read `1` after a close and reopen. Set back to 0,
+   the record drops the field, which is how Altium stores mode 0.
+4. Passed: `2`, `-1` and `x` each `failed`, mode unchanged.
+5. Passed: `(G:1),(D:2),(S:3)`, the reference's format.
+6. Passed, against the current model (LFPAK33-8, mapped D→3, G→2, S→1 by
+   the library). `G->1;D->2;S->3` wrote and read back `(D:2),(G:1),(S:3)`;
+   the saved file's map records for that model, and only that model, said
+   G→1, D→2, S→3; and the map read the same after a close and reopen.
+   Altium's own form, `(G:1),(D:2),(S:3)`, wrote too. The PCB Model dialog
+   and Update PCB's ECO preview were not looked at: a free sheet has no
+   project to compile, so the saved records stand in for them.
+7. `G->;D->2`: `failed`, map unchanged. `(G:9)` alone: `failed`, map
+   unchanged, because Altium merges by pin and the read-back still held D
+   and S. `(G:9),(D:2),(S:3)`: written, so Altium does not check pad numbers
+   against the footprint; a wrong pad shows up at compile or ECO. `''`:
+   `failed`, map unchanged, so there is no way to clear a map through
+   `MapAsString`. The part with no footprint model was not tried: none was
+   to hand.
+
+Item 5 was also the only call on a production sheet, and it only read. The
+order a map reads back in differs (sorted after a write, record order after
+a reload), which is why the comparison ignores order.
 
 ---
 
@@ -2475,6 +2507,10 @@ change was made. It is checked only by source-level tests
   The Gap reading came from the descriptor, which says 0 whatever the rule
   holds; the readers now add `gap_mm` from the rule (step 36). The
   per-object table itself is still not exposed to scripts.
+* **Placement footprint.** In step 40, `sch_place_components` with
+  `footprint: "PowerPAK SC-70 (S)"` placed an NMOS whose current model was
+  still LFPAK33-8, the library's; the named model was among its twenty but
+  not made current. Not yet looked into.
 
 
 ## Generic property rejection on Altium 21 (live verified)

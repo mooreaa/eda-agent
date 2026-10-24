@@ -463,7 +463,9 @@ def register_generic_tools(mcp):
         Example - draw a MOSFET as its compact alternate symbol and map
         its G/D/S pins to pads 1-3. DisplayMode must be below the part's
         DisplayModeCount; its pins move and wires do not, so re-wire it.
-        A pin map that does not read back is undone and reported failed:
+        Give the whole pin map: Altium merges it pin by pin, so a partial
+        map does not read back, and one that does not is undone and
+        reported failed. Pad numbers are not checked:
             obj_modify(object_type="eSchComponent",
                        filter="Designator.Text=M201",
                        set="DisplayMode=1|FootprintPinMap=G->1;D->2;S->3")
