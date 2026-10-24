@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Document paths reach Altium in backslash form, and an aliased open is reused.
 
 ``_focus`` opened a library with ``FileName=R:/Hardware/.../Passive.SchLib``

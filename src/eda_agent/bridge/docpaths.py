@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """One spelling for a document path, including inside a process string.
 
 Altium keys an open document by the path text it was opened with.

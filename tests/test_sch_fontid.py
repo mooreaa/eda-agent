@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """FontId on a sheet entry stopped the bridge (AD25, 2026-10-23).
 
 ``obj_query(object_type="eSheetEntry", properties="Name,FontId")`` raised
