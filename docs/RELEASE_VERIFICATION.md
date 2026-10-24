@@ -1,4 +1,4 @@
-# Release verification: 2026.10.24.1
+# Release verification: 2026.10.24.2
 
 Unless a section records live verification explicitly, the Pascal below has
 been checked by FPC and the linter but **not executed by Altium's DelphiScript engine**. The two are not the
@@ -109,6 +109,7 @@ works elsewhere cannot be an undeclared identifier:
 | 40, display mode | `DisplayMode` written on a placed component | yes, `Library.pas`, on library symbols | low, written, saved and reloaded live; the pins move and the wires do not |
 | 40, mode count | `DisplayModeCount` read on a component | no, nowhere | low, read live on two parts |
 | 40, footprint pin map | `MapAsString` on a placed part's footprint implementation | no, nowhere | low, read and written live; Altium merges by pin and does not check pads, and the read-back catches the first |
+| 41, footprint chosen at placement | `IsCurrent` written False and True on a just-placed part's footprint implementations | yes, `Lib_NormalizeImplementations` both ways on library symbols, `AddPlacedFootprintModel` True on placed parts | medium, the identifier is proven; what Altium does to the other flags is not, so every flag is read back and a choice that does not hold takes the part off the sheet |
 
 Steps 5 and 2 are the ones that justify a live session. The bottom rows
 write properties this codebase already exercises, so they are checking
@@ -284,7 +285,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.10.24.1`, `version_match` =
+Expect `altium_script_version` = `2026.10.24.2`, `version_match` =
 `true`, and `mcp_server_version` = `0.7.1`.
 
 Those are two different versions and they fail differently.
@@ -2454,9 +2455,9 @@ A relink or Update from Libraries replaces a placed part's models with the
 library's, map included, so a map set here on a placed part lasts until
 then; the durable fix for a wrong map is in the library symbol.
 
-Run live on AD 25.8.1.18 with 2026.10.24.1 on 2026-10-24, on a free scratch
-sheet holding one NMOS from `Mosfet.SchLib` (two display modes, twenty PCB
-models). `app_ping` answered after every item and no dialog opened:
+Run live on AD 25.8.1.18 on 2026-10-24, with the script as built at commit
+64a71c3 (before step 41), on a free scratch sheet holding one NMOS from
+`Mosfet.SchLib` (two display modes, twenty PCB models). `app_ping` answered after every item and no dialog opened:
 
 1. Passed. On a net label the three reads came back empty under
    `unreadable`, and `DisplayMode=1` under `unknown`.
@@ -2488,6 +2489,75 @@ Item 5 was also the only call on a production sheet, and it only read. The
 order a map reads back in differs (sorted after a write, record order after
 a reload), which is why the comparison ignores order.
 
+## 41. A placement's footprint is the one it names
+
+Step 40's run placed an NMOS with `footprint: "PowerPAK SC-70 (S)"` and got
+LFPAK33-8, the model the library marks current. `Gen_PlaceSchComponentsFromLibrary`
+read the field and dropped it (a comment said `CurrentFootprintModelName` is
+read-only, which is true, and nothing else was tried), and the reply said
+nothing. FootprintPinMap maps the CURRENT model, so the map then went to
+LFPAK33-8.
+
+Now `footprint` must name one of the symbol's own PCBLIB models, matched by
+`ModelName` ignoring case and outer spaces, first match if two share a name:
+
+* found: the part is placed, then every other PCBLIB model gets
+  `IsCurrent := False`, that one `IsCurrent := True`, and every flag is
+  read back. Only when it alone is current, and `CurrentFootprintImpl`
+  reads its name, is it counted in `footprints_chosen`. Otherwise the part
+  is taken back off the sheet (`RemoveSchObject`, as `SwapSchSymbol` does)
+  and reported `designator:FOOTPRINT_NOT_APPLIED` in `failed_refdes`.
+  Simulation and other model types keep their own current model.
+* not found, or the symbol has no footprint model: the part is not placed,
+  `designator:FOOTPRINT_NOT_ON_SYMBOL`, and `footprint_hint` lists the
+  models it does carry. A footprint from another library is
+  `sch_relink_components`' job (`footprint` with `footprint_library`).
+
+Without `footprint` nothing changes. `sch_draw_template` sends a template
+part's `footprint` the same way; a plan's Footprint is still stamped
+afterwards through `sch_set_components_parameters`.
+
+`IsCurrent` (`GetState_IsCurrent` / `SetState_IsCurrent`) is in
+`ScriptingSystem.dll`'s property table next to `MapAsString`, and on
+`SCH.ISch_Implementation` in `Altium.SDK.Interfaces.dll`; `Library.pas`
+writes it both ways and `AddPlacedFootprintModel` writes True on placed
+parts. `RemoveSchObject` is on `ISch_BasicContainer` in the same assembly
+and already used on a sheet. **The risk is behaviour, not the name:**
+whether Altium's setter clears the siblings itself, or promotes another
+model when the current one is cleared, is not measured. Clearing first
+ends right in the first two cases, and the read-back refuses the third.
+
+On a free scratch sheet, with `Mosfet.SchLib`'s NMOS (twenty PCB models,
+LFPAK33-8 current in the library):
+
+1. **Chosen.** `sch_place_components` with `{lib_reference: "NMOS",
+   library_path: <Mosfet.SchLib>, designator: "Q1", footprint: "PowerPAK
+   SC-70 (S)"}`, `allow_manual_layout: true`: `placed` 1,
+   `footprints_chosen` 1, no `failed_refdes`. Save: Q1's RECORD=45 entries
+   carry `IsCurrent=T` on PowerPAK SC-70 (S) and on no other. The
+   Properties panel shows that footprint.
+2. **Case.** Q2 with `footprint: "powerpak sc-70 (s)"`: chosen as in item 1.
+3. **Refused.** Q3 with `footprint: "SOT-89"`: `placed` 0,
+   `failed_refdes` `Q3:FOOTPRINT_NOT_ON_SYMBOL`, `footprint_hint` names
+   the twenty models, the component count on the sheet is unchanged, and
+   `app_ping` answers.
+4. **Unchanged without it.** Q4 with no `footprint`: LFPAK33-8 current,
+   `footprints_chosen` 0.
+5. **The setter.** If item 1 reports `FOOTPRINT_NOT_APPLIED`, Altium's
+   setter does neither of the two things the order allows for: stop and
+   record which flags read back (place without `footprint` and read the
+   saved records after each write by hand).
+6. **Then the map.** Close and reopen: Q1 still on PowerPAK SC-70 (S).
+   `obj_modify ... filter=Designator.Text=Q1 set=FootprintPinMap=G->1;D->2;S->3`,
+   save: the map records that changed are PowerPAK SC-70 (S)'s, and
+   LFPAK33-8's still read the library's D→3, G→2, S→1.
+
+Not yet run live: the bridge was in use by another session. Checked by
+`tests/test_sch_place_footprint.py`, which also runs a line-for-line Python
+mirror of the three helpers against implementations whose setter is plain,
+clears its siblings, ignores the write, or promotes another model, and by
+the linter. FPC was not run.
+
 ---
 
 ## Still open, and not blocking
@@ -2507,10 +2577,14 @@ a reload), which is why the comparison ignores order.
   The Gap reading came from the descriptor, which says 0 whatever the rule
   holds; the readers now add `gap_mm` from the rule (step 36). The
   per-object table itself is still not exposed to scripts.
-* **Placement footprint.** In step 40, `sch_place_components` with
-  `footprint: "PowerPAK SC-70 (S)"` placed an NMOS whose current model was
-  still LFPAK33-8, the library's; the named model was among its twenty but
-  not made current. Not yet looked into.
+* **Footprint on a part already placed.** Step 41 fixes the placement.
+  `sch_set_components_parameters`' `Footprint` and `sch_relink_components`'
+  `footprint` still go through `SetPlacedFootprintName`, which RENAMES the
+  current model even when the part already carries a model of that name.
+  On the NMOS that leaves LFPAK33-8's model, with its library link and its
+  pin map, renamed PowerPAK SC-70 (S) beside the real one. Choosing the
+  existing model first (`SelectPlacedFootprint`) and renaming only when
+  there is none would fix it; not changed here.
 
 
 ## Generic property rejection on Altium 21 (live verified)

@@ -344,6 +344,14 @@ Comp.AddSchObject(Impl);
 backs the model).
 **`UseComponentLibrary : Boolean`**: whether the model is resolved from the
 component's own library.
+**`IsCurrent : Boolean`**: whether this is the model in use among the
+component's models of its `ModelType`. A symbol can carry many footprints
+(the generic NMOS has twenty) and `LoadComponentFromLibrary` keeps the one
+the library marks current; `ISch_Component.CurrentFootprintModelName` is
+read-only, so a footprint is chosen by writing this flag. Whether Altium's
+setter clears the other models' flags is not measured, so the bridge writes
+False on every other PCBLIB model, then True on the one wanted, and reads all
+of them back (`MakeFootprintModelCurrent`).
 **`MapAsString : WideString`**: the model's pin map, schematic pin to model pin,
 as `(SchematicPin:ModelPin)` entries such as `(G:1),(D:2),(S:3)` (read that way
 on AD 25.8). Writing it merges by schematic pin: pins it does not name keep

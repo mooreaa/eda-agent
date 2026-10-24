@@ -10056,17 +10056,160 @@ Begin
 End;
 
 {..............................................................................}
+{ Choosing a placed part's footprint among the models its symbol carries.     }
+{                                                                              }
+{ A symbol can carry many PCBLIB models (the generic NMOS in Mosfet.SchLib    }
+{ has twenty), and LoadComponentFromLibrary keeps the one the library marks   }
+{ current. A named footprint is looked up by ModelName among the part's       }
+{ PCBLIB models, first match ignoring case, and made the ONLY current one:    }
+{ IsCurrent False on every other PCBLIB model, then True on it, then every    }
+{ flag read back. FootprintPinMap and the other readers go through            }
+{ CurrentFootprintImpl, which takes the first current model it meets, so a   }
+{ second current one would leave the answer to iteration order. Clearing     }
+{ first ends the same way whether or not Altium's setter clears the siblings  }
+{ itself. Other model types (SIM and the rest) keep their own current model   }
+{ and are not touched.                                                         }
+{                                                                              }
+{ IsCurrent (GetState_IsCurrent / SetState_IsCurrent) is in the script        }
+{ engine's property table in ScriptingSystem.dll, next to MapAsString, and on }
+{ SCH.ISch_Implementation in Altium.SDK.Interfaces.dll; Library.pas writes it }
+{ both ways on library symbols, AddPlacedFootprintModel True on placed parts. }
+{..............................................................................}
+
+{ The index, among a part's PCBLIB models in iteration order, of the first
+  one named Name (ignoring case), or -1. Names gets every PCBLIB model's
+  name, comma separated, for the reply when nothing matches. }
+Function FootprintModelIndex(Comp : ISch_Component; Name : String; Var Names : String) : Integer;
+Var
+    ImplIter : ISch_Iterator;
+    Impl : ISch_Implementation;
+    MT, MN : String;
+    K : Integer;
+Begin
+    Result := -1;
+    Names := '';
+    K := 0;
+    ImplIter := Comp.SchIterator_Create;
+    Try
+        ImplIter.AddFilter_ObjectSet(MkSet(eImplementation));
+        Impl := ImplIter.FirstSchObject;
+        While Impl <> Nil Do
+        Begin
+            MT := '';
+            Try MT := Impl.ModelType; Except End;
+            If UpperCase(MT) = 'PCBLIB' Then
+            Begin
+                MN := '';
+                Try MN := Impl.ModelName; Except End;
+                If Names <> '' Then Names := Names + ', ';
+                Names := Names + MN;
+                If Result < 0 Then
+                    If SameText(Trim(MN), Trim(Name)) Then Result := K;
+                Inc(K);
+            End;
+            Impl := ImplIter.NextSchObject;
+        End;
+    Finally
+        Comp.SchIterator_Destroy(ImplIter);
+    End;
+End;
+
+{ Make the part's PCBLIB model at ModelIdx the only current one. Pass 0 clears
+  the others, pass 1 sets it, pass 2 reads every flag back: True only when
+  it is current and no other PCBLIB model is. }
+Function MakeFootprintModelCurrent(Comp : ISch_Component; ModelIdx : Integer) : Boolean;
+Var
+    ImplIter : ISch_Iterator;
+    Impl : ISch_Implementation;
+    MT : String;
+    K, Pass, Currents : Integer;
+    IsCur, TargetCur : Boolean;
+Begin
+    Result := False;
+    If ModelIdx < 0 Then Exit;
+    Currents := 0;
+    TargetCur := False;
+    For Pass := 0 To 2 Do
+    Begin
+        K := 0;
+        ImplIter := Comp.SchIterator_Create;
+        Try
+            ImplIter.AddFilter_ObjectSet(MkSet(eImplementation));
+            Impl := ImplIter.FirstSchObject;
+            While Impl <> Nil Do
+            Begin
+                MT := '';
+                Try MT := Impl.ModelType; Except End;
+                If UpperCase(MT) = 'PCBLIB' Then
+                Begin
+                    If (Pass = 0) And (K <> ModelIdx) Then
+                    Begin
+                        SchBeginModify(Impl);
+                        Try Impl.IsCurrent := False; Except End;
+                        SchEndModify(Impl);
+                    End
+                    Else If (Pass = 1) And (K = ModelIdx) Then
+                    Begin
+                        SchBeginModify(Impl);
+                        Try Impl.IsCurrent := True; Except End;
+                        SchEndModify(Impl);
+                    End
+                    Else If Pass = 2 Then
+                    Begin
+                        IsCur := False;
+                        Try IsCur := Impl.IsCurrent; Except End;
+                        If IsCur Then Inc(Currents);
+                        If IsCur And (K = ModelIdx) Then TargetCur := True;
+                    End;
+                    Inc(K);
+                End;
+                Impl := ImplIter.NextSchObject;
+            End;
+        Finally
+            Comp.SchIterator_Destroy(ImplIter);
+        End;
+    End;
+    Result := TargetCur And (Currents = 1);
+End;
+
+{ Make the PCBLIB model named Name a placed part's only current footprint.
+  False when the part has no model of that name, or the flags or the
+  current model's name do not read back as asked. }
+Function SelectPlacedFootprint(Comp : ISch_Component; Name : String) : Boolean;
+Var
+    Impl : ISch_Implementation;
+    Names, Back : String;
+    ModelIdx : Integer;
+Begin
+    ModelIdx := FootprintModelIndex(Comp, Name, Names);
+    Result := MakeFootprintModelCurrent(Comp, ModelIdx);
+    If Not Result Then Exit;
+    Back := '';
+    Impl := CurrentFootprintImpl(Comp);
+    If Impl <> Nil Then
+    Begin
+        Try Back := Impl.ModelName; Except End;
+    End;
+    Result := SameText(Trim(Back), Trim(Name));
+End;
+
+{..............................................................................}
 { Gen_PlaceSchComponentsFromLibrary - Bulk BOM placement.                       }
 { Each op: library_path, lib_reference, x, y, designator, rotation, footprint. }
 { library_path and lib_reference are required; others have sane defaults.      }
+{ footprint names one of the symbol's own PCB models, which becomes the only  }
+{ current one (SelectPlacedFootprint). A name the symbol lacks is refused     }
+{ before the part is placed, FOOTPRINT_NOT_ON_SYMBOL, with the names it has   }
+{ in footprint_hint; a choice that does not read back takes the part off the  }
+{ sheet again, FOOTPRINT_NOT_APPLIED.                                          }
 {..............................................................................}
 
 Function Gen_PlaceSchComponentsFromLibrary(Params : String; RequestId : String) : String;
 Var
     PlaceStr, Op, Remaining, FailedRefdes, ResponseBody : String;
-    OpCount, Placed, Failed, Rotation : Integer;
+    OpCount, Placed, Failed, Rotation, FpChosen : Integer;
     LibPath, LibRef, Desig, Footprint, AvailHint : String;
-    ResolvedLib, LibReason : String;
+    ResolvedLib, LibReason, FpNames, FootprintHint : String;
     X, Y : Integer;
     SchDoc : ISch_Document;
     Comp : ISch_Component;
@@ -10088,8 +10231,10 @@ Begin
     Placed := 0;
     Failed := 0;
     OpCount := 0;
+    FpChosen := 0;
     Remaining := PlaceStr;
     FailedRefdes := '';
+    FootprintHint := '';
 
     SchServer.ProcessControl.PreProcess(SchDoc, '');
     Try
@@ -10195,10 +10340,55 @@ Begin
                 Continue;
             End;
 
-            { Footprint override skipped: CurrentFootprintModelName is        }
-            { read-only in DelphiScript (memory: delphiscript_api_quirks.md). }
-            { Library symbol's own footprint is used.                          }
+            { A NAMED FOOTPRINT USED TO BE DROPPED HERE, so the part came out }
+            { on whatever model the library marks current: an NMOS asked for  }
+            { on PowerPAK SC-70 (S) was placed on LFPAK33-8, and its pin map  }
+            { then written to the wrong model (2026-10-24). The footprint     }
+            { must be one of the symbol's own models; a name it lacks is      }
+            { refused before the part is placed. The loaded copy is on no     }
+            { document yet, so leaving it unplaced leaves nothing behind.     }
+            If Footprint <> '' Then
+                If FootprintModelIndex(Comp, Footprint, FpNames) < 0 Then
+                Begin
+                    Inc(Failed);
+                    If Desig <> '' Then
+                    Begin
+                        If FailedRefdes <> '' Then FailedRefdes := FailedRefdes + ',';
+                        FailedRefdes := FailedRefdes + Desig + ':FOOTPRINT_NOT_ON_SYMBOL';
+                    End;
+                    If FootprintHint = '' Then
+                    Begin
+                        If FpNames = '' Then
+                            FootprintHint := LibRef + ' carries no footprint model, so '
+                                + Footprint + ' cannot be chosen at placement; '
+                                + 'sch_relink_components can give it one'
+                        Else
+                            FootprintHint := Footprint + ' is not among ' + LibRef
+                                + '''s footprint models: ' + FpNames;
+                    End;
+                    Continue;
+                End;
+
             PutLoadedComponent(SchDoc, Comp, X, Y, Rotation, Desig);
+
+            { Altium did not take the choice: take the part back off the  }
+            { sheet, as SwapSchSymbol does with a symbol whose pins moved, }
+            { rather than leave it on a footprint nobody asked for.        }
+            If Footprint <> '' Then
+            Begin
+                If Not SelectPlacedFootprint(Comp, Footprint) Then
+                Begin
+                    Try SchDoc.RemoveSchObject(Comp); Except End;
+                    Inc(Failed);
+                    If Desig <> '' Then
+                    Begin
+                        If FailedRefdes <> '' Then FailedRefdes := FailedRefdes + ',';
+                        FailedRefdes := FailedRefdes + Desig + ':FOOTPRINT_NOT_APPLIED';
+                    End;
+                    Continue;
+                End;
+                Inc(FpChosen);
+            End;
             Inc(Placed);
         End;
     Finally
@@ -10208,10 +10398,14 @@ Begin
 
     ResponseBody := '{"placed":' + IntToStr(Placed)
         + ',"failed":' + IntToStr(Failed)
-        + ',"total":' + IntToStr(OpCount);
+        + ',"total":' + IntToStr(OpCount)
+        + ',"footprints_chosen":' + IntToStr(FpChosen);
     If FailedRefdes <> '' Then
         ResponseBody := ResponseBody + ',"failed_refdes":"'
             + EscapeJsonString(FailedRefdes) + '"';
+    If FootprintHint <> '' Then
+        ResponseBody := ResponseBody + ',"footprint_hint":"'
+            + EscapeJsonString(FootprintHint) + '"';
     ResponseBody := ResponseBody + '}';
     { A WRITE THAT DOES NOT DIRTY THE DOCUMENT DID NOT HAPPEN, as far as
       the rest of Altium is concerned. SmartCompile skips its recompile

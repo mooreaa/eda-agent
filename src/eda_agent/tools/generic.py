@@ -2898,13 +2898,19 @@ def register_generic_tools(mcp):
         Args:
             placements: [{lib_reference (required), x, y (mils),
                 library_path (empty: an open library), designator,
-                rotation (0/90/180/270), footprint}].
+                rotation (0/90/180/270), footprint}]. ``footprint`` names
+                one of the symbol's own PCB models (case aside), which
+                becomes its only current one, the model FootprintPinMap
+                then maps. A name the symbol lacks is not placed:
+                FOOTPRINT_NOT_ON_SYMBOL, with its models in
+                ``footprint_hint``.
             document_path: .SchDoc to focus and place onto.
             allow_manual_layout: True places your own coordinates onto an
                 empty sheet anyway; say why.
 
         Returns:
-            Dict with placed, failed, total counts.
+            Dict with placed, failed, total, footprints_chosen counts,
+            and failed_refdes as ``designator:REASON``.
         """
         refusal = _unknown_keys_refusal(
             placements, PLACEMENT_KEYS,
@@ -2927,7 +2933,7 @@ def register_generic_tools(mcp):
             if p.get("designator"):
                 fields.append(f"designator={p['designator']}")
             if p.get("footprint"):
-                fields.append(f"footprint={p['footprint']}")
+                fields.append(f"footprint={payload_safe(p['footprint'])}")
             op_strs.append(";".join(fields))
 
         if not op_strs:
