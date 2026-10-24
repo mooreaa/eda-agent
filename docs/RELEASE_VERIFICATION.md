@@ -109,8 +109,8 @@ works elsewhere cannot be an undeclared identifier:
 | 40, display mode | `DisplayMode` written on a placed component | yes, `Library.pas`, on library symbols | low, written, saved and reloaded live; the pins move and the wires do not |
 | 40, mode count | `DisplayModeCount` read on a component | no, nowhere | low, read live on two parts |
 | 40, footprint pin map | `MapAsString` on a placed part's footprint implementation | no, nowhere | low, read and written live; Altium merges by pin and does not check pads, and the read-back catches the first |
-| 41, footprint chosen at placement | `IsCurrent` written False and True on a just-placed part's footprint implementations | yes, `Lib_NormalizeImplementations` both ways on library symbols, `AddPlacedFootprintModel` True on placed parts | medium, the identifier is proven; what Altium does to the other flags is not, so every flag is read back and a choice that does not hold takes the part off the sheet |
-| 42, footprint chosen on a placed part | `IsCurrent` written False and True on a part already on a sheet, through the Footprint key and relink, and written back when the choice fails | yes, step 41 on a just-placed part | medium, the same writes on production parts, where the old rename was the failure; a choice that does not hold puts the flags back and renames nothing |
+| 41, footprint chosen at placement | `IsCurrent` written False and True on a just-placed part's footprint implementations | yes, `Lib_NormalizeImplementations` both ways on library symbols, `AddPlacedFootprintModel` True on placed parts | low, run live: both choices held with the order used, and the saved file had one current model each; the read-back stays, and a choice that does not hold takes the part off the sheet |
+| 42, footprint chosen on a placed part | `IsCurrent` written False and True on a part already on a sheet, through the Footprint key and relink, and written back when the choice fails | yes, step 41 on a just-placed part | low, run live on a scratch sheet: chosen, not renamed, through the Footprint key and relink; the restore after a failed choice is checked only by the mirror |
 
 Steps 5 and 2 are the ones that justify a live session. The bottom rows
 write properties this codebase already exercises, so they are checking
@@ -2553,11 +2553,36 @@ LFPAK33-8 current in the library):
    save: the map records that changed are PowerPAK SC-70 (S)'s, and
    LFPAK33-8's still read the library's D→3, G→2, S→1.
 
-Not yet run live: the bridge was in use by another session. Checked by
-`tests/test_sch_place_footprint.py`, which also runs a line-for-line Python
-mirror of the three helpers against implementations whose setter is plain,
-clears its siblings, ignores the write, or promotes another model, and by
-the linter. FPC was not run.
+Also checked by `tests/test_sch_place_footprint.py`, which runs a
+line-for-line Python mirror of the three helpers against implementations
+whose setter is plain, clears its siblings, ignores the write, or promotes
+another model, and by the linter. FPC was not run.
+
+Run live on AD 25.8.1.18 with 2026.10.24.3 on 2026-10-24, on a free scratch
+sheet outside every project. The records were read from the saved file
+after each item. `app_ping` answered throughout, no dialog opened, and the
+344 open documents listed the same, none modified, before and after:
+
+1. Passed: `placed` 4 of 5, `footprints_chosen` 2, and Q1's saved records
+   carry `IsCurrent=T` on PowerPAK SC-70 (S) alone among its twenty
+   models. `FootprintPinMap` read that model's library map,
+   `(D:2),(G:1),(S:3)`. The Properties panel was not looked at.
+2. Passed: Q2, asked for in lower case, came out the same as Q1.
+3. Passed: `Q3:FOOTPRINT_NOT_ON_SYMBOL`, `footprint_hint` named the
+   twenty models, and four components were on the sheet, not five.
+4. Passed: Q4, placed without `footprint`, kept LFPAK33-8 and read its map
+   `(D:3),(G:2),(S:1)`.
+5. Not needed: no `FOOTPRINT_NOT_APPLIED`. Altium's setter takes the
+   clear-then-set order; which of the two kinds it is was not separated.
+6. Passed after a close and reopen. The library already maps PowerPAK
+   SC-70 (S) as G→1, D→2, S→3, so `G->3;D->1;S->2` was written instead of
+   the map above. Of the 61 model entries on the sheet, exactly one changed
+   in the saved file: Q1's PowerPAK SC-70 (S) map. LFPAK33-8's still read
+   D→3, G→2, S→1.
+
+The running MCP server was the Python from before these commits, so its
+tool text is the old one and the footprint was not passed through
+`payload_safe`; no footprint name with a `;` was tried.
 
 ## 42. A footprint by name on a part already placed
 
@@ -2601,10 +2626,32 @@ On a free scratch sheet with Q1, an NMOS placed WITHOUT `footprint`
 5. **Then the map.** `FootprintPinMap=G->1;D->2;S->3` on Q1 after item 1:
    only PowerPAK SC-70 (S)'s map records change.
 
-Not yet run live. Checked by `tests/test_sch_place_footprint.py` (the
-routine's order, nine more removed safeguards, and the mirror run against
-the same four setters, a failed choice putting the flags back) and the
-linter.
+Also checked by `tests/test_sch_place_footprint.py` (the routine's order,
+five more removed safeguards, and the mirror run against the same four
+setters, a failed choice putting the flags back) and the linter.
+
+Run live in the same session as step 41, on its Q4 and on D1, a BAT54H from
+`Diode.SchLib` whose only model is SOD-123:
+
+1. Passed: `footprints_applied` 1. Twenty distinct model names in the
+   saved file, `IsCurrent=T` on PowerPAK SC-70 (S) alone, and LFPAK33-8
+   still named so with its own map. The same call renamed LFPAK33-8
+   before this step.
+2. Passed through `sch_set_components_parameters`: `Footprint: "lfpak33-8"`
+   applied, LFPAK33-8 current again, and still spelled `LFPAK33-8`. The
+   single-part handler (`set_sch_component_parameters`) has no Python
+   caller, so no tool reaches it; its `applied` change was not run.
+3. Passed: `not_applied` empty, `footprint` LFPAK33-8 before and SOT-23
+   after, `footprint_models_added` 0.
+4. Passed: D1's SOD-123 model and its link entity were renamed SOD-323.
+5. Passed, on the model item 3 chose rather than item 1's. With SOT-23
+   current, `G->2;D->1;S->3` changed SOT-23's map records and nothing else.
+   Across items 2 to 5, the saved file differed from item 1's in exactly
+   three entries: D1's rename, SOT-23 becoming current with the new map,
+   and PowerPAK SC-70 (S) no longer current.
+
+A choice that does not read back, and so the restore, did not occur; only
+the mirror covers it.
 
 ---
 
