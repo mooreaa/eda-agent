@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """sch_fix_port_crossrefs: a port's reference belongs at its unwired end.
 
 Found on the Rosen controller (2026-10-26): ports moved while unwired kept

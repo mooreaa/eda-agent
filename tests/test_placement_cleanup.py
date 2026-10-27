@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """What a new object needs so it matches the sheet it lands on.
 
 Every one of these was fixed by hand, object by object, on the Rosen

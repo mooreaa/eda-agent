@@ -538,6 +538,281 @@ Begin
         Or (Obj.ObjectId = eSheetName) Or (Obj.ObjectId = eSheetFileName);
 End;
 
+{ SCHEMATIC PROPERTIES OF ONE OBJECT TYPE.                                    }
+{ Pins: the four pin symbols and their line width (Altium's numbers),        }
+{ HiddenNetName, and DefinedFunctions (the pin's functions, ';'-separated;   }
+{ writing replaces the list). Parts: ShowHiddenPins, ShowHiddenFields,       }
+{ PinsMoveable, PartIdLocked, DisplayFieldNames, OverideColors (Altium's     }
+{ spelling) and PinColor. Pins also: where the name and designator sit      }
+{ (Name_PositionMode, Name_CustomPosition_Margin, ..._RotationAnchor,        }
+{ ..._RotationRelative, and the same for Designator_). Parameters:          }
+{ ReadOnlyState, ParamType, AllowLibrarySynchronize,                        }
+{ AllowDatabaseSynchronize. Ports: AutoSize, OverrideDisplayString,         }
+{ HarnessColor. Parameters also report NameIsReadOnly, ValueIsReadOnly,     }
+{ IsRule, IsSystemParameter and IsConfigurable (read only).                 }
+{ Pins also DefaultValue and FormalType; parts also                         }
+{ LibraryPath (the library the symbol came from) and AliasAsText.           }
+
+{ 1 a pin property, 2 a part property, 3 a parameter property, 4 a port     }
+{ property, 0 none of these.                                                }
+Function SchExtraOwner(PropName : String) : Integer;
+Begin
+    Result := 0;
+    If (PropName = 'Symbol_Inner') Or (PropName = 'Symbol_Outer') Or
+       (PropName = 'Symbol_InnerEdge') Or (PropName = 'Symbol_OuterEdge') Or
+       (PropName = 'Symbol_LineWidth') Or (PropName = 'HiddenNetName') Or
+       (PropName = 'DefinedFunctions') Or
+       (PropName = 'Name_PositionMode') Or (PropName = 'Name_CustomPosition_Margin') Or
+       (PropName = 'Name_CustomPosition_RotationAnchor') Or
+       (PropName = 'Name_CustomPosition_RotationRelative') Or
+       (PropName = 'Designator_PositionMode') Or
+       (PropName = 'Designator_CustomPosition_Margin') Or
+       (PropName = 'Designator_CustomPosition_RotationAnchor') Or
+       (PropName = 'Designator_CustomPosition_RotationRelative') Or
+       (PropName = 'DefaultValue') Or (PropName = 'FormalType') Then Result := 1
+    Else If (PropName = 'ShowHiddenPins') Or (PropName = 'ShowHiddenFields') Or
+       (PropName = 'PinsMoveable') Or (PropName = 'PartIdLocked') Or
+       (PropName = 'DisplayFieldNames') Or (PropName = 'OverideColors') Or
+       (PropName = 'PinColor') Or (PropName = 'LibraryPath') Or
+       (PropName = 'AliasAsText') Then Result := 2
+    Else If (PropName = 'ReadOnlyState') Or (PropName = 'ParamType') Or
+       (PropName = 'AllowLibrarySynchronize') Or
+       (PropName = 'AllowDatabaseSynchronize') Or (PropName = 'NameIsReadOnly') Or
+       (PropName = 'ValueIsReadOnly') Or (PropName = 'IsRule') Or
+       (PropName = 'IsSystemParameter') Or (PropName = 'IsConfigurable') Then Result := 3
+    Else If (PropName = 'AutoSize') Or (PropName = 'OverrideDisplayString') Or
+       (PropName = 'HarnessColor') Then Result := 4;
+End;
+
+{ True when Obj is the type that carries PropName. }
+Function SchExtraFits(Obj : ISch_GraphicalObject; PropName : String) : Boolean;
+Var
+    Owner : Integer;
+Begin
+    Owner := SchExtraOwner(PropName);
+    Result := ((Owner = 1) And (Obj.ObjectId = ePin))
+        Or ((Owner = 2) And (Obj.ObjectId = eSchComponent))
+        Or ((Owner = 3) And (Obj.ObjectId = eParameter))
+        Or ((Owner = 4) And (Obj.ObjectId = ePort));
+End;
+
+{ A whole-number extra (0 or more), a true / false one, or neither (text). }
+Function SchExtraIsInt(PropName : String) : Boolean;
+Begin
+    Result := (PropName = 'Symbol_Inner') Or (PropName = 'Symbol_Outer') Or
+        (PropName = 'Symbol_InnerEdge') Or (PropName = 'Symbol_OuterEdge') Or
+        (PropName = 'Symbol_LineWidth') Or (PropName = 'PinColor') Or
+        (PropName = 'Name_PositionMode') Or (PropName = 'Name_CustomPosition_Margin') Or
+        (PropName = 'Name_CustomPosition_RotationAnchor') Or
+        (PropName = 'Name_CustomPosition_RotationRelative') Or
+        (PropName = 'Designator_PositionMode') Or
+        (PropName = 'Designator_CustomPosition_Margin') Or
+        (PropName = 'Designator_CustomPosition_RotationAnchor') Or
+        (PropName = 'Designator_CustomPosition_RotationRelative') Or
+        (PropName = 'ReadOnlyState') Or (PropName = 'ParamType') Or
+        (PropName = 'HarnessColor') Or (PropName = 'FormalType');
+End;
+
+Function SchExtraIsBool(PropName : String) : Boolean;
+Begin
+    Result := ((SchExtraOwner(PropName) = 2) And (PropName <> 'PinColor')
+            And (PropName <> 'LibraryPath') And (PropName <> 'AliasAsText'))
+        Or (PropName = 'AllowLibrarySynchronize') Or
+        (PropName = 'AllowDatabaseSynchronize') Or (PropName = 'AutoSize');
+End;
+
+{ A pin's functions, ';'-separated. }
+Function PinFunctionsText(Pin : ISch_Pin) : String;
+Var
+    I, Count : Integer;
+    Item : String;
+Begin
+    Result := '';
+    { GetDefinedFunction counts from 1 (measured on AD 26.11: index 0      }
+    { answers nothing and the last function is at Count).                  }
+    Count := Pin.GetDefinedFunctionsCount;
+    For I := 1 To Count Do
+    Begin
+        Item := '';
+        Try Item := Pin.GetDefinedFunction(I); Except Item := ''; End;
+        If Item = '' Then Continue;
+        If Result <> '' Then Result := Result + ';';
+        Result := Result + Item;
+    End;
+End;
+
+{ The value, '' when Obj is not the type that carries it. }
+Function SchGetExtra(Obj : ISch_GraphicalObject; PropName : String) : String;
+Var
+    Pin : ISch_Pin;
+    Comp : ISch_Component;
+    Par : ISch_Parameter;
+    Port : ISch_Port;
+Begin
+    Result := '';
+    If Not SchExtraFits(Obj, PropName) Then Exit;
+    If Obj.ObjectId = ePin Then
+    Begin
+        Pin := Obj;
+        If PropName = 'Symbol_Inner' Then Result := IntToStr(Pin.Symbol_Inner)
+        Else If PropName = 'Symbol_Outer' Then Result := IntToStr(Pin.Symbol_Outer)
+        Else If PropName = 'Symbol_InnerEdge' Then Result := IntToStr(Pin.Symbol_InnerEdge)
+        Else If PropName = 'Symbol_OuterEdge' Then Result := IntToStr(Pin.Symbol_OuterEdge)
+        Else If PropName = 'Symbol_LineWidth' Then Result := IntToStr(Pin.Symbol_LineWidth)
+        Else If PropName = 'HiddenNetName' Then Result := Pin.HiddenNetName
+        Else If PropName = 'DefinedFunctions' Then Result := PinFunctionsText(Pin)
+        Else If PropName = 'Name_PositionMode' Then Result := IntToStr(Pin.Name_PositionMode)
+        Else If PropName = 'Name_CustomPosition_Margin' Then Result := IntToStr(Pin.Name_CustomPosition_Margin)
+        Else If PropName = 'Name_CustomPosition_RotationAnchor' Then Result := IntToStr(Pin.Name_CustomPosition_RotationAnchor)
+        Else If PropName = 'Name_CustomPosition_RotationRelative' Then Result := IntToStr(Pin.Name_CustomPosition_RotationRelative)
+        Else If PropName = 'Designator_PositionMode' Then Result := IntToStr(Pin.Designator_PositionMode)
+        Else If PropName = 'Designator_CustomPosition_Margin' Then Result := IntToStr(Pin.Designator_CustomPosition_Margin)
+        Else If PropName = 'Designator_CustomPosition_RotationAnchor' Then Result := IntToStr(Pin.Designator_CustomPosition_RotationAnchor)
+        Else If PropName = 'Designator_CustomPosition_RotationRelative' Then Result := IntToStr(Pin.Designator_CustomPosition_RotationRelative)
+        Else If PropName = 'DefaultValue' Then Result := Pin.DefaultValue
+        Else If PropName = 'FormalType' Then Result := IntToStr(Pin.FormalType);
+    End
+    Else If Obj.ObjectId = eParameter Then
+    Begin
+        Par := Obj;
+        If PropName = 'ReadOnlyState' Then Result := IntToStr(Par.ReadOnlyState)
+        Else If PropName = 'ParamType' Then Result := IntToStr(Par.ParamType)
+        Else If PropName = 'AllowLibrarySynchronize' Then Result := BoolToJsonStr(Par.AllowLibrarySynchronize)
+        Else If PropName = 'AllowDatabaseSynchronize' Then Result := BoolToJsonStr(Par.AllowDatabaseSynchronize)
+        Else If PropName = 'NameIsReadOnly' Then Result := BoolToJsonStr(Par.NameIsReadOnly)
+        Else If PropName = 'ValueIsReadOnly' Then Result := BoolToJsonStr(Par.ValueIsReadOnly)
+        Else If PropName = 'IsRule' Then Result := BoolToJsonStr(Par.IsRule)
+        Else If PropName = 'IsSystemParameter' Then Result := BoolToJsonStr(Par.IsSystemParameter)
+        Else If PropName = 'IsConfigurable' Then Result := BoolToJsonStr(Par.IsConfigurable);
+    End
+    Else If Obj.ObjectId = ePort Then
+    Begin
+        Port := Obj;
+        If PropName = 'AutoSize' Then Result := BoolToJsonStr(Port.AutoSize)
+        Else If PropName = 'OverrideDisplayString' Then Result := Port.OverrideDisplayString
+        Else If PropName = 'HarnessColor' Then Result := IntToStr(Port.HarnessColor);
+    End
+    Else
+    Begin
+        Comp := Obj;
+        If PropName = 'ShowHiddenPins' Then Result := BoolToJsonStr(Comp.ShowHiddenPins)
+        Else If PropName = 'ShowHiddenFields' Then Result := BoolToJsonStr(Comp.ShowHiddenFields)
+        Else If PropName = 'PinsMoveable' Then Result := BoolToJsonStr(Comp.PinsMoveable)
+        Else If PropName = 'PartIdLocked' Then Result := BoolToJsonStr(Comp.PartIdLocked)
+        Else If PropName = 'DisplayFieldNames' Then Result := BoolToJsonStr(Comp.DisplayFieldNames)
+        Else If PropName = 'OverideColors' Then Result := BoolToJsonStr(Comp.OverideColors)
+        Else If PropName = 'PinColor' Then Result := IntToStr(Comp.PinColor)
+        Else If PropName = 'LibraryPath' Then Result := Comp.LibraryPath
+        Else If PropName = 'AliasAsText' Then Result := Comp.AliasAsText;
+    End;
+End;
+
+{ Write, then read back: True only when the value read equals the value     }
+{ asked for. A number property refuses a value that is not a whole number,  }
+{ a switch one that is not true / false.                                    }
+Function SchSetExtra(Obj : ISch_GraphicalObject; PropName : String; Value : String) : Boolean;
+Var
+    Pin : ISch_Pin;
+    Comp : ISch_Component;
+    Par : ISch_Parameter;
+    Port : ISch_Port;
+    Rest, Item, Wanted : String;
+    SemiPos, N : Integer;
+    B, IsBool, IsInt : Boolean;
+Begin
+    Result := False;
+    If Not SchExtraFits(Obj, PropName) Then Exit;
+    { Read only: what Altium says about the parameter, not a setting. }
+    If (PropName = 'NameIsReadOnly') Or (PropName = 'ValueIsReadOnly') Or
+       (PropName = 'IsRule') Or (PropName = 'IsSystemParameter') Or
+       (PropName = 'IsConfigurable') Then Exit;
+    IsInt := SchExtraIsInt(PropName);
+    IsBool := SchExtraIsBool(PropName);
+    N := 0;
+    B := False;
+    If IsInt Then
+    Begin
+        If Not IsIntStr(Value) Then Exit;
+        N := StrToInt(Value);
+        If N < 0 Then Exit;
+    End
+    Else If IsBool Then
+    Begin
+        If LowerCase(Value) = 'true' Then B := True
+        Else If LowerCase(Value) <> 'false' Then Exit;
+    End;
+    If Obj.ObjectId = ePin Then
+    Begin
+        Pin := Obj;
+        If PropName = 'Symbol_Inner' Then Pin.Symbol_Inner := N
+        Else If PropName = 'Symbol_Outer' Then Pin.Symbol_Outer := N
+        Else If PropName = 'Symbol_InnerEdge' Then Pin.Symbol_InnerEdge := N
+        Else If PropName = 'Symbol_OuterEdge' Then Pin.Symbol_OuterEdge := N
+        Else If PropName = 'Symbol_LineWidth' Then Pin.Symbol_LineWidth := N
+        Else If PropName = 'HiddenNetName' Then Pin.HiddenNetName := Value
+        Else If PropName = 'DefinedFunctions' Then
+        Begin
+            Pin.ClearDefinedFunctions;
+            Wanted := '';
+            Rest := Value;
+            While Rest <> '' Do
+            Begin
+                SemiPos := Pos(';', Rest);
+                If SemiPos = 0 Then Begin Item := Rest; Rest := ''; End
+                Else Begin Item := Copy(Rest, 1, SemiPos - 1); Rest := Copy(Rest, SemiPos + 1, Length(Rest)); End;
+                If Trim(Item) <> '' Then
+                Begin
+                    Pin.AddDefinedFunction(Trim(Item));
+                    If Wanted <> '' Then Wanted := Wanted + ';';
+                    Wanted := Wanted + Trim(Item);
+                End;
+            End;
+        End
+        Else If PropName = 'Name_PositionMode' Then Pin.Name_PositionMode := N
+        Else If PropName = 'Name_CustomPosition_Margin' Then Pin.Name_CustomPosition_Margin := N
+        Else If PropName = 'Name_CustomPosition_RotationAnchor' Then Pin.Name_CustomPosition_RotationAnchor := N
+        Else If PropName = 'Name_CustomPosition_RotationRelative' Then Pin.Name_CustomPosition_RotationRelative := N
+        Else If PropName = 'Designator_PositionMode' Then Pin.Designator_PositionMode := N
+        Else If PropName = 'Designator_CustomPosition_Margin' Then Pin.Designator_CustomPosition_Margin := N
+        Else If PropName = 'Designator_CustomPosition_RotationAnchor' Then Pin.Designator_CustomPosition_RotationAnchor := N
+        Else If PropName = 'Designator_CustomPosition_RotationRelative' Then Pin.Designator_CustomPosition_RotationRelative := N
+        Else If PropName = 'DefaultValue' Then Pin.DefaultValue := Value
+        Else If PropName = 'FormalType' Then Pin.FormalType := N;
+    End
+    Else If Obj.ObjectId = eParameter Then
+    Begin
+        Par := Obj;
+        If PropName = 'ReadOnlyState' Then Par.ReadOnlyState := N
+        Else If PropName = 'ParamType' Then Par.ParamType := N
+        Else If PropName = 'AllowLibrarySynchronize' Then Par.AllowLibrarySynchronize := B
+        Else If PropName = 'AllowDatabaseSynchronize' Then Par.AllowDatabaseSynchronize := B;
+    End
+    Else If Obj.ObjectId = ePort Then
+    Begin
+        Port := Obj;
+        If PropName = 'AutoSize' Then Port.AutoSize := B
+        Else If PropName = 'OverrideDisplayString' Then Port.OverrideDisplayString := Value
+        Else If PropName = 'HarnessColor' Then Port.HarnessColor := N;
+    End
+    Else
+    Begin
+        Comp := Obj;
+        If PropName = 'ShowHiddenPins' Then Comp.ShowHiddenPins := B
+        Else If PropName = 'ShowHiddenFields' Then Comp.ShowHiddenFields := B
+        Else If PropName = 'PinsMoveable' Then Comp.PinsMoveable := B
+        Else If PropName = 'PartIdLocked' Then Comp.PartIdLocked := B
+        Else If PropName = 'DisplayFieldNames' Then Comp.DisplayFieldNames := B
+        Else If PropName = 'OverideColors' Then Comp.OverideColors := B
+        Else If PropName = 'PinColor' Then Comp.PinColor := N
+        Else If PropName = 'LibraryPath' Then Comp.LibraryPath := Value
+        Else If PropName = 'AliasAsText' Then Comp.AliasAsText := Value;
+    End;
+    If IsInt Then Result := SchGetExtra(Obj, PropName) = IntToStr(N)
+    Else If IsBool Then Result := SchGetExtra(Obj, PropName) = BoolToJsonStr(B)
+    Else If PropName = 'DefinedFunctions' Then Result := SchGetExtra(Obj, PropName) = Wanted
+    Else Result := SchGetExtra(Obj, PropName) = Value;
+End;
+
 { Preflight only the known unsupported property/type pairs. Preserve the
   existing treatment of other names; do not guess a complete capability map. }
 Function UnsupportedSchProperty(Obj : ISch_GraphicalObject; SetStr : String) : String;
@@ -575,7 +850,8 @@ Begin
                     And (Obj.ObjectId <> eSchComponent))
                 Or (((PropName = 'SwapIdPart') Or (PropName = 'SwapIdPin')
                     Or (PropName = 'SwapIdPair') Or (PropName = 'SwapIdPartPin'))
-                    And (Obj.ObjectId <> ePin)) Then
+                    And (Obj.ObjectId <> ePin))
+                Or ((SchExtraOwner(PropName) > 0) And (Not SchExtraFits(Obj, PropName))) Then
             Begin
                 Result := PropName;
                 Exit;
@@ -1206,7 +1482,8 @@ Begin
     Result := '';
     Try
         // Identity
-        If PropName = 'ObjectId'    Then Result := IntToStr(Obj.ObjectId)
+        If SchExtraOwner(PropName) > 0 Then Result := SchGetExtra(Obj, PropName)
+        Else If PropName = 'ObjectId'    Then Result := IntToStr(Obj.ObjectId)
 
         // Coordinates (returned in mils). Corner is declared only on
         // ISch_Rectangle and ISch_Line (ISch_RoundRectangle inherits from
@@ -1679,11 +1956,15 @@ Begin
     Matched := True;
     WroteOK := True;
     Try
+        If SchExtraOwner(PropName) > 0 Then
+        Begin
+            WroteOK := SchSetExtra(Obj, PropName, Value);
+        End
         // Coordinates (expected in mils). `Obj.Location` returns a copy of
         // the TLocation record via the GetState_Location reader; writing
         // directly to `.X` / `.Y` on that copy is silently discarded. Read
         // the whole record, patch the target field, write it back.
-        If PropName = 'Location.X' Then
+        Else If PropName = 'Location.X' Then
         Begin
             Loc := Obj.Location;
             Loc.X := MilsToCoordF(StrToFloatDef(Value, 0));
@@ -8186,16 +8467,404 @@ Begin
         Result := BuildErrorResponse(RequestId, 'NO_DOCUMENT', 'No active schematic or PCB document');
 End;
 
+{ SCHEMATIC EDITOR PREFERENCES (Preferences > Schematic), Altium's own, kept  }
+{ for every sheet. 'b' a switch, 'i' a whole number of 0 or more, 't' text,   }
+{ '' not one of these.                                                        }
+Function SchOptionKind(Name : String) : String;
+Begin
+    Result := '';
+    If (Name = 'SnapToHotSpot') Or (Name = 'MaintainOrthogonal') Or
+       (Name = 'ComponentsCutWires') Or (Name = 'OptimizePolylines') Or
+       (Name = 'SingleSlashNegation') Or (Name = 'ConvertSpecialStrings') Or
+       (Name = 'MarkManualParameters') Or (Name = 'ShowPinDirection') Or
+       (Name = 'AutoZoom') Or (Name = 'ClickClearsSelection') Or
+       (Name = 'DoubleClickRunsInspector') Or (Name = 'ExpandComponentDesignators') Or
+       (Name = 'ExpandNetLabelsText') Or (Name = 'ExpandPortsName') Or
+       (Name = 'ExpandSheetNumber') Or (Name = 'ExpandDocumentNumber') Or
+       (Name = 'WatermarkReadOnlySheet') Or (Name = 'AlwaysDrag') Or
+       (Name = 'DisplayPrinterFonts') Or (Name = 'StringIncRemoveLeadingZero') Or
+       (Name = 'CtrlDbleClickGoesDown') Or (Name = 'ConfirmSelectionMemoryClear') Or
+       (Name = 'AllowDeviceSheetEditing') Or (Name = 'WatermarkDeviceSheet') Then Result := 'b'
+    Else If (Name = 'HotSpotGridDistance') Or (Name = 'UndoRedoStackSize') Or
+       (Name = 'PinNameMargin') Or (Name = 'PinNumberMargin') Or
+       (Name = 'MultiPartNamingMethod') Or (Name = 'CutterGridSizeMultiple') Or
+       (Name = 'CutterFixedLength') Or (Name = 'PhysicalViewDimLevel') Then Result := 'i'
+    Else If (Name = 'StringIncA') Or (Name = 'StringIncB') Or
+       (Name = 'DefaultPowerGndName') Or (Name = 'DefaultSignalGndName') Or
+       (Name = 'DefaultEarthName') Or (Name = 'DefaultTemplateFileName') Then Result := 't';
+End;
+
+{ The value as JSON text. }
+Function SchOptionGet(Prefs : ISch_Preferences; Name : String) : String;
+Begin
+    Result := '';
+    If Name = 'SnapToHotSpot' Then Result := BoolToJsonStr(Prefs.SnapToHotSpot)
+    Else If Name = 'MaintainOrthogonal' Then Result := BoolToJsonStr(Prefs.MaintainOrthogonal)
+    Else If Name = 'ComponentsCutWires' Then Result := BoolToJsonStr(Prefs.ComponentsCutWires)
+    Else If Name = 'OptimizePolylines' Then Result := BoolToJsonStr(Prefs.OptimizePolylines)
+    Else If Name = 'SingleSlashNegation' Then Result := BoolToJsonStr(Prefs.SingleSlashNegation)
+    Else If Name = 'ConvertSpecialStrings' Then Result := BoolToJsonStr(Prefs.ConvertSpecialStrings)
+    Else If Name = 'MarkManualParameters' Then Result := BoolToJsonStr(Prefs.MarkManualParameters)
+    Else If Name = 'ShowPinDirection' Then Result := BoolToJsonStr(Prefs.ShowPinDirection)
+    Else If Name = 'AutoZoom' Then Result := BoolToJsonStr(Prefs.AutoZoom)
+    Else If Name = 'ClickClearsSelection' Then Result := BoolToJsonStr(Prefs.ClickClearsSelection)
+    Else If Name = 'DoubleClickRunsInspector' Then Result := BoolToJsonStr(Prefs.DoubleClickRunsInspector)
+    Else If Name = 'ExpandComponentDesignators' Then Result := BoolToJsonStr(Prefs.ExpandComponentDesignators)
+    Else If Name = 'ExpandNetLabelsText' Then Result := BoolToJsonStr(Prefs.ExpandNetLabelsText)
+    Else If Name = 'ExpandPortsName' Then Result := BoolToJsonStr(Prefs.ExpandPortsName)
+    Else If Name = 'ExpandSheetNumber' Then Result := BoolToJsonStr(Prefs.ExpandSheetNumber)
+    Else If Name = 'ExpandDocumentNumber' Then Result := BoolToJsonStr(Prefs.ExpandDocumentNumber)
+    Else If Name = 'WatermarkReadOnlySheet' Then Result := BoolToJsonStr(Prefs.WatermarkReadOnlySheet)
+    Else If Name = 'AlwaysDrag' Then Result := BoolToJsonStr(Prefs.AlwaysDrag)
+    Else If Name = 'DisplayPrinterFonts' Then Result := BoolToJsonStr(Prefs.DisplayPrinterFonts)
+    Else If Name = 'StringIncRemoveLeadingZero' Then Result := BoolToJsonStr(Prefs.StringIncRemoveLeadingZero)
+    Else If Name = 'CtrlDbleClickGoesDown' Then Result := BoolToJsonStr(Prefs.CtrlDbleClickGoesDown)
+    Else If Name = 'ConfirmSelectionMemoryClear' Then Result := BoolToJsonStr(Prefs.ConfirmSelectionMemoryClear)
+    Else If Name = 'AllowDeviceSheetEditing' Then Result := BoolToJsonStr(Prefs.AllowDeviceSheetEditing)
+    Else If Name = 'WatermarkDeviceSheet' Then Result := BoolToJsonStr(Prefs.WatermarkDeviceSheet)
+    Else If Name = 'CutterGridSizeMultiple' Then Result := IntToStr(Prefs.CutterGridSizeMultiple)
+    Else If Name = 'CutterFixedLength' Then Result := IntToStr(Prefs.CutterFixedLength)
+    Else If Name = 'PhysicalViewDimLevel' Then Result := IntToStr(Prefs.PhysicalViewDimLevel)
+    Else If Name = 'HotSpotGridDistance' Then Result := IntToStr(Prefs.HotSpotGridDistance)
+    Else If Name = 'UndoRedoStackSize' Then Result := IntToStr(Prefs.UndoRedoStackSize)
+    Else If Name = 'PinNameMargin' Then Result := IntToStr(Prefs.PinNameMargin)
+    Else If Name = 'PinNumberMargin' Then Result := IntToStr(Prefs.PinNumberMargin)
+    Else If Name = 'MultiPartNamingMethod' Then Result := IntToStr(Prefs.MultiPartNamingMethod)
+    Else If Name = 'StringIncA' Then Result := '"' + EscapeJsonString(Prefs.StringIncA) + '"'
+    Else If Name = 'StringIncB' Then Result := '"' + EscapeJsonString(Prefs.StringIncB) + '"'
+    Else If Name = 'DefaultPowerGndName' Then Result := '"' + EscapeJsonString(Prefs.DefaultPowerGndName) + '"'
+    Else If Name = 'DefaultSignalGndName' Then Result := '"' + EscapeJsonString(Prefs.DefaultSignalGndName) + '"'
+    Else If Name = 'DefaultEarthName' Then Result := '"' + EscapeJsonString(Prefs.DefaultEarthName) + '"'
+    Else If Name = 'DefaultTemplateFileName' Then Result := '"' + EscapeJsonString(Prefs.DefaultTemplateFileName) + '"';
+End;
+
+{ Write one; False when the value is not of the option's kind. }
+Function SchOptionSet(Prefs : ISch_Preferences; Name : String; Value : String) : Boolean;
+Var
+    Kind : String;
+    B : Boolean;
+    N : Integer;
+Begin
+    Result := False;
+    Kind := SchOptionKind(Name);
+    B := False;
+    N := 0;
+    If Kind = 'b' Then
+    Begin
+        If LowerCase(Value) = 'true' Then B := True
+        Else If LowerCase(Value) <> 'false' Then Exit;
+    End
+    Else If Kind = 'i' Then
+    Begin
+        If Not IsIntStr(Value) Then Exit;
+        N := StrToInt(Value);
+        If N < 0 Then Exit;
+    End
+    Else If Kind <> 't' Then Exit;
+    If Name = 'SnapToHotSpot' Then Prefs.SnapToHotSpot := B
+    Else If Name = 'MaintainOrthogonal' Then Prefs.MaintainOrthogonal := B
+    Else If Name = 'ComponentsCutWires' Then Prefs.ComponentsCutWires := B
+    Else If Name = 'OptimizePolylines' Then Prefs.OptimizePolylines := B
+    Else If Name = 'SingleSlashNegation' Then Prefs.SingleSlashNegation := B
+    Else If Name = 'ConvertSpecialStrings' Then Prefs.ConvertSpecialStrings := B
+    Else If Name = 'MarkManualParameters' Then Prefs.MarkManualParameters := B
+    Else If Name = 'ShowPinDirection' Then Prefs.ShowPinDirection := B
+    Else If Name = 'AutoZoom' Then Prefs.AutoZoom := B
+    Else If Name = 'ClickClearsSelection' Then Prefs.ClickClearsSelection := B
+    Else If Name = 'DoubleClickRunsInspector' Then Prefs.DoubleClickRunsInspector := B
+    Else If Name = 'ExpandComponentDesignators' Then Prefs.ExpandComponentDesignators := B
+    Else If Name = 'ExpandNetLabelsText' Then Prefs.ExpandNetLabelsText := B
+    Else If Name = 'ExpandPortsName' Then Prefs.ExpandPortsName := B
+    Else If Name = 'ExpandSheetNumber' Then Prefs.ExpandSheetNumber := B
+    Else If Name = 'ExpandDocumentNumber' Then Prefs.ExpandDocumentNumber := B
+    Else If Name = 'WatermarkReadOnlySheet' Then Prefs.WatermarkReadOnlySheet := B
+    Else If Name = 'AlwaysDrag' Then Prefs.AlwaysDrag := B
+    Else If Name = 'DisplayPrinterFonts' Then Prefs.DisplayPrinterFonts := B
+    Else If Name = 'StringIncRemoveLeadingZero' Then Prefs.StringIncRemoveLeadingZero := B
+    Else If Name = 'CtrlDbleClickGoesDown' Then Prefs.CtrlDbleClickGoesDown := B
+    Else If Name = 'ConfirmSelectionMemoryClear' Then Prefs.ConfirmSelectionMemoryClear := B
+    Else If Name = 'AllowDeviceSheetEditing' Then Prefs.AllowDeviceSheetEditing := B
+    Else If Name = 'WatermarkDeviceSheet' Then Prefs.WatermarkDeviceSheet := B
+    Else If Name = 'CutterGridSizeMultiple' Then Prefs.CutterGridSizeMultiple := N
+    Else If Name = 'CutterFixedLength' Then Prefs.CutterFixedLength := N
+    Else If Name = 'PhysicalViewDimLevel' Then Prefs.PhysicalViewDimLevel := N
+    Else If Name = 'HotSpotGridDistance' Then Prefs.HotSpotGridDistance := N
+    Else If Name = 'UndoRedoStackSize' Then Prefs.UndoRedoStackSize := N
+    Else If Name = 'PinNameMargin' Then Prefs.PinNameMargin := N
+    Else If Name = 'PinNumberMargin' Then Prefs.PinNumberMargin := N
+    Else If Name = 'MultiPartNamingMethod' Then Prefs.MultiPartNamingMethod := N
+    Else If Name = 'StringIncA' Then Prefs.StringIncA := Value
+    Else If Name = 'StringIncB' Then Prefs.StringIncB := Value
+    Else If Name = 'DefaultPowerGndName' Then Prefs.DefaultPowerGndName := Value
+    Else If Name = 'DefaultSignalGndName' Then Prefs.DefaultSignalGndName := Value
+    Else If Name = 'DefaultEarthName' Then Prefs.DefaultEarthName := Value
+    Else If Name = 'DefaultTemplateFileName' Then Prefs.DefaultTemplateFileName := Value;
+    Result := True;
+End;
+
+{..............................................................................}
+{ Gen_SchEditorOptions - read, or set, schematic editor preferences by name.   }
+{ Params: names (comma-separated, to read), set ('Name=Value|Name=Value').    }
+{ Every option set is read back: one that reads otherwise is in not_applied, }
+{ a value of the wrong kind in refused, a name not offered in unknown.       }
+{..............................................................................}
+Function Gen_SchEditorOptions(Params : String; RequestId : String) : String;
+Var
+    Prefs : ISch_Preferences;
+    Names, SetStr, Item, Name, Value, Items, NotApplied, Refused, Unknown, Got, Wanted : String;
+    CommaPos, PipePos, EqPos : Integer;
+    Changed : Boolean;
+Begin
+    Names := ExtractJsonValue(Params, 'names');
+    SetStr := ExtractJsonValue(Params, 'set');
+    Prefs := Nil;
+    Try Prefs := SchServer.Preferences; Except Prefs := Nil; End;
+    If Prefs = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PREFERENCES', 'Could not reach the schematic editor preferences');
+        Exit;
+    End;
+    Items := ''; NotApplied := ''; Refused := ''; Unknown := '';
+    Changed := False;
+    While SetStr <> '' Do
+    Begin
+        PipePos := Pos('|', SetStr);
+        If PipePos = 0 Then Begin Item := SetStr; SetStr := ''; End
+        Else Begin Item := Copy(SetStr, 1, PipePos - 1); SetStr := Copy(SetStr, PipePos + 1, Length(SetStr)); End;
+        EqPos := Pos('=', Item);
+        If EqPos = 0 Then Continue;
+        Name := Trim(Copy(Item, 1, EqPos - 1));
+        Value := Copy(Item, EqPos + 1, Length(Item));
+        If SchOptionKind(Name) = '' Then
+        Begin
+            If Unknown <> '' Then Unknown := Unknown + ',';
+            Unknown := Unknown + '"' + EscapeJsonString(Name) + '"';
+            Continue;
+        End;
+        If SchOptionKind(Name) <> 't' Then Value := Trim(Value);
+        If Not SchOptionSet(Prefs, Name, Value) Then
+        Begin
+            If Refused <> '' Then Refused := Refused + ',';
+            Refused := Refused + '"' + EscapeJsonString(Name) + '"';
+            Continue;
+        End;
+        Changed := True;
+        Got := SchOptionGet(Prefs, Name);
+        If SchOptionKind(Name) = 't' Then Wanted := '"' + EscapeJsonString(Value) + '"'
+        Else Wanted := LowerCase(Value);
+        If Got <> Wanted Then
+        Begin
+            If NotApplied <> '' Then NotApplied := NotApplied + ',';
+            NotApplied := NotApplied + '"' + Name + '"';
+        End;
+        If Pos(',' + Name + ',', ',' + Names + ',') = 0 Then
+        Begin
+            If Names <> '' Then Names := Names + ',';
+            Names := Names + Name;
+        End;
+    End;
+    While Names <> '' Do
+    Begin
+        CommaPos := Pos(',', Names);
+        If CommaPos = 0 Then Begin Name := Names; Names := ''; End
+        Else Begin Name := Copy(Names, 1, CommaPos - 1); Names := Copy(Names, CommaPos + 1, Length(Names)); End;
+        Name := Trim(Name);
+        If Name = '' Then Continue;
+        If SchOptionKind(Name) = '' Then
+        Begin
+            If Pos('"' + Name + '"', Unknown) = 0 Then
+            Begin
+                If Unknown <> '' Then Unknown := Unknown + ',';
+                Unknown := Unknown + '"' + EscapeJsonString(Name) + '"';
+            End;
+            Continue;
+        End;
+        If Items <> '' Then Items := Items + ',';
+        Items := Items + '"' + Name + '":' + SchOptionGet(Prefs, Name);
+    End;
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonRaw('options', '{' + Items + '}') + ','
+        + JsonBool('changed', Changed) + ','
+        + JsonRaw('not_applied', '[' + NotApplied + ']') + ','
+        + JsonRaw('refused', '[' + Refused + ']') + ','
+        + JsonRaw('unknown', '[' + Unknown + ']')));
+End;
+
+{..............................................................................}
+{ Gen_OptimizeWires - Altium's own wire tidy on the active sheet: wires that  }
+{ continue one another are joined and overlaps trimmed                        }
+{ (ISch_Sheet.OptimizeUseOfPolylines). Connectivity is unchanged; the wire   }
+{ count and the vertex count are reported before and after.                  }
+{..............................................................................}
+Procedure CountSheetWires(SchDoc : ISch_Document; Var Wires : Integer; Var Vertices : Integer);
+Var
+    Iter : ISch_Iterator;
+    Wire : ISch_GraphicalObject;
+    N : Integer;
+Begin
+    Wires := 0;
+    Vertices := 0;
+    Iter := SchDoc.SchIterator_Create;
+    Try
+        Iter.AddFilter_ObjectSet(MkSet(eWire));
+        Wire := Iter.FirstSchObject;
+        While Wire <> Nil Do
+        Begin
+            Inc(Wires);
+            N := 0;
+            Try N := Wire.GetState_VerticesCount; Except N := 0; End;
+            Vertices := Vertices + N;
+            Wire := Iter.NextSchObject;
+        End;
+    Finally
+        SchDoc.SchIterator_Destroy(Iter);
+    End;
+End;
+
+Function Gen_OptimizeWires(Params : String; RequestId : String) : String;
+Var
+    SchDoc : ISch_Document;
+    Sheet : ISch_Sheet;
+    WiresBefore, VertsBefore, WiresAfter, VertsAfter : Integer;
+Begin
+    SchDoc := SchServer.GetCurrentSchDocument;
+    If SchDoc = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC', 'No schematic document is active');
+        Exit;
+    End;
+    CountSheetWires(SchDoc, WiresBefore, VertsBefore);
+    Sheet := SchDoc;
+    SchServer.ProcessControl.PreProcess(SchDoc, '');
+    Try
+        Sheet.OptimizeUseOfPolylines;
+    Finally
+        SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
+    End;
+    SchDoc.GraphicallyInvalidate;
+    CountSheetWires(SchDoc, WiresAfter, VertsAfter);
+    If (WiresAfter <> WiresBefore) Or (VertsAfter <> VertsBefore) Then
+        MarkDocDirtyByPath(SchDoc.DocumentName);
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonStr('sheet', SchDoc.DocumentName) + ','
+        + JsonInt('wires_before', WiresBefore) + ','
+        + JsonInt('wires_after', WiresAfter) + ','
+        + JsonInt('vertices_before', VertsBefore) + ','
+        + JsonInt('vertices_after', VertsAfter)));
+End;
+
+{..............................................................................}
+{ Gen_ReferenceZones - the border zone ('B3') each part, net label, port,     }
+{ power port, sheet symbol and off-sheet connector sits in on the active    }
+{ sheet, the way a printed drawing is read. The zone is Altium's own answer }
+{ (ISch_Document.ObjectReferenceZone); a sheet without zones answers ''.    }
+{ Params: kinds (comma-separated: component, net_label, port, power_port,  }
+{ sheet_symbol, cross_sheet; empty = all).                                 }
+{..............................................................................}
+Function Gen_ReferenceZones(Params : String; RequestId : String) : String;
+Var
+    SchDoc : ISch_Document;
+    Iter : ISch_Iterator;
+    Obj : ISch_GraphicalObject;
+    Comp : ISch_Component;
+    Lbl : ISch_NetLabel;
+    Port : ISch_Port;
+    Pwr : ISch_PowerObject;
+    Sym : ISch_SheetSymbol;
+    Kinds, Kind, Text, Zone, Items : String;
+    Oid, Count : Integer;
+Begin
+    Kinds := LowerCase(ExtractJsonValue(Params, 'kinds'));
+    If Kinds = '' Then Kinds := 'component,net_label,port,power_port,sheet_symbol,cross_sheet';
+    SchDoc := SchServer.GetCurrentSchDocument;
+    If SchDoc = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC', 'No schematic document is active');
+        Exit;
+    End;
+    Items := '';
+    Count := 0;
+    Iter := SchDoc.SchIterator_Create;
+    Try
+        Iter.AddFilter_ObjectSet(MkSet(eSchComponent, eNetLabel, ePort, ePowerObject,
+            eSheetSymbol, eCrossSheetConnector));
+        Obj := Iter.FirstSchObject;
+        While Obj <> Nil Do
+        Begin
+            Oid := Obj.ObjectId;
+            Kind := '';
+            Text := '';
+            If Oid = eSchComponent Then
+            Begin
+                Comp := Obj;
+                Kind := 'component';
+                Try Text := Comp.Designator.Text; Except End;
+            End
+            Else If Oid = eNetLabel Then
+            Begin
+                Lbl := Obj;
+                Kind := 'net_label';
+                Text := Lbl.Text;
+            End
+            Else If Oid = ePort Then
+            Begin
+                Port := Obj;
+                Kind := 'port';
+                Text := Port.Name;
+            End
+            Else If Oid = ePowerObject Then
+            Begin
+                Pwr := Obj;
+                Kind := 'power_port';
+                Text := Pwr.Text;
+            End
+            Else If Oid = eCrossSheetConnector Then
+            Begin
+                Pwr := Obj;
+                Kind := 'cross_sheet';
+                Text := Pwr.Text;
+            End
+            Else If Oid = eSheetSymbol Then
+            Begin
+                Sym := Obj;
+                Kind := 'sheet_symbol';
+                Try Text := Sym.SheetName.Text; Except End;
+            End;
+            If (Kind <> '') And (Pos(',' + Kind + ',', ',' + Kinds + ',') > 0) Then
+            Begin
+                Zone := '';
+                Try Zone := SchDoc.ObjectReferenceZone(Obj); Except Zone := ''; End;
+                If Items <> '' Then Items := Items + ',';
+                Items := Items + JsonObj(JsonStr('kind', Kind) + ','
+                    + JsonStr('text', Text) + ','
+                    + JsonStr('zone', Zone) + ','
+                    + JsonRaw('x', FloatToJsonStr(CoordToMilsF(Obj.Location.X))) + ','
+                    + JsonRaw('y', FloatToJsonStr(CoordToMilsF(Obj.Location.Y))));
+                Inc(Count);
+            End;
+            Obj := Iter.NextSchObject;
+        End;
+    Finally
+        SchDoc.SchIterator_Destroy(Iter);
+    End;
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonStr('sheet', SchDoc.DocumentName) + ','
+        + JsonInt('count', Count) + ','
+        + JsonRaw('objects', '[' + Items + ']')));
+End;
+
 {..............................................................................}
 { Set snap grid and visible grid size for the active schematic                }
-{ Params: snap_grid, visible_grid (in mils)                                   }
+{ Params: snap_grid, visible_grid, hotspot_grid (in mils), snap_grid_on,      }
+{ visible_grid_on, hotspot_grid_on. The hotspot grid is the electrical grid: }
+{ how far a wire end is pulled onto a pin or wire.                           }
 {..............................................................................}
 
 Function Gen_SetGrid(Params : String; RequestId : String) : String;
 Var
-    SnapGrid, VisibleGrid : Double;
-    SnapOnStr, VisibleOnStr : String;
-    SetSnapOn, SetVisibleOn : Boolean;
+    SnapGrid, VisibleGrid, HotGrid : Double;
+    SnapOnStr, VisibleOnStr, HotOnStr : String;
+    SetSnapOn, SetVisibleOn, SetHotOn : Boolean;
     SchDoc : ISch_Document;
 Begin
     SnapGrid := StrToFloatDef(ExtractJsonValue(Params, 'snap_grid'), 0);
@@ -8204,6 +8873,9 @@ Begin
     VisibleOnStr := LowerCase(ExtractJsonValue(Params, 'visible_grid_on'));
     SetSnapOn := (SnapOnStr = 'true') Or (SnapOnStr = 'false');
     SetVisibleOn := (VisibleOnStr = 'true') Or (VisibleOnStr = 'false');
+    HotGrid := StrToFloatDef(ExtractJsonValue(Params, 'hotspot_grid'), 0);
+    HotOnStr := LowerCase(ExtractJsonValue(Params, 'hotspot_grid_on'));
+    SetHotOn := (HotOnStr = 'true') Or (HotOnStr = 'false');
 
     SchDoc := SchServer.GetCurrentSchDocument;
     If SchDoc = Nil Then
@@ -8212,9 +8884,10 @@ Begin
         Exit;
     End;
 
-    If (SnapGrid <= 0) And (VisibleGrid <= 0) And (Not SetSnapOn) And (Not SetVisibleOn) Then
+    If (SnapGrid <= 0) And (VisibleGrid <= 0) And (HotGrid <= 0) And (Not SetSnapOn)
+        And (Not SetVisibleOn) And (Not SetHotOn) Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS', 'Give snap_grid or visible_grid (mils) and/or snap_grid_on or visible_grid_on (true/false)');
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS', 'Give snap_grid, visible_grid or hotspot_grid (mils) and/or snap_grid_on, visible_grid_on or hotspot_grid_on (true/false)');
         Exit;
     End;
 
@@ -8234,6 +8907,10 @@ Begin
     Begin
         Try SchDoc.VisibleGridOn := (VisibleOnStr = 'true'); Except End;
     End;
+    If HotGrid > 0 Then
+        SchDoc.HotspotGridSize := MilsToCoordF(HotGrid);
+    If SetHotOn Then
+        SchDoc.HotspotGridOn := (HotOnStr = 'true');
 
     SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     SchDoc.GraphicallyInvalidate;
@@ -8248,7 +8925,9 @@ Begin
         ',"snap_grid":' + FloatToJsonStr(CoordToMilsF(SchDoc.SnapGridSize)) +
         ',"visible_grid":' + FloatToJsonStr(CoordToMilsF(SchDoc.VisibleGridSize)) +
         ',"snap_grid_on":' + SnapOnStr +
-        ',"visible_grid_on":' + VisibleOnStr + '}');
+        ',"visible_grid_on":' + VisibleOnStr +
+        ',"hotspot_grid":' + FloatToJsonStr(CoordToMilsF(SchDoc.HotspotGridSize)) +
+        ',"hotspot_grid_on":' + BoolToJsonStr(SchDoc.HotspotGridOn) + '}');
 End;
 
 {..............................................................................}
@@ -14990,6 +15669,9 @@ Begin
         'get_sheet_frame': Result := Gen_GetSheetFrame(Params, RequestId);
         'shift_sheet':     Result := Gen_ShiftSheet(Params, RequestId);
         'set_grid':         Result := Gen_SetGrid(Params, RequestId);
+        'sch_editor_options': Result := Gen_SchEditorOptions(Params, RequestId);
+        'optimize_wires':   Result := Gen_OptimizeWires(Params, RequestId);
+        'reference_zones':  Result := Gen_ReferenceZones(Params, RequestId);
         'set_sch_units':    Result := Gen_SetSchUnits(Params, RequestId);
         'place_image':      Result := Gen_PlaceImage(Params, RequestId);
         'replace_component': Result := Gen_ReplaceComponent(Params, RequestId);

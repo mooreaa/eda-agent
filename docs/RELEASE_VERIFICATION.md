@@ -1,4 +1,4 @@
-# Release verification: 2026.10.26.101
+# Release verification: 2026.10.27.101
 
 Unless a section records live verification explicitly, the Pascal below has
 been checked by FPC and the linter but **not executed by Altium's DelphiScript engine**. The two are not the
@@ -19,7 +19,7 @@ works elsewhere cannot be an undeclared identifier:
 |---|---|---|---|
 | 5, 3D placement | `StandoffHeight` | only by step 15, itself unverified | highest |
 | 5, 3D placement | `Rotation` on a body | other object types only | high |
-| 2, pin edges | `Symbol_OuterEdge`, `Symbol_InnerEdge` | no, nowhere | high, and can stop the loop |
+| 2, pin edges | `Symbol_OuterEdge`, `Symbol_InnerEdge` | only by `Library.pas` and, since step 44, `Generic.pas` | high, and can stop the loop; the inner edge has since run live through obj_modify |
 | 7, enum words | `StrToPinElectrical` | yes, `Lib_AddPins` | medium |
 | 4, DNP paste | `PasteMaskExpansion` | yes, `PCB_MakePasteGrid` | low, but it edits the board |
 | 3, filled body | `AreaColor`, `IsSolid` | yes, `Generic.pas` | low |
@@ -124,7 +124,7 @@ works elsewhere cannot be an undeclared identifier:
 | 41, part to remove | `CurrentPartID`, `DisplayMode` written on a library symbol | yes, `Lib_CreateSymbol` | low |
 | 41, model to STEP | `ExportToStep` on a 3D model | no, nowhere | medium, writes a file only; ran live |
 | 41, board STEP | `Board3DModelExporter`, `ExportBoard3DModel` | no, nowhere | medium, writes a file only; ran live, and the dialog route stays behind it |
-| 41, impedance profiles | `GetImpedanceProfileCount`, `GetImpedanceProfileByIndex`, `GetTraceImpedanceByIndex`, `CalculatedImpedance` | no, nowhere | high for the per-profile reads, not yet run on a board with a profile; each read is guarded |
+| 41, impedance profiles | `GetImpedanceProfileCount`, `GetImpedanceProfileByIndex`, `GetTraceImpedanceForLayer`, `CalculatedImpedance` | no, nowhere | low since step 50: per-profile reads ran on a board with profiles; the layer is asked for by ID |
 | 42, variant API | `DM_AddProjectVariant`, `DM_SetName`, `DM_SetDescription` on a project and its new variant | no, nowhere | medium, ran live; the process route stays behind it |
 | 42, variant entries | `DM_AddComponentVariation`, `DM_RemoveComponentVariation`, `DM_SetVariationKind`, `DM_SetAlternatePart` | no, nowhere | medium, ran live and read back |
 | 42, net colours | `DM_SetNetColorByName` on a project | no, nowhere | low, ran live, set and cleared |
@@ -143,6 +143,59 @@ works elsewhere cannot be an undeclared identifier:
 | 43, part text properties | `LockStrings`, `FootprintDescription`, `DefaultPCB3DModel` on a placed part | only by `PCBGeneric.pas`, itself new | low, the first two written and read back live |
 | 43, project setup | `DM_MoveSourceDocument`, `DM_AddSearchPath`, `DM_SetAllowPortNetNames`, `DM_SetAllowSheetEntryNetNames` on a project | no, nowhere | medium, ran live, read back, saved and reopened |
 | 43, library check | `Sch_LibraryRuleChecker_Create`, `ShowReport`, `Duplicate_Pins`, `Missing_Footprint` on a library's rule checker | no, nowhere | low, writes a report file only; ran live |
+| 44, drill pair | `AddLayerPair` on the board | no, nowhere | medium, ran live; a copy and a non-copper layer are refused first |
+| 44, net display | `ShowNetConnects`, `HideNetConnects`, `LoopRemoval` on a net | no, nowhere | low, ran live, read back and restored |
+| 44, one footprint | `SaveComponentWithLibrary` on a library | no, nowhere | low, writes a file only; ran live |
+| 44, project library | `CreateLibraryFromProject` on a sheet | no, nowhere | low, writes a new library only; ran live |
+| 44, scope and output | `DM_SetHierarchyMode`, `DM_SetOutputPath` on a project | no, nowhere | medium, ran live, read back and restored |
+| 44, pin functions | `AddDefinedFunction`, `ClearDefinedFunctions` on a pin | no, nowhere | low, ran live and read back |
+| 44, pin symbols | `Symbol_InnerEdge` written on a pin | yes, `Lib_AddPins` | low, ran live and read back |
+| 44, more pin symbols | `Symbol_Inner`, `Symbol_Outer`, `Symbol_LineWidth`, `HiddenNetName` on a pin | no, nowhere | low, ran live and read back |
+| 44, part display | `ShowHiddenPins`, `PinsMoveable`, `OverideColors`, `PinColor` on a symbol | no, nowhere | low, ran live, read back and restored |
+| 44, pad ids | `JumperID`, `SwapID_Pad`, `SwapID_Part` on a pad | no, nowhere | low, ran live, read back and cleared |
+| 45, board grids | `SnapGridSizeX`, `TrackGridSize`, `ViaGridSize`, `DrawDotGrid` on the board | no, nowhere | low, ran live, read back and restored |
+| 45, part STEP | `SaveModelToFileAsPart` on a placed part | no, nowhere | low, writes a file only; ran live |
+| 45, auto-save | `DM_SetRecoveryParameters` on the workspace | no, nowhere | medium, changes an Altium setting; ran live and restored |
+| 45, net kinds | `DM_IsLocal`, `DM_ElectricalString`, `DM_SuppressERC`, bus members on a net | no, nowhere | low, reads only; ran live |
+| 45, project options | `DM_SetAppendSheetNumberToLocalNets`, `DM_SetPinSwapBy_Netlabel`, `DM_SetPinSwapBy_Pin` | no, nowhere | low, ran live, read back and restored |
+| 45, pour switches | `DrawDeadCopper`, `DrawRemovedNecks`, `DrawRemovedIslands`, `ExpandOutline`, `AutoGenerateName` on a pour | no, nowhere | low, ran live and restored; `AutoGenerateName` renames the pour |
+| 45, inverted text | `InvertedTTTextBorder`, `TTFInvertedTextJustify`, `TTFOffsetFromInvertedRect` on board text | no, nowhere | low, ran live, read back and restored |
+| 45, text inversion | `Inverted`, `UseInvertedRectangle` on board text | yes, `Lib_ConvertDesignatorsToStroke` | low, ran live, read back and restored |
+| 45, parameters and ports | `ReadOnlyState`, `ParamType`, synchronize switches; port `AutoSize`, `OverrideDisplayString`, `HarnessColor` | no, nowhere | low, ran live, read back and restored |
+| 45, pin label positions | `Name_PositionMode`, `Name_CustomPosition_Margin`, `Designator_PositionMode`, `Designator_CustomPosition_Margin` and their rotations on a pin | no, nowhere | low, ran live, read back and cleared |
+| 46, board view options | `ShowPadNets`, `ShowPadNumbers`, `ShowViaNets`, `SingleLayerMode`, `DisplaySpecialStrings`, `HighlightFull` on the PCB preferences | no, nowhere | medium, changes Altium's preferences; ran live and restored |
+| 46, board edit options | `RotationStep`, `ProtectLockedPrimitives`, `OnlySelectVisible`, `DuplicateDesignatorsAllowed` on the PCB preferences | no, nowhere | medium, changes Altium's preferences; ran live and restored |
+| 46, schematic options | `SnapToHotSpot`, `ComponentsCutWires`, `PinNameMargin`, `StringIncA`, `DefaultPowerGndName` on the schematic preferences | no, nowhere | medium, changes Altium's preferences; ran live and restored |
+| 46, electrical grid | `HotspotGridSize`, `HotspotGridOn` on a sheet | no, nowhere | low, ran live and read back |
+| 46, net colour and jumpers | `OverrideColorForDraw` on a net | no, nowhere | low, ran live and restored |
+| 46, board part extras | `SourceDescription`, `ChannelOffset`, `GroupNum` on a part | no, nowhere | low, ran live and restored |
+| 46, board pad extras | `SwappedPadName`, `OwnerPart_ID` on a pad | no, nowhere | low, ran live and cleared |
+| 46, pin and part extras | `DefaultValue`, `FormalType` on a pin; `LibraryPath`, `AliasAsText` on a part | no, nowhere | low, ran live and restored |
+| 47, routing options | `InteractiveRouteMode`, `PlowThroughPolygons`, `AutoVia`, `PlaceShoveDepth`, `UseSmartTrackEnds` on the PCB preferences | no, nowhere | medium, changes Altium's preferences; ran live and restored |
+| 47, view and edit additions | `PlaneDrawMode`, `DraftTrackThreshold`, `DragMode`, `ComponentMoveKind` on the PCB preferences | no, nowhere | medium, changes Altium's preferences; ran live and restored |
+| 47, board options | `PolygonNameTemplate` on the board | no, nowhere | low, ran live and restored |
+| 47, schematic display options | `ExpandComponentDesignators`, `WatermarkReadOnlySheet`, `AlwaysDrag`, `DefaultTemplateFileName` on the schematic preferences | no, nowhere | medium, changes Altium's preferences; ran live and restored |
+| 47, pair impedance | `ImpedanceDriven`, `MinImpedance`, `MaxImpedance`, `FavoredImpedance` on a differential pair rule | no, nowhere | low, ran live and read back |
+| 47, 3D body extras | `Texture`, `TextureRotation` on a 3D body | no, nowhere | low, ran live and restored |
+| 48, grow pour | `GrowPolyshape` on a pour | no, nowhere | medium, moves a pour outline; ran live and moved back |
+| 48, rule settings | `MaxHeight`, `VerticalGap`, `MinSetBack`, `NetAntennaeTolerance`, `FanoutStyle`, `CheckConnectedCopper` on rules | no, nowhere | low, ran live, read back and restored |
+| 48, wire tidy | `OptimizeUseOfPolylines` on a sheet | no, nowhere | medium, rewrites a sheet's wires; ran live, closed unsaved |
+| 48, pre-routes | `IsPreRoute`, `UserRouted` on tracks, arcs and vias | no, nowhere | low, ran live and cleared |
+| 48, paste openings | `PasteMaskExpansionMode`, `PasteMaskUsePercent`, `PasteMaskPercent`, `PasteMaskEnabled` on pads and vias | no, nowhere | low, ran live, board closed unsaved |
+| 49, split lines | `CreateSplitLine`, `DeleteSplitLine`, `RebuildSplitBoardRegions` on the outline | yes, `RefreshBoardOutline` (rebuild) | high, rebuilds regions; refused on a board whose regions are not all from split lines; ran live |
+| 49, region settings | `Locked3D` on a board region | no, nowhere | low, ran live and read back |
+| 49, layer stacks | `CreateSubstack`, `RemoveSubstack`, `EnableLayer`, `DisableLayer`, `IsFlex` on the layer stack | no, nowhere | medium, changes the stack; ran live and restored |
+| 49, bend lines | `CreateBendingLine`, `DeleteBendingLine`, `FoldIndex` on a region's bend lines | no, nowhere | low, ran live and restored |
+| 50, dielectrics | `DielectricLossTangent`, `IsStiffener`, `DielectricHeight` on a dielectric or mask layer | no, nowhere | medium, changes the stack; ran live and restored |
+| 50, stack style | `LayerStackStyle` on the master stack | no, nowhere | medium, ran live and restored |
+| 50, impedance profiles | `CreateImpedanceProfile`, `RemoveImpedanceProfile`, `CreateTraceImpedance`, `TraceMinWidth`, `UseSolderMask` | no, nowhere | low, ran live on a copy |
+| 50, layer order | `InsertInStackBelow`, `InsertInStackAbove` on the stack | no, nowhere | medium, ran live on a copy |
+| 51, output setup | `GerberOptions`, `PrinterOptions` on the board | no, nowhere | low, saved in the board; ran live, read back and restored |
+| 51, testpoint rules | `SetState_MinSize` and the other Testpoint Style setters | no, nowhere | low, ran live and restored |
+| 51, preferences | `Paste_InSameNet`, `RepeatX`, `QuestionDelete`, `AutoPanSpeed`, `PadViaFontName`, `BoardAreaColor` in the board editor preferences; `StringIncRemoveLeadingZero`, `CutterFixedLength` in the schematic ones | no, nowhere | low, Altium-wide; ran live and restored |
+| 51, grids and pads | `BigVisibleGridMultFactor`, `SnapGridUnit` on the board; `DrillType` on a pad; `BorderSpaceType` on board text | no, nowhere | low, ran live, read back and restored |
+| 51, net colours | `Color` on a board net, taken from the project's net colour | yes, `Generic.pas` (schematic objects) | low, ran live and restored |
+| 51, sheet zones | `ObjectReferenceZone` on a sheet | no, nowhere | none, read only |
 
 Steps 5 and 2 are the ones that justify a live session. The bottom rows
 write properties this codebase already exercises, so they are checking
@@ -318,7 +371,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.10.26.101`, `version_match` =
+Expect `altium_script_version` = `2026.10.27.101`, `version_match` =
 `true`, and `mcp_server_version` = `0.7.1`.
 
 Those are two different versions and they fail differently.
@@ -2597,6 +2650,383 @@ project with ports or sheet entries.
 
 ---
 
+## 44. Drill pairs, xSignal removal, net display, single-footprint and project libraries, pin and pad properties
+
+New: `pcb_add_drill_pair`, `pcb_delete_xsignals`, `pcb_net_display`,
+`lib_save_footprint_library`, `proj_make_schematic_library`;
+`proj_project_setup` gains `hierarchy_mode` (the net identifier scope)
+and `output_path`; `obj_query` / `obj_modify` gain pin `DefinedFunctions`,
+`Symbol_Inner`, `Symbol_Outer`, `Symbol_InnerEdge`, `Symbol_OuterEdge`,
+`Symbol_LineWidth` and `HiddenNetName`, schematic part `ShowHiddenPins`,
+`ShowHiddenFields`, `PinsMoveable`, `PartIdLocked`, `DisplayFieldNames`,
+`OverideColors` and `PinColor`, and board pad `JumperID`, `SwapID_Pad`
+and `SwapID_Part`. `proj_get_options` now names the scope in Altium's own
+order (it had called 0 "Flat" and 1 "GlobalScope"). Measured and NOT
+built: splitting a library into one file per part; `SplitIntoComponents`
+is an undeclared identifier to a script on both library kinds.
+
+1. **Drill pairs.** On a board with two internal planes: Top Layer to
+   Internal Plane 1 added (2 pairs, read back); the same pair the other
+   way round refused as `ALREADY_EXISTS`; Mechanical 1 refused; Internal
+   Plane 2 to Bottom Layer added (3 pairs).
+2. **xSignals.** An unknown name deletes nothing; the one xSignal deleted
+   by name in another case; one made again and deleted with `all`.
+3. **Net display.** GND's connection lines hidden and loop removal off,
+   both read back, then restored; an unknown net listed in `not_found`.
+4. **One footprint.** `lib_save_footprint_library` wrote a 138 KB
+   library holding only that footprint, with the source's two pads; an
+   unknown footprint refused.
+5. **Project library.** With the sheets loaded,
+   `proj_make_schematic_library` wrote and saved a library of the
+   project's 15 placed symbols.
+6. **Project setup.** The scope set to each of 0 to 4 and read back;
+   `global` read back as 3 and named Global by `proj_get_options`;
+   restored to automatic. The output path set and read back, then
+   restored; an unknown scope name refused.
+7. **Pins.** On a library symbol's pin: inner edge, outer symbol and
+   line width, a hidden net name and two functions written and read
+   back, then cleared; a symbol value that is not a number refused.
+   Pin functions read from 1: read from 0 the list lost its last name.
+8. **Parts.** Show hidden pins, pins movable, override colours and a pin
+   colour written, read back and restored.
+9. **Pads.** A pad's jumper id and both swap ids written and read back,
+   a negative jumper id refused, all cleared.
+
+Run live on AD 26.11.1.5 with that change's script on a scratch project,
+board and libraries. All passed as described. Not run: a pin function
+list on a placed part on a sheet, and the scope's effect on a compiled
+hierarchical design.
+
+---
+
+## 45. Board grids, part STEP export, auto-save, net kinds, project options and more properties
+
+New: `pcb_set_grids`, `pcb_export_component_model`, `app_autosave`;
+`proj_project_setup` gains `append_sheet_number_to_local_nets`,
+`pin_swap_by_net_label` and `pin_swap_by_pin`; `proj_get_net_items` gains
+`local_scope`, `electrical`, `erc_suppressed` and bus membership;
+`obj_query` / `obj_modify` gain pour `DrawRemovedNecks`,
+`DrawRemovedIslands`, `DrawDeadCopper`, `ExpandOutline` and
+`AutoGenerateName`, board text `Inverted`, `UseInvertedRectangle`,
+`InvertedTTTextBorder`, `TTFInvertedTextJustify`,
+`TTFOffsetFromInvertedRect` and `ConvertedString` (read only), schematic
+parameter `ReadOnlyState`, `ParamType`, `AllowLibrarySynchronize` and
+`AllowDatabaseSynchronize`, port `AutoSize`, `OverrideDisplayString` and
+`HarnessColor`, and pin `Name_PositionMode`, `Name_CustomPosition_Margin`,
+`Name_CustomPosition_RotationAnchor`, `Name_CustomPosition_RotationRelative`
+and the same four for `Designator_`. Measured and NOT built: a rule's
+`DataSummaryString` (an undeclared identifier to a script, which stopped
+the loop) and a port's `CrossRef` (not known to the script engine).
+
+1. **Grids.** Snap 10, track 2.5, via 12.5, visible 50 and 500 and lines
+   instead of dots set and read back, then restored; 0 refused. The grid
+   for moving parts follows the snap grid: 25 read back as 10 and was
+   listed in `not_applied`, so it is read only.
+2. **Part STEP.** U1 written as a 99 KB STEP file (Altium's own STEP
+   writer); an unknown designator refused.
+3. **Auto-save.** Read off at 30 minutes (Altium keeps 1800000 ms); set
+   on at 12 minutes and read back; 0 refused; restored.
+4. **Net kinds.** 91 nets: `local_scope` false only on the three nets
+   that power ports name (GND, +5V, +3V3); USB_DP, joined across sheets
+   by ports, reads true. 16 nets with a No ERC marker read
+   `erc_suppressed`. Electrical types Passive, Input, Output and I/O.
+   The signal type answered empty on every net and is not reported.
+5. **Project options.** Sheet numbers on local nets on and both pin swap
+   options off, read back, then restored; the project closed unsaved.
+6. **Pours.** All five switches written and read back; writing
+   `AutoGenerateName` renamed the pour at once (GND_L01_P000); restored
+   with its name; `maybe` refused.
+7. **Board text.** Inverted with a 12.5 mil border, justification 4 and
+   a 3 mil offset written and read back, then restored; a negative
+   border and a write to `ConvertedString` refused.
+8. **Parameters.** A sheet parameter made writable, typed 1 and kept from
+   library and database updates, read back, then restored; `perhaps`
+   refused.
+9. **Ports.** On a port placed for the test: auto size off, a display
+   override and a harness colour written and read back; a colour that is
+   not a number refused; the port deleted.
+10. **Pin label positions.** On a library pin: name position mode,
+    margin, rotation anchor and relative rotation and the designator's
+    mode and margin written and read back, then cleared; a negative
+    margin refused. A port property aimed at a pin was refused as not
+    belonging to it.
+
+Run live on AD 26.11.1.5 with that change's script on a scratch project,
+board and library; every document closed without saving. All passed as
+described. Not run: a bus member net, and a STEP export of a part with no
+3D body.
+
+---
+
+## 46. Editor preferences, the electrical grid, net colour and jumpers, compile state and more properties
+
+New: `pcb_view_options`, `pcb_edit_options`, `sch_editor_options`;
+`obj_set_grid` gains `hotspot_grid` and `hotspot_grid_on`;
+`pcb_net_display` gains `use_net_color`, `show_jumpers` and reads
+`in_differential_pair`; `proj_get_compile_freshness` gains
+`needs_compile` and `violation_count`; `obj_query` / `obj_modify` gain
+board part `SourceDescription`, `JumpersVisible`, `ChannelOffset` and
+`GroupNum`, board pad `SwappedPadName` and `OwnerPart_ID`, schematic pin
+`DefaultValue` and `FormalType`, and schematic part `LibraryPath` and
+`AliasAsText`.
+
+1. **Board view options.** All ten read; pad net names and single layer
+   mode flipped, read back and restored.
+2. **Board edit options.** Rotation step 45 and then 15, and locked-object
+   protection off, read back and restored to 90 and on. Undo levels did
+   not take (33 read back as 50, listed in `not_applied`), so they are
+   reported and not offered for writing.
+3. **Schematic editor options.** All 21 read; components cutting wires,
+   the pin name margin, the increment step and the power ground name
+   written, read back and restored. The pin margins are kept at 10000 to
+   the mil (the defaults read 500000 and 800000, 50 and 80 mils), so the
+   tool takes and reports mils; 6 mils read back as 6.
+4. **Electrical grid.** 40 mils, switched off and on again, read back.
+5. **Net colour and jumpers.** GND drawn in its net colour with jumpers
+   hidden, read back and restored; USB_DP reads `in_differential_pair`.
+6. **Compile state.** `needs_compile` false and 2 violations read, before
+   and after a compile.
+7. **Board part.** U1's source description, jumpers, channel offset and
+   group written, read back and restored; `x` for the group refused.
+8. **Board pads.** Swap name and owner part written on the 66 pads named 4,
+   read back and cleared.
+9. **Schematic pin.** Default value and formal type written, read back
+   and restored.
+10. **Schematic part.** Aliases and library path written on J1, read back
+    and restored (`*`, any library).
+
+Run live on AD 26.11.1.5 with that change's script on a scratch project,
+board and library; every document closed without saving. All passed as
+described. Not run: the jumper display on a board that has jumpers, and
+an electrical grid distance other than 0.
+
+---
+
+## 47. Routing preferences, board options, pours at a point, pair impedance and more
+
+New: `pcb_route_options`, `pcb_board_options`, `pcb_pours_at`;
+`pcb_view_options` gains `plane_draw_mode`, `pad_types_display`,
+`from_tos_display`, `layer_name_display` and `draft_track_threshold_mils`;
+`pcb_edit_options` gains `drag_mode` and `component_move`;
+`sch_editor_options` gains the five multi-channel expansions,
+`watermark_read_only_sheets`, `always_drag`, `use_printer_fonts` and
+`default_template`; `pcb_set_rule_properties` gains
+`dp_impedance_driven` and `dp_min_impedance` / `dp_max_impedance` /
+`dp_preferred_impedance`; `pcb_get_design_rules` reports
+`from_schematic`; `obj_query` / `obj_modify` gain 3D body
+`OverrideColor`, `Texture` and `TextureRotation`, and the schematic
+parameter flags `NameIsReadOnly`, `ValueIsReadOnly`, `IsRule`,
+`IsSystemParameter` and `IsConfigurable` (read only). Measured and NOT
+built: the board's undo (a scripted move of R1 by 100 mils stayed after
+undo and redo), clearing compile violations (the count stayed at 2), a
+dimension's text value (0 on a 500 mil dimension), and writing automatic
+split planes (did not take; it is reported only).
+
+1. **Routing options.** All seven read; auto via, shove depth and smart
+   track ends written, read back and restored.
+2. **View and edit additions.** Plane drawing mode and the draft track
+   threshold (7 mils) written, read back and restored; drag mode the same.
+3. **Board options.** The pour naming template written, read back and
+   restored.
+4. **Schematic display options.** All nine read; designator expansion,
+   always drag and a default template written, read back and restored.
+5. **Pair impedance.** On the board's DiffPairsRouting rule:
+   impedance-driven with 85, 95 and 90 ohms written and read back, then
+   switched off; 0 ohms refused before Altium.
+6. **Rules from the schematic.** The three "Schematic Supply Nets" rules
+   read `from_schematic`, the rest do not.
+7. **3D body.** On U1's body: colour override, a texture file and a 45
+   degree texture rotation written and read back, then restored.
+8. **Parameter flags.** Read on a sheet's parameters (system parameters
+   with fixed names); a write to one refused.
+9. **Pours at a point.** At R1 both GND pours (top and bottom) found; a
+   point off the board found none.
+
+Run live on AD 26.11.1.5 with that change's script on a scratch project
+and board; every document closed without saving. All passed as
+described. Not run: a texture image that exists on disk, and the routing
+mode change during an interactive route.
+
+---
+
+## 48. Pour growth, plane connections, wire tidy, rule settings, pre-routes and paste openings
+
+New: `pcb_grow_pour`, `pcb_plane_connections`, `sch_optimize_wires`;
+`pcb_set_rule_properties` gains Width impedance limits and
+`check_connected_copper`, Height limits, Component Clearance
+`vertical_gap_mils`, `show_distances` and `collision_check_mode`, Routing
+Corners setbacks, Net Antennae tolerance and the Fanout Control settings,
+each refused on a rule of another kind; `obj_query` / `obj_modify` gain
+`IsPreRoute` and `UserRouted` on tracks, arcs and vias and the mask modes
+and paste percentage on pads and vias. Measured and NOT built: a
+schematic object's compile mask (J1 read back unmasked after the write
+took), and the per-plane-layer connection style a pad answers (0 for
+every layer whatever the rule said).
+
+1. **Grow pour.** Top Layer-GND moved in 20 mils on every side and out
+   again to its first bounds; 0 and an unknown pour refused.
+2. **Plane connections.** U1's pads on a board with two planes: the rule
+   style switched to direct, none and relief read 1, 2 and 0, with the
+   relief width, entries, air gap, expansion and clearance of the rule.
+3. **Rule settings.** Height 10/900/400 mils, component vertical gap 12
+   mils with distances shown, corner setbacks 50 and 150 mils, antenna
+   tolerance 2 mils, a fanout style and via grid, and Width
+   impedance-driven 45/55/50 ohms with the connected-copper check, each
+   read back and restored; a height setting on a Width rule and a Width
+   setting on the Height rule refused, naming the rule's kind.
+4. **Wire tidy.** On a scratch sheet 45 wires became 19 (90 vertices 55);
+   two wires drawn end to end became one; the sheet closed unsaved and
+   reopened with 45.
+5. **Pre-routes.** `IsPreRoute` set on the top-layer tracks, read back,
+   cleared.
+6. **Paste openings.** On pads: paste mode 2, percentage on at 80, read
+   back; 150 percent refused.
+
+Run live on AD 26.11.1.5 with that change's script on a scratch project
+and board; every document closed without saving. One earlier test call to
+`proj_force_recompile` saved the scratch sheet, as that tool does with
+any unsaved document; the sheet held only restored values then. All
+passed as described. Not run: a pour grown into a keepout, and paste
+percentages on a stencil output.
+
+---
+
+## 49. Rigid-flex regions, layer stacks, bend lines, Gloss and Retrace
+
+New: `pcb_get_board_regions`, `pcb_split_board`, `pcb_remove_split_line`,
+`pcb_set_board_region`, `pcb_layer_stacks`, `pcb_add_bend_line`,
+`pcb_modify_bend_line`, `pcb_delete_bend_line`, `pcb_gloss`.
+
+1. **Read.** A plain board: one region on "Board Layer Stack" with its
+   four copper layers. A rigid-flex fixture: nine regions (five rigid,
+   four flex arms on "Research Flex" with GND and PWR), one bend line per
+   arm with its points, radius 300 mils, angle -90 and fold order.
+2. **Split.** A line across the plain board made two regions, both named
+   alike; renamed by index ("#0", "#1"); the split removed again gave one
+   region. A line off the board added no region and was taken out
+   (`SPLIT_DID_NOT_DIVIDE`). On the fixture, whose regions were not made
+   by split lines, a split was refused (`REGIONS_NOT_FROM_SPLIT_LINES`)
+   and its nine regions stayed: before that guard a split there merged
+   them into two.
+3. **Layer stacks.** A flex stack created, Top and Bottom Layer enabled
+   in it, one disabled again, renamed, assigned to a region and back,
+   removed; an unknown stack refused.
+4. **Bend lines.** On a fixture arm: radius, angle and fold order
+   changed and restored, the line deleted and added again with the same
+   points. On the plain board: a line across a region stretched to its
+   edges; one outside it refused (`BEND_OUTSIDE_REGION`) and removed.
+5. **Lock.** A region locked in 3D and read back.
+6. **Gloss and Retrace.** Gloss on two nets: 8 tracks to 11 and 297 to
+   293 mils, 9 tracks to 5 and 463 to 453 mils; Retrace then left the
+   first net as it was.
+
+Measured and NOT built: reading a split line's points ("Undeclared
+identifier: FromPoint"); `TCoordPoint` records (their fields are
+undeclared to a script, so points are `TPoint` from `Point()`); split
+lines made with the full region rebuild (the line was thrown away).
+
+Run live on AD 26.11.1.5 with that change's script on scratch copies of
+the plain board and the fixture; every document closed without saving.
+All passed as described. Not run: bend lines folded in the 3D view, and a
+split on a board with existing split lines.
+
+---
+
+## 50. Layer stack manager: physical stack, dielectrics, impedance profiles, layer order, vias
+
+New: `pcb_physical_stack`, `pcb_set_dielectric`, `pcb_impedance_profile`,
+`pcb_impedance_profile_layer`, `pcb_via_structures`; `pcb_add_layer`
+gains `above` / `below`. `pcb_get_impedance_profiles` now reads a
+profile's layers by asking for each copper layer; it no longer reports
+the reference layers, which a script cannot name.
+
+1. **Physical stack.** A 4-layer board: 13 layers top down (paste,
+   overlay, mask, copper and dielectrics) with Z, thickness, Dk,
+   material and type, 64.25 mils in all; the rigid-flex fixture: 13
+   layers, 23.86 mils. Altium's Z runs down from the top copper.
+2. **Dielectric.** Dielectric 1 set to Df 0.021, a stiffener, Dk 4.3,
+   one mil thicker and Isola 370HR, read back (the board then 65.25
+   mils), restored; Top Solder Dk 3.5 to 3.8 and back; a copper layer
+   refused.
+3. **Stack style.** 0 to 1 and back, read back.
+4. **Profiles.** A 50 ohm single and a 90 ohm differential profile
+   created; Top Layer added to the first with width limits 4 to 12
+   mils, solder mask modelled 0.8 mils, then width 9 mils locked;
+   Bottom Layer added to the second with gap 6 (5 to 8) mils; renamed,
+   retargeted and removed; a second profile of the same name refused.
+   A newly added layer starts disabled with no width until Altium's
+   solver runs.
+5. **Layer order.** MidLayer1 added below Top Layer went in second.
+6. **Vias.** 279 vias read: no protection structure and no back
+   drilling on that board.
+
+Measured and NOT built: a trace record's own layer and its reference
+layers (V7 layer handles a script cannot name: "Undeclared identifier:
+Name"); the layer object as the profile's layer argument ("Could not
+convert variant of type (Dispatch) into type (Integer)"; the ID works).
+
+Run live on AD 26.11.1.5 with that change's script on scratch copies;
+every document closed without saving. All passed as described. Not run:
+a via with a protection structure or back drilling, and a layer
+inserted above another.
+
+---
+
+## 51. Board output and editor settings, testpoint rules, sheet zones, net colours
+
+New: `pcb_gerber_options`, `pcb_print_options`, `pcb_paste_options`,
+`sch_reference_zones`. `pcb_set_rule_properties` takes `testpoint`;
+`pcb_set_grids` gains `visible_big_factor` and the grid units;
+`pcb_view_options`, `pcb_edit_options` and `sch_editor_options` gain more
+preferences; `pcb_net_display` gains `color` and `from_project`;
+`obj_query` / `obj_modify` gain DrillType, IsVirtualPin, FlippedOnLayer
+and BorderSpaceType.
+
+1. **Gerber and print setup.** Read on a 4-layer board; embed apertures,
+   film width 25000 mils, decimals 2 and plus tolerance 0.01 mils
+   written, read back and restored; print scale 2, pad numbers off,
+   holes on and composite type 1 the same.
+2. **Testpoint rules.** Fabrication Testpoint (kind 43) and Assembly
+   Testpoint (kind 57): sizes, edge clearance, grid and under-part
+   settings written, read back and restored; the Clearance rule refused
+   (`WRONG_RULE_KIND`).
+3. **Grids.** Coarse factor 10 and snap unit mil written and restored.
+   The fine factor reads 1 and stayed 1 for 2, 5, 0.5 and 10; it is
+   reported only.
+4. **Board preferences.** Paste keeps its net, array count 4, increment
+   "2", step -150 and angle 30; transparent layers, pad net font
+   Consolas, its minimum size, board area colour; confirm delete,
+   netlist comment check, auto-pan speed and pour redraw threshold: each
+   written, read back and restored. The repeat step reads 10000 to the
+   mil (1000 mils read 10000000).
+5. **Schematic preferences.** Increment without the leading zero,
+   Ctrl + double-click, selection memory confirm, device sheet editing
+   and watermark, cutter grid multiple, cutter length (10000 to the mil)
+   and physical view dimming: written, read back and restored.
+6. **Object properties.** Pad MH1 drill type 2 written and read back,
+   7 refused, restored to 0; board text BorderSpaceType 1 and back;
+   IsVirtualPin and FlippedOnLayer read (a bottom-side part reads false:
+   it is the "flip on layer" option, not the side).
+7. **Sheet zones.** 29 objects on a sheet with their zones ("3B"),
+   filtered to ports and power ports.
+8. **Net colours.** GND given orange and switched on: the pour drew
+   orange on screen. +3V3 given a project colour, then `from_project`:
+   +3V3 took it and switched on, GND and every net without one listed in
+   `no_project_color`. All restored.
+
+Measured and NOT built: hole symbols (the call showed nothing on the
+board with the drill drawing layer on, and nothing reads whether they
+are shown); special string resolution through the project (every name,
+CurrentDate included, answered not resolved); a dimension's TextValue
+(read 0 on a 1000 mil dimension). Simulation probes, profiles and
+waveform data are not reachable from a script.
+
+Run live on AD 26.11.1.5 with that change's script on scratch copies;
+every document closed without saving and the files hashed the same
+before and after. All passed as described.
+
+---
+
 ## Still open, and not blocking
 
 * **#23** font size: the importer places symbol text but not its height.
@@ -3100,7 +3530,7 @@ the mirror covers it.
 
 ## Appendix S: Rosen branch, placement cleanup (2026-10-26)
 
-Script 2026.10.26.101, on top of the mainline merge. Each item below was
+First shipped in the Rosen branch's 10-26 script, on top of the mainline merge. Each item below was
 fixed by hand on the Rosen controller before it went into the tools. Run
 live on AD 25.8.1 the same evening, on a free scratch sheet (one net label
 set to Arial 7 first) and, read-only, on the project's sheets. The tool code

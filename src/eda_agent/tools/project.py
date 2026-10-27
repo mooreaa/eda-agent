@@ -64,6 +64,11 @@ async def _after_sync(bridge, pairs_before: set) -> dict:
 _NO_NET_COLOR = 536870912
 
 
+#: The net identifier scope in Altium's own order (TFlattenMode).
+_HIERARCHY_MODES = ("automatic", "flat", "hierarchical", "global",
+                    "strict_hierarchical")
+
+
 def register_project_tools(mcp):
     """Register project tools with the MCP server."""
 
@@ -2482,8 +2487,13 @@ def register_project_tools(mcp):
 
         For each net: its net labels, power ports, ports, sheet entries
         and off-sheet connectors with sheet and location, whether the
-        compiler made the name up (``auto_generated``) and whether it is
-        local to one sheet. With one net, its pins too.
+        compiler made the name up (``auto_generated``),
+        ``local_scope`` (False when a power port gives the net a global
+        name; a net joined across sheets by ports still reads True), its
+        ``electrical`` type as Altium words it (Passive, Input, Output,
+        I/O ...), ``erc_suppressed`` (a No ERC marker sits on it), and
+        for a bus member ``bus_prefix`` and ``bus_index``. With one net,
+        its pins too.
 
         Args:
             net: One net (any case). Empty lists every net.
@@ -2516,10 +2526,16 @@ def register_project_tools(mcp):
         include_subfolders: bool = False,
         allow_port_net_names: Optional[bool] = None,
         allow_sheet_entry_net_names: Optional[bool] = None,
+        hierarchy_mode: Optional[str] = None,
+        output_path: str = "",
+        append_sheet_number_to_local_nets: Optional[bool] = None,
+        pin_swap_by_net_label: Optional[bool] = None,
+        pin_swap_by_pin: Optional[bool] = None,
         project_path: Optional[str] = None,
     ) -> dict[str, Any]:
         """Read, or change, a project's document order, library search
-        paths and net naming options.
+        paths, net naming options, net identifier scope, output path and
+        pin swap options.
 
         Call with no changes to read. Every change is read back, and
         any that did not take is listed in ``not_applied``. Save the
@@ -2532,11 +2548,25 @@ def register_project_tools(mcp):
             include_subfolders: Search below that folder too.
             allow_port_net_names: Ports name nets.
             allow_sheet_entry_net_names: Sheet entries name nets.
+            hierarchy_mode: The net identifier scope: automatic, flat,
+                hierarchical, global or strict_hierarchical (or Altium's
+                number 0 to 4, in that order).
+            output_path: The folder outputs are written to.
+            append_sheet_number_to_local_nets: Add the sheet number to
+                the names of nets local to one sheet.
+            pin_swap_by_net_label: Pin swaps on the board may change
+                net labels on the schematic.
+            pin_swap_by_pin: Pin swaps on the board may move pins on
+                the schematic.
             project_path: The .PrjPcb. Defaults to the focused project.
 
         Returns:
             ``documents`` (in project order), ``search_paths``,
             ``generated_documents``, the two naming options,
+            ``hierarchy_mode`` (Altium's number) and
+            ``hierarchy_mode_name``, ``output_path``,
+            ``append_sheet_number_to_local_nets``,
+            ``pin_swap_by_net_label``, ``pin_swap_by_pin``,
             ``changed``, ``moved_from`` / ``moved_to`` and
             ``not_applied``.
         """
@@ -2553,13 +2583,78 @@ def register_project_tools(mcp):
             params["add_search_path"] = add_search_path.strip()
             params["include_subfolders"] = "true" if include_subfolders else "false"
         for key, value in (("allow_port_net_names", allow_port_net_names),
-                           ("allow_sheet_entry_net_names", allow_sheet_entry_net_names)):
+                           ("allow_sheet_entry_net_names", allow_sheet_entry_net_names),
+                           ("append_sheet_number_to_local_nets",
+                            append_sheet_number_to_local_nets),
+                           ("pin_swap_by_net_label", pin_swap_by_net_label),
+                           ("pin_swap_by_pin", pin_swap_by_pin)):
             if value is not None:
                 params[key] = "true" if value else "false"
+        if hierarchy_mode is not None:
+            text = str(hierarchy_mode).strip().lower().replace(" ", "_").replace("-", "_")
+            if text in _HIERARCHY_MODES:
+                params["hierarchy_mode"] = str(_HIERARCHY_MODES.index(text))
+            elif text.isdigit() and int(text) < len(_HIERARCHY_MODES):
+                params["hierarchy_mode"] = text
+            else:
+                return {"ok": False, "reason": "hierarchy_mode is one of "
+                        + ", ".join(_HIERARCHY_MODES) + " or 0 to 4"}
+        if output_path.strip():
+            params["output_path"] = output_path.strip()
         if project_path:
             params["project_path"] = project_path
-        return await get_bridge().send_command_async(
+        reply = await get_bridge().send_command_async(
             "project.project_setup", params, timeout=60.0)
+        if isinstance(reply, dict) and isinstance(reply.get("hierarchy_mode"), int):
+            mode = reply["hierarchy_mode"]
+            if 0 <= mode < len(_HIERARCHY_MODES):
+                reply["hierarchy_mode_name"] = _HIERARCHY_MODES[mode]
+        return reply
+
+    @mcp.tool()
+    async def proj_make_schematic_library(
+        out_path: str,
+        add_to_project: bool = False,
+        project_path: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Make a schematic library of every symbol placed in the project.
+
+        Altium's Make Schematic Library, run without its dialogs, then
+        saved. One sheet of the project must be loaded
+        (proj_load_sheets). The new library stays open in Altium.
+
+        Args:
+            out_path: Full path of the new .SchLib.
+            add_to_project: Add the library to the project.
+            project_path: The .PrjPcb. Defaults to the focused project.
+
+        Returns:
+            ``saved``, ``written`` (a new file is at out_path),
+            ``sheet`` (the one it ran from) and ``in_project``.
+        """
+        import os
+        if not out_path or not os.path.isabs(out_path):
+            return {"ok": False, "reason": "out_path must be a full path"}
+        if not out_path.lower().endswith(".schlib"):
+            return {"ok": False, "reason": "out_path is a .SchLib"}
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        before = os.path.getmtime(out_path) if os.path.isfile(out_path) else None
+        params: dict[str, Any] = {"out_path": out_path,
+                                  "add_to_project": "true" if add_to_project else "false"}
+        if project_path:
+            params["project_path"] = project_path
+        bridge = get_bridge()
+        reply = await bridge.send_command_async(
+            "project.make_schematic_library", params, timeout=300.0)
+        if isinstance(reply, dict) and "sheet" in reply:
+            # Altium opens the new library in the editor and leaves it
+            # unsaved (measured on AD 26.11), so it is saved here.
+            saved = await bridge.send_command_async(
+                "application.save_document", {"file_path": out_path}, timeout=60.0)
+            reply["saved"] = bool(isinstance(saved, dict) and saved.get("saved"))
+            after = os.path.getmtime(out_path) if os.path.isfile(out_path) else None
+            reply["written"] = after is not None and after != before
+        return reply
 
     @mcp.tool()
     async def proj_get_declared_design_objects(
@@ -2938,9 +3033,14 @@ def register_project_tools(mcp):
         been saved yet. A dirty doc means the netlist does NOT
         reflect what the user is looking at.
 
+        ``needs_compile`` and ``violation_count`` are Altium's own
+        answer: whether the project needs compiling now, and how many
+        violations its last compile left (-1 when it would not say).
+
         Returns:
-            Dict with compile_age_ms, compile_cached (bool), ttl_ms,
-            open_doc_count, dirty_doc_count, dirty_docs[], project.
+            Dict with compile_age_ms, needs_compile, violation_count,
+            compile_cached (bool), ttl_ms, open_doc_count,
+            dirty_doc_count, dirty_docs[], project.
         """
         bridge = get_bridge()
         return await bridge.send_command_async(

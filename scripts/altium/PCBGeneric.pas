@@ -32,11 +32,26 @@ Begin
 End;
 
 { Which object type carries an extra property: 1 pad or via, 2 via only,     }
-{ 3 text, 4 dimension, 5 polygon, 6 component, 0 not one of these.           }
+{ 3 text, 4 dimension, 5 polygon, 6 component, 7 pad only, 8 3D body, 0     }
+{ none of these. A 3D body's OverrideColor says whether its own colour is    }
+{ drawn instead of the model's; Texture is an image file laid on it.          }
+{ 9 a track, arc or via: IsPreRoute (kept by the autorouter) and UserRouted. }
+{ Pads and vias also take the mask modes (PasteMaskExpansionMode,           }
+{ SolderMaskExpansionMode, Altium's numbers: from the rule or manual) and   }
+{ the paste opening as a percentage (PasteMaskUsePercent,                   }
+{ PasteMaskPercent) or switched off (PasteMaskEnabled).                     }
+{ Text ConvertedString is the text as shown, special strings resolved; it   }
+{ is read only. A pad's DrillType is how its hole is made (0 drilled, 1     }
+{ punched, 2 laser, 3 plasma); IsVirtualPin and a part's FlippedOnLayer    }
+{ (its "flip on layer" option, not its side) are read only. A text's       }
+{ BorderSpaceType is Altium's number for how its inverted border is sized. }
 Function ExtraPCBPropertyOwner(PropName : String) : Integer;
 Begin
     Result := 0;
-    If (PropName = 'HolePositiveTolerance') Or (PropName = 'HoleNegativeTolerance') Then Result := 1
+    If (PropName = 'HolePositiveTolerance') Or (PropName = 'HoleNegativeTolerance') Or
+       (PropName = 'PasteMaskExpansionMode') Or (PropName = 'SolderMaskExpansionMode') Or
+       (PropName = 'PasteMaskUsePercent') Or (PropName = 'PasteMaskPercent') Or
+       (PropName = 'PasteMaskEnabled') Then Result := 1
     Else If PropName = 'IsCounterHole' Then Result := 2
     Else If (PropName = 'BarCodeKind') Or (PropName = 'BarCodeRenderMode') Or
             (PropName = 'BarCodeFullWidth') Or (PropName = 'BarCodeFullHeight') Or
@@ -45,7 +60,12 @@ Begin
             (PropName = 'BarCodeShowText') Or (PropName = 'BarCodeFontName') Or
             (PropName = 'Multiline') Or (PropName = 'MultilineTextWidth') Or
             (PropName = 'MultilineTextHeight') Or
-            (PropName = 'MultilineTextAutoPosition') Then Result := 3
+            (PropName = 'MultilineTextAutoPosition') Or
+            (PropName = 'Inverted') Or (PropName = 'UseInvertedRectangle') Or
+            (PropName = 'InvertedTTTextBorder') Or
+            (PropName = 'TTFInvertedTextJustify') Or
+            (PropName = 'TTFOffsetFromInvertedRect') Or
+            (PropName = 'ConvertedString') Or (PropName = 'BorderSpaceType') Then Result := 3
     Else If (PropName = 'TextHeight') Or (PropName = 'TextWidth') Or
             (PropName = 'TextLineWidth') Or (PropName = 'TextGap') Or
             (PropName = 'TextPosition') Or (PropName = 'TextDimensionUnit') Or
@@ -58,12 +78,23 @@ Begin
     Else If (PropName = 'PolygonType') Or (PropName = 'BorderWidth') Or
             (PropName = 'AvoidObsticles') Or (PropName = 'ClipAcuteCorners') Or
             (PropName = 'MitreCorners') Or (PropName = 'IgnoreViolations') Or
-            (PropName = 'ArcPourMode') Then Result := 5
+            (PropName = 'ArcPourMode') Or (PropName = 'DrawRemovedNecks') Or
+            (PropName = 'DrawRemovedIslands') Or (PropName = 'DrawDeadCopper') Or
+            (PropName = 'ExpandOutline') Or (PropName = 'AutoGenerateName') Then Result := 5
     Else If (PropName = 'EnablePinSwapping') Or (PropName = 'EnablePartSwapping') Or
             (PropName = 'IsBGA') Or (PropName = 'LockStrings') Or
             (PropName = 'NameAutoPosition') Or (PropName = 'CommentAutoPosition') Or
             (PropName = 'FootprintDescription') Or (PropName = 'DefaultPCB3DModel') Or
-            (PropName = 'PackageSpecificHash') Then Result := 6;
+            (PropName = 'PackageSpecificHash') Or (PropName = 'SourceDescription') Or
+            (PropName = 'JumpersVisible') Or (PropName = 'ChannelOffset') Or
+            (PropName = 'GroupNum') Or (PropName = 'FlippedOnLayer') Then Result := 6
+    Else If (PropName = 'JumperID') Or (PropName = 'SwapID_Pad') Or
+            (PropName = 'SwapID_Part') Or (PropName = 'SwappedPadName') Or
+            (PropName = 'OwnerPart_ID') Or (PropName = 'DrillType') Or
+            (PropName = 'IsVirtualPin') Then Result := 7
+    Else If (PropName = 'OverrideColor') Or (PropName = 'Texture') Or
+            (PropName = 'TextureRotation') Then Result := 8
+    Else If (PropName = 'IsPreRoute') Or (PropName = 'UserRouted') Then Result := 9;
 End;
 
 { True when Obj is the type that carries PropName. }
@@ -77,7 +108,10 @@ Begin
         Or ((Owner = 3) And (Oid = eTextObject))
         Or ((Owner = 4) And (Oid = eDimensionObject))
         Or ((Owner = 5) And (Oid = ePolyObject))
-        Or ((Owner = 6) And (Oid = eComponentObject));
+        Or ((Owner = 6) And (Oid = eComponentObject))
+        Or ((Owner = 7) And (Oid = ePadObject))
+        Or ((Owner = 8) And (Oid = eComponentBodyObject))
+        Or ((Owner = 9) And ((Oid = eTrackObject) Or (Oid = eArcObject) Or (Oid = eViaObject)));
 End;
 
 { The value, '' when Obj is not the type that carries it. }
@@ -89,11 +123,42 @@ Var
     Dim : IPCB_Dimension;
     Poly : IPCB_Polygon;
     Comp : IPCB_Component;
+    Body : IPCB_ComponentBody;
     Oid, Tol : Integer;
 Begin
     Result := '';
     Oid := Obj.ObjectId;
     If Not ExtraPCBPropertyFits(Oid, PropName) Then Exit;
+    If ExtraPCBPropertyOwner(PropName) = 9 Then
+    Begin
+        If PropName = 'IsPreRoute' Then Result := BoolToJsonStr(Obj.IsPreRoute)
+        Else Result := BoolToJsonStr(Obj.UserRouted);
+        Exit;
+    End;
+    If (PropName = 'PasteMaskExpansionMode') Or (PropName = 'SolderMaskExpansionMode') Or
+       (PropName = 'PasteMaskUsePercent') Or (PropName = 'PasteMaskPercent') Or
+       (PropName = 'PasteMaskEnabled') Then
+    Begin
+        If Oid = ePadObject Then
+        Begin
+            Pad := Obj;
+            If PropName = 'PasteMaskExpansionMode' Then Result := IntToStr(Pad.PasteMaskExpansionMode)
+            Else If PropName = 'SolderMaskExpansionMode' Then Result := IntToStr(Pad.SolderMaskExpansionMode)
+            Else If PropName = 'PasteMaskUsePercent' Then Result := BoolToJsonStr(Pad.PasteMaskUsePercent)
+            Else If PropName = 'PasteMaskPercent' Then Result := FloatToJsonStr(Pad.PasteMaskPercent)
+            Else Result := BoolToJsonStr(Pad.PasteMaskEnabled);
+        End
+        Else
+        Begin
+            Via := Obj;
+            If PropName = 'PasteMaskExpansionMode' Then Result := IntToStr(Via.PasteMaskExpansionMode)
+            Else If PropName = 'SolderMaskExpansionMode' Then Result := IntToStr(Via.SolderMaskExpansionMode)
+            Else If PropName = 'PasteMaskUsePercent' Then Result := BoolToJsonStr(Via.PasteMaskUsePercent)
+            Else If PropName = 'PasteMaskPercent' Then Result := FloatToJsonStr(Via.PasteMaskPercent)
+            Else Result := BoolToJsonStr(Via.PasteMaskEnabled);
+        End;
+        Exit;
+    End;
     If (PropName = 'HolePositiveTolerance') Or (PropName = 'HoleNegativeTolerance') Then
     Begin
         If Oid = ePadObject Then
@@ -132,7 +197,14 @@ Begin
         Else If PropName = 'Multiline' Then Result := BoolToJsonStr(Txt.Multiline)
         Else If PropName = 'MultilineTextWidth' Then Result := FloatToJsonStr(CoordToMilsF(Txt.MultilineTextWidth))
         Else If PropName = 'MultilineTextHeight' Then Result := FloatToJsonStr(CoordToMilsF(Txt.MultilineTextHeight))
-        Else If PropName = 'MultilineTextAutoPosition' Then Result := IntToStr(Txt.MultilineTextAutoPosition);
+        Else If PropName = 'MultilineTextAutoPosition' Then Result := IntToStr(Txt.MultilineTextAutoPosition)
+        Else If PropName = 'Inverted' Then Result := BoolToJsonStr(Txt.Inverted)
+        Else If PropName = 'UseInvertedRectangle' Then Result := BoolToJsonStr(Txt.UseInvertedRectangle)
+        Else If PropName = 'InvertedTTTextBorder' Then Result := FloatToJsonStr(CoordToMilsF(Txt.InvertedTTTextBorder))
+        Else If PropName = 'TTFInvertedTextJustify' Then Result := IntToStr(Txt.TTFInvertedTextJustify)
+        Else If PropName = 'TTFOffsetFromInvertedRect' Then Result := FloatToJsonStr(CoordToMilsF(Txt.TTFOffsetFromInvertedRect))
+        Else If PropName = 'ConvertedString' Then Result := Txt.ConvertedString
+        Else If PropName = 'BorderSpaceType' Then Result := IntToStr(Txt.BorderSpaceType);
     End
     Else If Oid = eDimensionObject Then
     Begin
@@ -164,7 +236,12 @@ Begin
         Else If PropName = 'ClipAcuteCorners' Then Result := BoolToJsonStr(Poly.ClipAcuteCorners)
         Else If PropName = 'MitreCorners' Then Result := BoolToJsonStr(Poly.MitreCorners)
         Else If PropName = 'IgnoreViolations' Then Result := BoolToJsonStr(Poly.IgnoreViolations)
-        Else If PropName = 'ArcPourMode' Then Result := BoolToJsonStr(Poly.ArcPourMode);
+        Else If PropName = 'ArcPourMode' Then Result := BoolToJsonStr(Poly.ArcPourMode)
+        Else If PropName = 'DrawRemovedNecks' Then Result := BoolToJsonStr(Poly.DrawRemovedNecks)
+        Else If PropName = 'DrawRemovedIslands' Then Result := BoolToJsonStr(Poly.DrawRemovedIslands)
+        Else If PropName = 'DrawDeadCopper' Then Result := BoolToJsonStr(Poly.DrawDeadCopper)
+        Else If PropName = 'ExpandOutline' Then Result := BoolToJsonStr(Poly.ExpandOutline)
+        Else If PropName = 'AutoGenerateName' Then Result := BoolToJsonStr(Poly.AutoGenerateName);
     End
     Else If Oid = eComponentObject Then
     Begin
@@ -177,7 +254,30 @@ Begin
         Else If PropName = 'CommentAutoPosition' Then Result := IntToStr(Comp.CommentAutoPosition)
         Else If PropName = 'FootprintDescription' Then Result := Comp.FootprintDescription
         Else If PropName = 'DefaultPCB3DModel' Then Result := Comp.DefaultPCB3DModel
-        Else If PropName = 'PackageSpecificHash' Then Result := Comp.PackageSpecificHash;
+        Else If PropName = 'PackageSpecificHash' Then Result := Comp.PackageSpecificHash
+        Else If PropName = 'SourceDescription' Then Result := Comp.SourceDescription
+        Else If PropName = 'JumpersVisible' Then Result := BoolToJsonStr(Comp.JumpersVisible)
+        Else If PropName = 'ChannelOffset' Then Result := IntToStr(Comp.ChannelOffset)
+        Else If PropName = 'GroupNum' Then Result := IntToStr(Comp.GroupNum)
+        Else If PropName = 'FlippedOnLayer' Then Result := BoolToJsonStr(Comp.FlippedOnLayer);
+    End
+    Else If ExtraPCBPropertyOwner(PropName) = 7 Then
+    Begin
+        Pad := Obj;
+        If PropName = 'JumperID' Then Result := IntToStr(Pad.JumperID)
+        Else If PropName = 'SwapID_Pad' Then Result := Pad.SwapID_Pad
+        Else If PropName = 'SwapID_Part' Then Result := Pad.SwapID_Part
+        Else If PropName = 'SwappedPadName' Then Result := Pad.SwappedPadName
+        Else If PropName = 'OwnerPart_ID' Then Result := IntToStr(Pad.OwnerPart_ID)
+        Else If PropName = 'DrillType' Then Result := IntToStr(Pad.DrillType)
+        Else If PropName = 'IsVirtualPin' Then Result := BoolToJsonStr(Pad.IsVirtualPin);
+    End
+    Else If ExtraPCBPropertyOwner(PropName) = 8 Then
+    Begin
+        Body := Obj;
+        If PropName = 'OverrideColor' Then Result := BoolToJsonStr(Body.OverrideColor)
+        Else If PropName = 'Texture' Then Result := Body.Texture
+        Else If PropName = 'TextureRotation' Then Result := FloatToJsonStr(Body.TextureRotation);
     End;
 End;
 
@@ -192,6 +292,7 @@ Var
     Dim : IPCB_Dimension;
     Poly : IPCB_Polygon;
     Comp : IPCB_Component;
+    Body : IPCB_ComponentBody;
     Oid, Owner, N : Integer;
     F : Double;
     B, IsBool, IsText, IsInt : Boolean;
@@ -201,9 +302,11 @@ Begin
     If Not ExtraPCBPropertyFits(Oid, PropName) Then Exit;
     Result := -1;
     If (PropName = 'IsCounterHole') Or (PropName = 'IsBGA') Or
-       (PropName = 'PackageSpecificHash') Then Exit;
+       (PropName = 'PackageSpecificHash') Or (PropName = 'ConvertedString') Or
+       (PropName = 'FlippedOnLayer') Or (PropName = 'IsVirtualPin') Then Exit;
     Owner := ExtraPCBPropertyOwner(PropName);
-    If (Owner = 1) And (LowerCase(Value) = 'unset') Then
+    If ((PropName = 'HolePositiveTolerance') Or (PropName = 'HoleNegativeTolerance'))
+        And (LowerCase(Value) = 'unset') Then
     Begin
         If Oid = ePadObject Then
         Begin
@@ -225,15 +328,29 @@ Begin
         (PropName = 'ClipAcuteCorners') Or (PropName = 'MitreCorners') Or
         (PropName = 'IgnoreViolations') Or (PropName = 'ArcPourMode') Or
         (PropName = 'EnablePinSwapping') Or (PropName = 'EnablePartSwapping') Or
-        (PropName = 'LockStrings');
+        (PropName = 'LockStrings') Or (PropName = 'Inverted') Or
+        (PropName = 'UseInvertedRectangle') Or (PropName = 'DrawRemovedNecks') Or
+        (PropName = 'DrawRemovedIslands') Or (PropName = 'DrawDeadCopper') Or
+        (PropName = 'ExpandOutline') Or (PropName = 'AutoGenerateName') Or
+        (PropName = 'JumpersVisible') Or (PropName = 'OverrideColor') Or
+        (PropName = 'PasteMaskUsePercent') Or (PropName = 'PasteMaskEnabled') Or
+        (PropName = 'IsPreRoute') Or (PropName = 'UserRouted');
     IsText := (PropName = 'BarCodeFontName') Or (PropName = 'TextFormat') Or
         (PropName = 'TextPrefix') Or (PropName = 'TextSuffix') Or
-        (PropName = 'FootprintDescription') Or (PropName = 'DefaultPCB3DModel');
+        (PropName = 'FootprintDescription') Or (PropName = 'DefaultPCB3DModel') Or
+        (PropName = 'SwapID_Pad') Or (PropName = 'SwapID_Part') Or
+        (PropName = 'SourceDescription') Or (PropName = 'SwappedPadName') Or
+        (PropName = 'Texture');
     IsInt := (PropName = 'BarCodeKind') Or (PropName = 'BarCodeRenderMode') Or
         (PropName = 'MultilineTextAutoPosition') Or (PropName = 'TextPosition') Or
         (PropName = 'TextDimensionUnit') Or (PropName = 'TextPrecision') Or
         (PropName = 'ArrowPosition') Or (PropName = 'PolygonType') Or
-        (PropName = 'NameAutoPosition') Or (PropName = 'CommentAutoPosition');
+        (PropName = 'NameAutoPosition') Or (PropName = 'CommentAutoPosition') Or
+        (PropName = 'JumperID') Or (PropName = 'TTFInvertedTextJustify') Or
+        (PropName = 'ChannelOffset') Or (PropName = 'GroupNum') Or
+        (PropName = 'OwnerPart_ID') Or (PropName = 'PasteMaskExpansionMode') Or
+        (PropName = 'SolderMaskExpansionMode') Or (PropName = 'DrillType') Or
+        (PropName = 'BorderSpaceType');
     B := False;
     F := 0;
     N := 0;
@@ -254,7 +371,40 @@ Begin
         Else If (F < 0) And (Owner <> 1) Then Exit;
     End;
 
-    If Owner = 1 Then
+    If Owner = 9 Then
+    Begin
+        If PropName = 'IsPreRoute' Then Obj.IsPreRoute := B
+        Else Obj.UserRouted := B;
+    End
+    Else If (Owner = 1) And ((PropName = 'PasteMaskExpansionMode') Or
+        (PropName = 'SolderMaskExpansionMode') Or (PropName = 'PasteMaskUsePercent') Or
+        (PropName = 'PasteMaskPercent') Or (PropName = 'PasteMaskEnabled')) Then
+    Begin
+        If (PropName = 'PasteMaskPercent') And (F > 100) Then
+        Begin
+            Result := -1;
+            Exit;
+        End;
+        If Oid = ePadObject Then
+        Begin
+            Pad := Obj;
+            If PropName = 'PasteMaskExpansionMode' Then Pad.PasteMaskExpansionMode := N
+            Else If PropName = 'SolderMaskExpansionMode' Then Pad.SolderMaskExpansionMode := N
+            Else If PropName = 'PasteMaskUsePercent' Then Pad.PasteMaskUsePercent := B
+            Else If PropName = 'PasteMaskPercent' Then Pad.PasteMaskPercent := F
+            Else Pad.PasteMaskEnabled := B;
+        End
+        Else
+        Begin
+            Via := Obj;
+            If PropName = 'PasteMaskExpansionMode' Then Via.PasteMaskExpansionMode := N
+            Else If PropName = 'SolderMaskExpansionMode' Then Via.SolderMaskExpansionMode := N
+            Else If PropName = 'PasteMaskUsePercent' Then Via.PasteMaskUsePercent := B
+            Else If PropName = 'PasteMaskPercent' Then Via.PasteMaskPercent := F
+            Else Via.PasteMaskEnabled := B;
+        End;
+    End
+    Else If Owner = 1 Then
     Begin
         If Oid = ePadObject Then
         Begin
@@ -285,7 +435,13 @@ Begin
         Else If PropName = 'Multiline' Then Txt.Multiline := B
         Else If PropName = 'MultilineTextWidth' Then Txt.MultilineTextWidth := MilsToCoordF(F)
         Else If PropName = 'MultilineTextHeight' Then Txt.MultilineTextHeight := MilsToCoordF(F)
-        Else If PropName = 'MultilineTextAutoPosition' Then Txt.MultilineTextAutoPosition := N;
+        Else If PropName = 'MultilineTextAutoPosition' Then Txt.MultilineTextAutoPosition := N
+        Else If PropName = 'Inverted' Then Txt.Inverted := B
+        Else If PropName = 'UseInvertedRectangle' Then Txt.UseInvertedRectangle := B
+        Else If PropName = 'InvertedTTTextBorder' Then Txt.InvertedTTTextBorder := MilsToCoordF(F)
+        Else If PropName = 'TTFInvertedTextJustify' Then Txt.TTFInvertedTextJustify := N
+        Else If PropName = 'TTFOffsetFromInvertedRect' Then Txt.TTFOffsetFromInvertedRect := MilsToCoordF(F)
+        Else If PropName = 'BorderSpaceType' Then Txt.BorderSpaceType := N;
     End
     Else If Owner = 4 Then
     Begin
@@ -317,7 +473,12 @@ Begin
         Else If PropName = 'ClipAcuteCorners' Then Poly.ClipAcuteCorners := B
         Else If PropName = 'MitreCorners' Then Poly.MitreCorners := B
         Else If PropName = 'IgnoreViolations' Then Poly.IgnoreViolations := B
-        Else If PropName = 'ArcPourMode' Then Poly.ArcPourMode := B;
+        Else If PropName = 'ArcPourMode' Then Poly.ArcPourMode := B
+        Else If PropName = 'DrawRemovedNecks' Then Poly.DrawRemovedNecks := B
+        Else If PropName = 'DrawRemovedIslands' Then Poly.DrawRemovedIslands := B
+        Else If PropName = 'DrawDeadCopper' Then Poly.DrawDeadCopper := B
+        Else If PropName = 'ExpandOutline' Then Poly.ExpandOutline := B
+        Else If PropName = 'AutoGenerateName' Then Poly.AutoGenerateName := B;
     End
     Else If Owner = 6 Then
     Begin
@@ -330,7 +491,33 @@ Begin
         Else If PropName = 'NameAutoPosition' Then Comp.ChangeNameAutoposition(N)
         Else If PropName = 'CommentAutoPosition' Then Comp.ChangeCommentAutoposition(N)
         Else If PropName = 'FootprintDescription' Then Comp.FootprintDescription := Value
-        Else If PropName = 'DefaultPCB3DModel' Then Comp.DefaultPCB3DModel := Value;
+        Else If PropName = 'DefaultPCB3DModel' Then Comp.DefaultPCB3DModel := Value
+        Else If PropName = 'SourceDescription' Then Comp.SourceDescription := Value
+        Else If PropName = 'JumpersVisible' Then Comp.JumpersVisible := B
+        Else If PropName = 'ChannelOffset' Then Comp.ChannelOffset := N
+        Else If PropName = 'GroupNum' Then Comp.GroupNum := N;
+    End
+    Else If Owner = 7 Then
+    Begin
+        Pad := Obj;
+        If PropName = 'JumperID' Then Pad.JumperID := N
+        Else If PropName = 'SwapID_Pad' Then Pad.SwapID_Pad := Value
+        Else If PropName = 'SwapID_Part' Then Pad.SwapID_Part := Value
+        Else If PropName = 'SwappedPadName' Then Pad.SwappedPadName := Value
+        Else If PropName = 'OwnerPart_ID' Then Pad.OwnerPart_ID := N
+        Else If PropName = 'DrillType' Then
+        Begin
+            { Drilled, punched, laser or plasma: 0 to 3. }
+            If N > 3 Then Exit;
+            Pad.DrillType := N;
+        End;
+    End
+    Else If Owner = 8 Then
+    Begin
+        Body := Obj;
+        If PropName = 'OverrideColor' Then Body.OverrideColor := B
+        Else If PropName = 'Texture' Then Body.Texture := Value
+        Else If PropName = 'TextureRotation' Then Body.TextureRotation := F;
     End;
     Result := 1;
 End;
@@ -2097,7 +2284,16 @@ Begin
         + 'ClipAcuteCorners, MitreCorners, IgnoreViolations, ArcPourMode, '
         + 'EnablePinSwapping, EnablePartSwapping, IsBGA, LockStrings, '
         + 'NameAutoPosition, CommentAutoPosition, FootprintDescription, '
-        + 'DefaultPCB3DModel, PackageSpecificHash';
+        + 'DefaultPCB3DModel, PackageSpecificHash, JumperID, SwapID_Pad, SwapID_Part, '
+        + 'Inverted, UseInvertedRectangle, InvertedTTTextBorder, '
+        + 'TTFInvertedTextJustify, TTFOffsetFromInvertedRect, ConvertedString, '
+        + 'DrawRemovedNecks, DrawRemovedIslands, DrawDeadCopper, ExpandOutline, '
+        + 'AutoGenerateName, SourceDescription, JumpersVisible, ChannelOffset, '
+        + 'GroupNum, SwappedPadName, OwnerPart_ID, OverrideColor, Texture, '
+        + 'TextureRotation, IsPreRoute, UserRouted, PasteMaskExpansionMode, '
+        + 'SolderMaskExpansionMode, PasteMaskUsePercent, PasteMaskPercent, '
+        + 'PasteMaskEnabled, DrillType, IsVirtualPin, FlippedOnLayer, '
+        + 'BorderSpaceType';
 End;
 
 Function BuildObjectJsonPCB(Obj : IPCB_Primitive; PropsStr : String) : String;

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Put each port's cross-reference at the port's free end.
 
 With the project's Port Cross References option on, Altium draws a port's
