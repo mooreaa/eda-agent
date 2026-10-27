@@ -2,6 +2,8 @@
 # Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Application-level tools for Altium Designer MCP Server."""
 
+import functools
+import os
 import re
 from typing import Any, Optional
 from .. import __version__ as _mcp_server_version
@@ -10,6 +12,7 @@ from ..bridge.exceptions import AltiumCommandError
 from ..cli import get_bundled_scripts_path
 from .datasheet_hints import DATASHEET_RULES
 from ..atomicfile import replace_with_retry
+from .. import updates
 
 
 _VERSION_RE = re.compile(r"SCRIPT_VERSION\s*=\s*'([^']+)'")
@@ -39,6 +42,50 @@ _SESSION_REMINDER = {
     ),
     "datasheet_rules": DATASHEET_RULES,
 }
+
+# The reminder is about 750 tokens. app_ping and app_attach carry it on
+# their first call in this server and then on every Nth call between
+# them, so a long session still sees it now and then without paying for
+# it on every health check. EDA_AGENT_REMINDER_EVERY sets N; 1 sends it
+# every time.
+_REMINDER_EVERY_ENV = "EDA_AGENT_REMINDER_EVERY"
+_REMINDER_EVERY_DEFAULT = 10
+_reminder_calls = 0
+
+
+def _reminder_every() -> int:
+    raw = (os.environ.get(_REMINDER_EVERY_ENV) or "").strip()
+    try:
+        every = int(raw) if raw else _REMINDER_EVERY_DEFAULT
+    except ValueError:
+        every = _REMINDER_EVERY_DEFAULT
+    return max(every, 1)
+
+
+def _with_session_reminder(reply: dict[str, Any]) -> dict[str, Any]:
+    """Add ``_system_reminder`` to ``reply`` when this call is due one."""
+    global _reminder_calls
+    _reminder_calls += 1
+    if (_reminder_calls - 1) % _reminder_every() == 0:
+        reply["_system_reminder"] = _SESSION_REMINDER
+    return reply
+
+
+def _reports_update(fn):
+    """Add ``update`` to a reply when the daily check found a newer
+    eda-agent, so a session hears of it from the tools it calls first.
+    Read from the last check only; never waits on the network."""
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        reply = await fn(*args, **kwargs)
+        try:
+            news = updates.notice()
+        except Exception:  # noqa: BLE001  news never breaks a ping
+            news = None
+        if news and isinstance(reply, dict):
+            reply["update"] = news
+        return reply
+    return wrapper
 
 
 def _bundled_script_version() -> Optional[str]:
@@ -423,6 +470,7 @@ def register_application_tools(mcp):
         return status
 
     @mcp.tool()
+    @_reports_update
     async def app_context() -> dict[str, Any]:
         """Where you are, in one call. Run this before anything else.
 
@@ -531,21 +579,19 @@ def register_application_tools(mcp):
         try:
             bridge.attach()
             script_loaded = bridge.ping()
-            return {
+            return _with_session_reminder({
                 "attached": True,
                 "script_loaded": script_loaded,
                 "message": "Connected to Altium Designer, script is responding"
                 if script_loaded
                 else "Altium is running but script is not responding. Run StartMCPServer in Altium_API.PrjScr.",
-                "_system_reminder": _SESSION_REMINDER,
-            }
+            })
         except AltiumNotRunningError as e:
-            return {
+            return _with_session_reminder({
                 "attached": False,
                 "script_loaded": False,
                 "message": str(e),
-                "_system_reminder": _SESSION_REMINDER,
-            }
+            })
 
     @mcp.tool()
     async def app_save_all() -> dict[str, Any]:
@@ -818,6 +864,7 @@ def register_application_tools(mcp):
         }
 
     @mcp.tool()
+    @_reports_update
     async def app_ping() -> dict[str, Any]:
         """Check that Altium and its bridge script answer, and that the
         running script is the version on disk. A mismatch or a non-empty
@@ -901,7 +948,7 @@ def register_application_tools(mcp):
             match = False
             msg = f"{msg} {stamp_warnings[0]}"
 
-        return {
+        return _with_session_reminder({
             "success": True,
             "mcp_server_version": _mcp_server_version,
             "altium_script_version": altium_ver,
@@ -919,8 +966,7 @@ def register_application_tools(mcp):
             "other_servers": servers,
             "warnings": warnings,
             "message": msg,
-            "_system_reminder": _SESSION_REMINDER,
-        }
+        })
 
     @mcp.tool()
     async def app_get_report() -> dict[str, Any]:
@@ -1091,8 +1137,20 @@ def register_application_tools(mcp):
         )
 
     @mcp.tool()
-    async def app_get_active_document() -> dict[str, Any]:
+    async def app_get_active_document(session: bool = False) -> dict[str, Any]:
         """Get information about the currently active (focused) document.
+
+        Several Claude sessions can share one Altium. Each command runs on
+        its own session's document (the last one it focused), which Altium
+        puts back in front first if anything else moved the focus. So by
+        default this answers what is REALLY in front, which may be another
+        session's document or one a person has just opened. To work on that
+        document, focus it (app_set_active_document); it then becomes this
+        session's.
+
+        Args:
+            session: True for this session's own document instead, brought
+                back to the front first if something else is there.
 
         Returns:
             Dictionary with active document information:
@@ -1105,23 +1163,46 @@ def register_application_tools(mcp):
             Returns empty dict if no document is active.
         """
         bridge = get_bridge()
-        result = await bridge.send_command_async("application.get_active_document")
+        result = await bridge.send_command_async(
+            "application.get_active_document",
+            {} if session else {"front": "true"})
         return result
 
     @mcp.tool()
     async def app_set_active_document(file_path: str) -> dict[str, Any]:
-        """Set a specific document as the active (focused) document.
+        """Set a specific document as the active (focused) document,
+        opening it first when it is a file Altium has not loaded yet (a
+        member of a project just opened, say).
 
         Args:
             file_path: Full path to the document to activate
 
         Returns:
-            Dictionary with result of the operation
+            Dictionary with result of the operation; ``opened`` true when
+            the document had to be opened first.
         """
+        from ..bridge.exceptions import AltiumError
+
         bridge = get_bridge()
-        result = await bridge.send_command_async(
-            "application.set_active_document", {"file_path": file_path}
-        )
+        opened = False
+        try:
+            result = await bridge.send_command_async(
+                "application.set_active_document", {"file_path": file_path}
+            )
+        except AltiumError as exc:
+            # Measured: a demo run opened its project and then could not
+            # bring the board forward because no editor had loaded it.
+            if "not loaded" not in str(exc).lower() or not os.path.isfile(file_path):
+                raise
+            await bridge.send_command_async("application.run_process", {
+                "process_name": "WorkspaceManager:OpenObject",
+                "parameters": f"ObjectKind=Document|FileName={file_path}"})
+            opened = True
+            result = await bridge.send_command_async(
+                "application.set_active_document", {"file_path": file_path}
+            )
+        if opened:
+            result = {"opened": True, **(result if isinstance(result, dict) else {})}
         if isinstance(result, dict):
             return {"success": True, "file_path": file_path, **result}
         elif result:

@@ -195,22 +195,26 @@ async def _refuse_manual_sheet_layout(
 
 
 _FILTER_NAME = re.compile(r"[A-Za-z0-9_.]+")
+# Name, operator, value. The operator is the first = ! < or > (names hold
+# none), as the script's FilterOpPos reads it; a lone '!' is no operator.
+_FILTER_COND = re.compile(r"([^=!<>]*)(!=|<=|>=|=|<|>)(.*)", re.S)
 
 
 def filter_problem(filt: str) -> str:
-    """The first condition of ``filt`` that is not Name=Value, or ''.
+    """The first condition of ``filt`` that is not Name<op>Value, or ''.
 
-    A filter is Name=Value pairs joined by ``|`` and nothing else. The
-    script used to skip a condition it could not parse, which emptied the
-    filter: obj_delete given an Altium query expression removed every
-    track on a board and reported success. The script now refuses such a
-    filter too; this says so before anything is sent.
+    A filter is conditions joined by ``|`` and nothing else, each Name=Value,
+    Name!=Value or a numeric Name<Value, >, <=, >=. The script used to skip
+    a condition it could not parse, which emptied the filter: obj_delete
+    given an Altium query expression removed every track on a board and
+    reported success. The script now refuses such a filter too; this says
+    so before anything is sent.
     """
     for cond in str(filt or "").split("|"):
         if not cond.strip():
             continue
-        name, eq, _ = cond.partition("=")
-        if not eq or not _FILTER_NAME.fullmatch(name):
+        m = _FILTER_COND.fullmatch(cond)
+        if not m or not _FILTER_NAME.fullmatch(m.group(1)):
             return cond
     return ""
 
@@ -221,7 +225,8 @@ def bad_filter(cond: str, **extra: Any) -> dict[str, Any]:
     if _FILTER_NAME.fullmatch(cond.strip()):
         hint = f" For a true/false property write {cond.strip()}=true."
     return {"error": f'Filter condition "{cond}" is not Name=Value. A filter is '
-                     "Name=Value pairs joined by |, each matched exactly; Altium "
+                     "Name=Value conditions joined by |, each matched exactly "
+                     "(also Name!=Value, and Name<Value, >, <=, >= on numbers); Altium "
                      "query expressions (OnLayer(...), Or, And) and bare names are "
                      f"not understood.{hint} Nothing was sent.", **extra}
 
@@ -250,6 +255,36 @@ def _mark_erc_page(result: Any) -> Any:
     return result
 
 
+async def _reopen_sheet(bridge) -> dict[str, Any]:
+    """Save, close and reopen the active sheet, and bring it back to front.
+
+    MEASURED on AD 26.11: after a sheet size change the ERC still judged
+    the sheet against its old frame ("Off sheet Net Label PROBE at
+    6000mil,9500mil" on an A3 sheet that had been A4), through saves and
+    forced recompiles, until the document was closed and opened again.
+    A demo run then switched the check off to get a clean ERC.
+    """
+    from ..bridge.exceptions import AltiumError
+
+    try:
+        active = await bridge.send_command_async("application.get_active_document", {})
+        path = str((active or {}).get("file_path") or "") if isinstance(active, dict) else ""
+        if not path.lower().endswith(".schdoc"):
+            return {"done": False, "reason": "the active document is not a saved sheet"}
+        await bridge.send_command_async("application.save_document", {"file_path": path},
+                                        timeout=60)
+        await bridge.send_command_async("application.close_document", {"file_path": path},
+                                        timeout=60)
+        await bridge.send_command_async("application.run_process", {
+            "process_name": "WorkspaceManager:OpenObject",
+            "parameters": f"ObjectKind=Document|FileName={path}"})
+        await bridge.send_command_async("application.set_active_document", {"file_path": path})
+        return {"done": True, "file_path": path,
+                "why": "Altium's ERC keeps a sheet's old frame until it is reopened"}
+    except AltiumError as exc:
+        return {"done": False, "reason": str(exc)}
+
+
 def register_generic_tools(mcp):
     """Register generic primitive tools with the MCP server."""
 
@@ -271,10 +306,12 @@ def register_generic_tools(mcp):
                 "eNoERC", "eJunction"; symbol graphics as "sch_polygon",
                 "sch_arc", "sch_ellipse", "sch_elliptical_arc", "sch_bezier"
                 (plain "polygon" and "arc" are the board's), the bare
-                "ellipse" and "elliptical_arc", and "eDesignator" and
+                "ellipse", "elliptical_arc" and "bezier", and "eDesignator" and
                 "eRoundRectangle"
                 PCB: "eTrackObject", "ePadObject", "eViaObject", "eComponentObject",
                 "eArcObject", "eFillObject", "eTextObject", "eRuleObject", "eDimensionObject",
+                "eSplitPlaneObject" (a plane layer's regions, with Net
+                and Layer),
                 "eConnectionObject" (the ratsnest: one line per unrouted
                 connection, with X1, Y1, X2, Y2, Layer1, Layer2 and Net)
             properties: Comma-separated property names to return.
@@ -285,7 +322,13 @@ def register_generic_tools(mcp):
                 (ConnectionX/Y is the ELECTRICAL end a wire must touch;
                 Location is the body-side root);
                 "Designator.Text,Comment.Text,LibReference" for
-                components. A managed component also reads
+                components, and "DisplayMode,DisplayModeCount" (the
+                alternate drawing, settable with obj_modify) and
+                "FootprintPinMap" (the current footprint model's pin map,
+                "(G:1),(D:2),(S:3)"; obj_modify also takes "G:1;D:2" and
+                merges by schematic pin, so a map cannot be cleared).
+                "TextFontId" is a sheet or harness entry's label font. A
+                managed component also reads
                 "LibraryIdentifier,DesignItemId,ItemGUID,RevisionGUID"
                 and the other Vault/Symbol GUIDs. "DisplayMode" and
                 "DisplayModeCount" say which of a component's symbols is
@@ -299,7 +342,13 @@ def register_generic_tools(mcp):
                 "Designator,Comment,Pattern,Rotation,X,Y" for
                 components; "Text,Height,StrokeWidth,IsDesignator" for
                 texts, and "MirrorFlag" (settable with obj_modify; the text
-                is kept where it is). An unknown PCB property is refused with the valid
+                is kept where it is). Polygons ("polygon") read and, with
+                obj_modify, set their pour settings: "Name,Grid,TrackSize,
+                MinTrack,ArcApproximation,NeckWidthThreshold" (decimal
+                mils), "IslandAreaThreshold" (square mils),
+                "PolyHatchStyle,PourOver" (raw ordinals), "UseOctagons",
+                and the read-only "PourIndex,Poured"; nothing repours.
+                An unknown PCB property is refused with the valid
                 list. Lengths are decimal mils.
 
                 A board type returns EVERY primitive of that type;
@@ -318,6 +367,8 @@ def register_generic_tools(mcp):
             filter: Pipe-separated property=value conditions (AND), e.g.
                 "Text=VCC" or "Designator.Text=R1"; "" matches all. A PCB
                 length matches as a number in mils ('.' or ',' decimal).
+                "Net!=GND" excludes; "Y>4250|Y<=5000" compares numbers
+                (a value that is not a number matches no < > <= >=).
             limit: Maximum number of objects to return (0 = unlimited)
 
         Returns:
@@ -444,7 +495,25 @@ def register_generic_tools(mcp):
             set: Pipe-separated assignments, e.g. "Text=NEW_NAME" or
                 "Location.X=100|Location.Y=200". Board lengths are
                 decimal mils; a non-number is reported failed, never
-                written as 0.
+                written as 0. Board properties include, besides the
+                usual geometry: HolePositiveTolerance and
+                HoleNegativeTolerance on pads and vias ("unset" when
+                none is set; Altium keeps a negative tolerance as its
+                size; IsCounterHole reads); BarCode* and Multiline* on a
+                text (Altium recalculates the barcode and multiline sizes
+                from the text: read them back); TextHeight,
+                TextFormat, TextPrecision, TextPrefix, TextSuffix,
+                Arrow* and Extension* on a dimension; PolygonType,
+                BorderWidth, AvoidObsticles (Altium's spelling),
+                ClipAcuteCorners, MitreCorners, IgnoreViolations and
+                ArcPourMode on a pour; EnablePinSwapping and
+                EnablePartSwapping on a part (IsBGA reads); also on a
+                part LockStrings, NameAutoPosition and CommentAutoPosition
+                (Altium's anchor numbers; writing one moves the text
+                there), FootprintDescription, DefaultPCB3DModel
+                (PackageSpecificHash reads). Symbol pins
+                take SwapIdPart (shared by every pin of the part),
+                SwapIdPin, SwapIdPair, SwapIdPartPin.
             scope: "active_doc" (default), "project" (all SCH sheets),
                 "doc:C:\\path\\Sheet.SchDoc" (no focus change), or
                 "lib_component:NAME" (a symbol in the active SchLib,
@@ -452,7 +521,9 @@ def register_generic_tools(mcp):
             filter: Pipe-separated property=value conditions (AND logic)
 
         Returns:
-            "matched" and "sheets_processed".
+            "matched", "sheets_processed", and on a schematic "modified"
+            (something was written) with "saved" false: the sheet is
+            marked modified, not saved. Run app_save_all to write it.
 
         Example - rename a net on every sheet:
             obj_modify(object_type="eNetLabel", scope="project",
@@ -460,6 +531,10 @@ def register_generic_tools(mcp):
         Example - edit a pin on any part of a multi-part SchLib symbol:
             obj_modify(object_type="ePin", scope="lib_component:R_0402",
                        filter="Designator=1", set="Name=A")
+        Example - put board copper on a net, or take it off (track, arc,
+        via, pad, fill, region, polygon; the net must exist, "" = no net):
+            obj_modify(object_type="eRegionObject",
+                       filter="Layer=TopLayer|Net=GND", set="Net=")
         Example - draw a MOSFET as its compact alternate symbol and map
         its G/D/S pins to pads 1-3. DisplayMode must be below the part's
         DisplayModeCount; its pins move and wires do not, so re-wire it.
@@ -468,7 +543,7 @@ def register_generic_tools(mcp):
         reported failed. Pad numbers are not checked:
             obj_modify(object_type="eSchComponent",
                        filter="Designator.Text=M201",
-                       set="DisplayMode=1|FootprintPinMap=G->1;D->2;S->3")
+                       set="DisplayMode=1|FootprintPinMap=(G:1),(D:2),(S:3)")
         """
         bad = filter_problem(filter)
         if bad:
@@ -622,7 +697,10 @@ def register_generic_tools(mcp):
 
         Looks up (or creates) an entry in the Altium font table matching the
         specified properties and returns its font ID. Use the returned font_id
-        to set an object's FontId property via `obj_modify`.
+        to set an object's FontId property via `obj_modify`: labels, net
+        labels, power objects, cross-sheet connectors, parameters,
+        designators, sheet names, ports, text frames and notes. A sheet
+        entry's or harness entry's label font is TextFontId.
 
         Args:
             size: Font size in points (e.g., 8, 10, 12)
@@ -694,19 +772,39 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def obj_zoom(action: str = "fit") -> dict[str, Any]:
+    async def obj_zoom(
+        action: str = "fit",
+        x: Optional[float] = None,
+        y: Optional[float] = None,
+        radius: Optional[float] = None,
+    ) -> dict[str, Any]:
         """Control the viewport zoom level of the focused document.
 
         Works on a schematic, a schematic library, a board and a footprint
         library; the focused tab decides which editor zooms.
 
         Args:
-            action: "fit" (zoom to show all), "selection" (zoom to selected objects)
+            action: "fit" (zoom to show all), "board" (the board alone,
+                not parts parked beside it; a schematic fits as "fit"),
+                "selection" (zoom to selected objects) or "point" (zoom
+                to x, y)
+            x, y: the point for "point", in mils (a footprint's frame in
+                a PCB library)
+            radius: half the width of the view round the point on a board
+                or footprint, mils (default 200)
 
         Returns:
             Dictionary confirming the zoom action
         """
         bridge = get_bridge()
+        if action == "point":
+            if x is None or y is None:
+                return {"success": False,
+                        "error": 'action "point" needs x and y'}
+            params: dict[str, Any] = {"x": str(float(x)), "y": str(float(y))}
+            if radius is not None:
+                params["radius"] = str(float(radius))
+            return await bridge.send_command_async("generic.zoom_to_xy", params)
         result = await bridge.send_command_async(
             "generic.zoom", {"action": action}
         )
@@ -865,21 +963,33 @@ def register_generic_tools(mcp):
             },
         )
         if isinstance(result, dict):
-            return {"success": True, **result}
+            out = {"success": True, **result}
         elif result:
-            return {"success": True, "data": result}
+            out = {"success": True, "data": result}
         else:
-            return {"success": True, "process": process_name}
+            out = {"success": True, "process": process_name}
+        try:
+            from ..ui.altium_processes import unlisted
+            out.update(unlisted(process_name) or {})
+        except Exception:                       # noqa: BLE001 - a hint only
+            pass
+        return out
 
     @mcp.tool()
-    async def proj_run_erc(limit: int = 100) -> dict[str, Any]:
+    async def proj_run_erc(limit: int = 100,
+                           include_suppressed: bool = False) -> dict[str, Any]:
         """Run Electrical Rules Check on the focused project.
 
         Compiles the project first (required), runs ERC, and returns
-        what it found, the same list ``proj_get_erc_violations`` reads.
+        what it found, the same list ``proj_get_erc_violations`` reads:
+        what Altium reports. A violation a No ERC marker covers, or of a
+        type set to No Report, is left out and counted in
+        ``suppressed_count`` / ``not_reported_count``.
 
         Args:
             limit: How many violations to return; 0 returns all of them.
+            include_suppressed: list those too, each with ``suppressed``
+                and ``level``.
 
         Returns:
             ``violation_count`` and ``violations``: each with its kind,
@@ -889,7 +999,8 @@ def register_generic_tools(mcp):
             with ``proj_get_erc_violations(offset=next_offset)``.
         """
         bridge = get_bridge()
-        params = {"limit": str(max(0, int(limit)))}
+        params = {"limit": str(max(0, int(limit))),
+                  "include_suppressed": "true" if include_suppressed else "false"}
         result = await bridge.send_command_async("generic.run_erc", params)
         # A script from before 2026.10.21 answers the run with a message
         # only; read the list it left behind instead of returning nothing.
@@ -957,6 +1068,7 @@ def register_generic_tools(mcp):
     async def proj_get_erc_violations(
         limit: int = 100,
         offset: int = 0,
+        include_suppressed: bool = False,
     ) -> dict[str, Any]:
         """Return the ERC violation list produced by the last
         ``proj_run_erc()`` invocation.
@@ -973,6 +1085,9 @@ def register_generic_tools(mcp):
             limit: How many violations to return; 0 returns all of them.
             offset: Index of the first violation, to page through a long
                 list without running ERC again.
+            include_suppressed: also list violations a No ERC marker
+                covers or whose type is set to No Report; left out and
+                only counted by default, as Altium's Messages panel does.
 
         Returns:
             ``{"violation_count", "offset", "returned", "truncated",
@@ -982,7 +1097,8 @@ def register_generic_tools(mcp):
         """
         bridge = get_bridge()
         params = {"limit": str(max(0, int(limit))),
-                  "offset": str(max(0, int(offset)))}
+                  "offset": str(max(0, int(offset))),
+                  "include_suppressed": "true" if include_suppressed else "false"}
         result = await bridge.send_command_async(
             "generic.get_erc_violations", params)
         return _mark_erc_page(result)
@@ -1077,6 +1193,9 @@ def register_generic_tools(mcp):
         """Create a new schematic sheet and add it to the focused project.
 
         The sheet is created in the same directory as the project file.
+        Refused (FILE_EXISTS) when a file of that name is already there,
+        as one removed with proj_delete_sheet is: it would open with its
+        old drawing.
 
         Args:
             name: Name for the new sheet (without .SchDoc extension).
@@ -1465,7 +1584,84 @@ def register_generic_tools(mcp):
             params["orientation"] = orientation
         bridge = get_bridge()
         result = await bridge.send_command_async("generic.set_sheet_size", params)
+        if isinstance(result, dict) and result.get("success") is not False:
+            result["reopened"] = await _reopen_sheet(bridge)
         return result
+
+    @mcp.tool()
+    async def sch_set_sheet_options(
+        zones_x: Optional[int] = None,
+        zones_y: Optional[int] = None,
+        margin_width: Optional[float] = None,
+        border_style: Optional[int] = None,
+        reference_zones: Optional[bool] = None,
+        show_template_graphics: Optional[bool] = None,
+        custom_zones_x: Optional[int] = None,
+        custom_zones_y: Optional[int] = None,
+        custom_margin_width: Optional[float] = None,
+    ) -> dict[str, Any]:
+        """Read, or set, the active sheet's reference zones, margin, border
+        style and template graphics. Call with nothing to read.
+
+        Measured on AD 26.11: on a standard sheet size the zones and
+        margin follow the size, so zones_x, zones_y and margin_width do
+        not take there; the custom_* ones (used by a custom-size sheet),
+        border, reference zones and template graphics do. Every value
+        written is read back, and one that did not take is listed in
+        ``not_applied``.
+
+        Args:
+            zones_x, zones_y: Reference zones across and down (from 1).
+            margin_width: Sheet margin in mils.
+            border_style: Altium's border style number (read one back
+                first; 0 is the standard border).
+            reference_zones: Show the zone letters and numbers.
+            show_template_graphics: Show the template's graphics.
+            custom_zones_x, custom_zones_y, custom_margin_width: The same
+                for a custom-size sheet.
+
+        Returns:
+            ``changed``, ``options`` (read back after any write) and
+            ``not_applied``.
+        """
+        params: dict[str, Any] = {}
+        for key, value in (("zones_x", zones_x), ("zones_y", zones_y),
+                           ("custom_zones_x", custom_zones_x),
+                           ("custom_zones_y", custom_zones_y),
+                           ("border_style", border_style)):
+            if value is not None:
+                if value < (0 if key == "border_style" else 1):
+                    return {"ok": False, "reason": f"{key} is out of range"}
+                params[key] = str(int(value))
+        for key, value in (("margin_width", margin_width),
+                           ("custom_margin_width", custom_margin_width)):
+            if value is not None:
+                if value < 0:
+                    return {"ok": False, "reason": f"{key} is mils from 0"}
+                params[key] = str(value)
+        for key, value in (("reference_zones", reference_zones),
+                           ("show_template_graphics", show_template_graphics)):
+            if value is not None:
+                params[key] = "true" if value else "false"
+        reply = await get_bridge().send_command_async("generic.sheet_options", params)
+        if isinstance(reply, dict) and params:
+            got = reply.get("options") or {}
+            keys = {"margin_width": "margin_width_mils",
+                    "custom_margin_width": "custom_margin_width_mils"}
+            missed = []
+            for key, sent in params.items():
+                have = got.get(keys.get(key, key))
+                if isinstance(have, bool):
+                    ok = have == (sent == "true")
+                else:
+                    try:
+                        ok = abs(float(have) - float(sent)) < 0.01
+                    except (TypeError, ValueError):
+                        ok = False
+                if not ok:
+                    missed.append(key)
+            reply["not_applied"] = missed
+        return reply
 
     @mcp.tool()
     async def sch_audit_outside_sheet(limit: int = 100,
@@ -1528,7 +1724,8 @@ def register_generic_tools(mcp):
                 "generic.set_sheet_size", {"style": to, "custom_width": "0",
                                            "custom_height": "0"})
             actions.append({"action": "set_sheet_size", "to": to,
-                            "reply": reply})
+                            "reply": reply,
+                            "reopened": await _reopen_sheet(bridge)})
             report = await audit()
         if report.get("ok") and report.get("verdict") == "shift":
             dx, dy = int(report["dx"]), int(report["dy"])
@@ -1579,6 +1776,9 @@ def register_generic_tools(mcp):
         orientation: int = 0,
     ) -> dict[str, Any]:
         """Place a net label at coordinates on the active schematic.
+
+        The label takes the font most of the sheet's net labels use, and
+        Altium's native net-label maroon (Color 128) always.
 
         Args:
             text: Net name for the label (e.g., "VCC", "GND", "SDA")
@@ -1771,10 +1971,17 @@ def register_generic_tools(mcp):
         x: int,
         y: int,
     ) -> dict[str, Any]:
-        """Place a No-ERC marker at coordinates to suppress specific ERC violations.
+        """Place a No-ERC marker at coordinates to suppress the ERC violations
+        there.
 
         Use this after running ERC to suppress known-good violations at specific
-        pin or wire locations.
+        pin or wire locations. Put it on the pin's wire end (its connection
+        point), not on the body side. The marker is placed active and
+        suppressing ALL violations, as Altium's own placed No ERC does; to
+        narrow it, write ErrorKindSetToSuppress / SuppressAll=false on the
+        eNoERC object with obj_modify. obj_query reads SuppressAll,
+        IsActive, ErrorKindSetToSuppress, ConnectionPairsToSuppress and
+        SuppressableErrors.
 
         Args:
             x: X coordinate in mils
@@ -2903,17 +3110,16 @@ def register_generic_tools(mcp):
                 library_path (empty: an open library), designator,
                 rotation (0/90/180/270), footprint}]. ``footprint`` names
                 one of the symbol's own PCB models (case aside), which
-                becomes its only current one, the model FootprintPinMap
-                then maps. A name the symbol lacks is not placed:
-                FOOTPRINT_NOT_ON_SYMBOL, with its models in
-                ``footprint_hint``.
+                becomes its current model.
             document_path: .SchDoc to focus and place onto.
             allow_manual_layout: True places your own coordinates onto an
                 empty sheet anyway; say why.
 
         Returns:
-            Dict with placed, failed, total, footprints_chosen counts,
-            and failed_refdes as ``designator:REASON``.
+            Dict with placed, failed, total counts and footprints_chosen;
+            footprint_issues lists a part whose symbol has no model of
+            that name (with the models it has) or whose choice did not
+            take. Such a part is placed on its library's model.
         """
         refusal = _unknown_keys_refusal(
             placements, PLACEMENT_KEYS,

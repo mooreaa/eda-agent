@@ -350,6 +350,26 @@ Begin
             Exit;
         End;
     End;
+    { NO MEMBER LOADED: nothing above could be shown, and the project could }
+    { not be closed. MEASURED: opening a member (load_project_sheets, or    }
+    { OpenObject) focuses the project and the close then works. The Client }
+    { API keeps the membership; RunProcess Client:OpenDocument does not.    }
+    For J := 0 To Project.DM_LogicalDocumentCount - 1 Do
+    Begin
+        Doc := Project.DM_LogicalDocuments(J);
+        If Doc = Nil Then Continue;
+        Path := DocFullPath(Doc);
+        If (Path = '') Or (Not FileExists(Path)) Then Continue;
+        ServerDoc := Nil;
+        Try ServerDoc := Client.OpenDocument(Doc.DM_DocumentKind, Path); Except ServerDoc := Nil; End;
+        If ServerDoc = Nil Then Continue;
+        Try Client.ShowDocument(ServerDoc); Except End;
+        If FocusedProjectPathIs(Target) Then
+        Begin
+            Result := True;
+            Exit;
+        End;
+    End;
 End;
 
 { Paths in BeforeList that are gone from AfterList, other than TargetPath.   }
@@ -2466,6 +2486,108 @@ Begin
 End;
 
 {..............................................................................}
+{ ProjectHoldingDoc - the first open project whose documents include FilePath, }
+{ or Nil for a free document.                                                 }
+{..............................................................................}
+Function ProjectHoldingDoc(FilePath : String) : IProject;
+Var
+    Workspace : IWorkspace;
+    Proj : IProject;
+    Doc : IDocument;
+    I, J : Integer;
+    Want, Have : String;
+Begin
+    Result := Nil;
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then Exit;
+    Want := UpperCase(CanonicalPathValue('path', FilePath));
+    For I := 0 To Workspace.DM_ProjectCount - 1 Do
+    Begin
+        Proj := Nil;
+        Try Proj := Workspace.DM_Projects(I); Except End;
+        If Proj = Nil Then Continue;
+        For J := 0 To Proj.DM_LogicalDocumentCount - 1 Do
+        Begin
+            Doc := Nil;
+            Try Doc := Proj.DM_LogicalDocuments(J); Except End;
+            If Doc = Nil Then Continue;
+            Have := '';
+            Try Have := Doc.DM_FullPath; Except End;
+            If UpperCase(CanonicalPathValue('path', Have)) = Want Then
+            Begin
+                Result := Proj;
+                Exit;
+            End;
+        End;
+    End;
+End;
+
+{..............................................................................}
+{ Proj_ExportSTEPApi - write the board's 3D model through Altium's own        }
+{ exporter object (PCBServer.Board3DModelExporter.ExportBoard3DModel), with   }
+{ no dialog. The exporter keeps the                                           }
+{ options last used in File > Export > STEP 3D. format is the exporter's own  }
+{ code: 0 wrote STEP on AD 26.11.1.5 (7 MB in 17 s, no dialog).            }
+{ generated is true only when a new file is at output_path afterwards, so a  }
+{ build where the call does nothing says so and proj_export_step falls back  }
+{ to the dialog route.                                                        }
+{ Params: output_path (required), format (default 0)                          }
+{..............................................................................}
+Function Proj_ExportSTEPApi(Params : String; RequestId : String) : String;
+Var
+    OutputPath, Problem : String;
+    Board : IPCB_Board;
+    Exporter : IPCB_Board3DModelExporter;
+    Proj : IProject;
+    Format, AgeBefore, AgeAfter : Integer;
+Begin
+    OutputPath := ExtractJsonValue(Params, 'output_path');
+    Format := StrToIntDef(ExtractJsonValue(Params, 'format'), 0);
+    If OutputPath = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'output_path is required');
+        Exit;
+    End;
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is open');
+        Exit;
+    End;
+    Exporter := Nil;
+    Try Exporter := PCBServer.Board3DModelExporter; Except Exporter := Nil; End;
+    If Exporter = Nil Then
+    Begin
+        Result := BuildSuccessResponse(RequestId, JsonObj(JsonBool('generated', False)
+            + ',' + JsonStr('reason', 'this Altium build gives scripts no 3D model exporter')));
+        Exit;
+    End;
+    Proj := ProjectHoldingDoc(Board.FileName);
+    AgeBefore := -1;
+    Try If FileExists(OutputPath) Then AgeBefore := FileAge(OutputPath); Except End;
+    Problem := '';
+    Try
+        Exporter.ExportBoard3DModel(OutputPath, Format, Board, Proj);
+    Except
+        Problem := 'the exporter raised an error';
+    End;
+    AgeAfter := -1;
+    Try If FileExists(OutputPath) Then AgeAfter := FileAge(OutputPath); Except End;
+    If (AgeAfter <> -1) And (AgeAfter <> AgeBefore) Then
+        Result := BuildSuccessResponse(RequestId, JsonObj(JsonBool('generated', True)
+            + ',' + JsonStr('output_path', OutputPath)
+            + ',' + JsonStr('board', Board.FileName)
+            + ',' + JsonBool('in_project', Proj <> Nil)))
+    Else
+    Begin
+        If Problem = '' Then Problem := 'the exporter returned and no new file is at output_path';
+        Result := BuildSuccessResponse(RequestId, JsonObj(JsonBool('generated', False)
+            + ',' + JsonStr('output_path', OutputPath)
+            + ',' + JsonStr('reason', Problem)));
+    End;
+End;
+
+{..............................................................................}
 { Export PCB to STEP 3D model                                                 }
 { Params: output_path (optional, if omitted, Altium may prompt)              }
 {..............................................................................}
@@ -2493,10 +2615,17 @@ Begin
     If OutputPath <> '' Then
         Try If FileExists(OutputPath) Then AgeBefore := FileAge(OutputPath); Except End;
 
+    { PCB:ExportSTEP3D is not a registered process, so it did nothing and  }
+    { said nothing. The STEP exporter is the 'STEP 3D' filter of           }
+    { PCB:Export (advpcb.ins), the route File > Export > STEP 3D takes. It }
+    { asks for the file name (already filled in from FileName), the       }
+    { export options, and closes with "Done!"; proj_export_step answers    }
+    { those three from outside while this waits in RunProcess.             }
     ResetParameters;
+    AddStringParameter('Format', 'STEP 3D');
     If OutputPath <> '' Then
         AddStringParameter('FileName', OutputPath);
-    RunProcess('PCB:ExportSTEP3D');
+    RunProcess('PCB:Export');
 
     { success:true used to come back whatever happened, and a reported    }
     { run that wrote nothing was indistinguishable from one that did.     }
@@ -2521,9 +2650,8 @@ Begin
             '{"generated":false,"dispatched":true,"output_path":"'
             + EscapeJsonString(OutputPath) + '"'
             + ',"reason":"the export was launched but no new file is at '
-            + 'output_path. PCB:ExportSTEP3D is not documented to take a file '
-            + 'name; run an OutJob with an ExportSTEP output through '
-            + 'proj_run_outjob for a result that can be confirmed"}');
+            + 'output_path. The export dialogs were cancelled or answered '
+            + 'with another file name"}');
 End;
 
 {..............................................................................}
@@ -3452,7 +3580,9 @@ Var
     ProjectPath, VarName, VarDesc : String;
     Workspace : IWorkspace;
     Project : IProject;
+    NewVariant : IProjectVariant;
     PreCount, PostCount : Integer;
+    Route : String;
 Begin
     VarName := ExtractJsonValue(Params, 'name');
     VarDesc := ExtractJsonValue(Params, 'description');
@@ -3471,35 +3601,714 @@ Begin
     Else Project := Workspace.DM_FocusedProject;
     If Project = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_PROJECT', 'No project found'); Exit; End;
 
-    { The DM API is read-only for variants (no DM_AddProjectVariant); the
-      WorkspaceManager:VariantManagement process is the only script lever and
-      it is unreliable. So we attempt it, then VERIFY via the variant count and
-      report the real outcome -- never a blind success (a false success here
-      masked that no variant was actually created). }
+    { Whichever route runs, the variant count is checked after it and the  }
+    { real outcome reported: a blind success here once masked that no      }
+    { variant was created.                                                 }
     PreCount := -1;
     Try PreCount := Project.DM_ProjectVariantCount; Except End;
 
-    ResetParameters;
-    AddStringParameter('Action', 'AddVariant');
-    AddStringParameter('VariantName', VarName);
-    If VarDesc <> '' Then
-        AddStringParameter('VariantDescription', VarDesc);
-    RunProcess('WorkspaceManager:VariantManagement');
-
-    Try Project.DM_Compile; Except End;
+    { IProject.DM_AddProjectVariant first; the process    }
+    { route below stays for a build where it adds nothing.                }
+    Route := 'api';
+    NewVariant := Nil;
+    Try NewVariant := Project.DM_AddProjectVariant; Except NewVariant := Nil; End;
+    If NewVariant <> Nil Then
+    Begin
+        NewVariant.DM_SetName(VarName);
+        If VarDesc <> '' Then NewVariant.DM_SetDescription(VarDesc)
+        Else NewVariant.DM_SetDescription(VarName);
+        MarkDocDirtyByPath(Project.DM_ProjectFullPath);
+    End;
     PostCount := -1;
     Try PostCount := Project.DM_ProjectVariantCount; Except End;
+    If (PreCount < 0) Or (PostCount <= PreCount) Then
+    Begin
+        Route := 'process';
+        ResetParameters;
+        AddStringParameter('Action', 'AddVariant');
+        AddStringParameter('VariantName', VarName);
+        If VarDesc <> '' Then
+            AddStringParameter('VariantDescription', VarDesc);
+        RunProcess('WorkspaceManager:VariantManagement');
+
+        Try Project.DM_Compile; Except End;
+        PostCount := -1;
+        Try PostCount := Project.DM_ProjectVariantCount; Except End;
+    End;
 
     If (PreCount >= 0) And (PostCount > PreCount) Then
         Result := BuildSuccessResponse(RequestId,
             '{"success":true,"name":"' + EscapeJsonString(VarName) + '","description":"'
-            + EscapeJsonString(VarDesc) + '","variant_count":' + IntToStr(PostCount) + '}')
+            + EscapeJsonString(VarDesc) + '","variant_count":' + IntToStr(PostCount)
+            + ',"route":"' + Route + '"}')
     Else
         Result := BuildErrorResponse(RequestId, 'CREATE_UNCONFIRMED',
             'Variant creation could not be confirmed (count ' + IntToStr(PreCount)
             + ' -> ' + IntToStr(PostCount) + '). Script-based variant creation via '
             + 'WorkspaceManager:VariantManagement is unreliable; create the variant '
             + 'in the Variant Management dialog.');
+End;
+
+{..............................................................................}
+{ VariationKindWord - a component variation's kind as a word.                  }
+{..............................................................................}
+Function VariationKindWord(Kind : Integer) : String;
+Begin
+    If Kind = 0 Then Result := 'fitted'
+    Else If Kind = 1 Then Result := 'not_fitted'
+    Else If Kind = 2 Then Result := 'alternate'
+    Else Result := 'unknown(' + IntToStr(Kind) + ')';
+End;
+
+{..............................................................................}
+{ Proj_SetComponentVariation - add, change or remove one part's entry in a    }
+{ project variant: IProjectVariant.DM_AddComponentVariation,                  }
+{ DM_RemoveComponentVariation and the IComponentVariation DM_Set* writers     }
+{ The part is found by its physical designator in the         }
+{ compiled project, and its variation by the part's unique id, the way the    }
+{ not-fitted audit reads them. The entry is read back afterwards.             }
+{ Params: variant (name or description, required), designator (required),    }
+{ kind (fitted | not_fitted | alternate | remove), alternate_part,            }
+{ project_path.                                                                }
+{..............................................................................}
+Function Proj_SetComponentVariation(Params : String; RequestId : String) : String;
+Var
+    ProjectPath, VarWanted, Desig, KindStr, AltPart, UniqueId, Before, After : String;
+    Workspace : IWorkspace;
+    Project : IProject;
+    Variant, V : IProjectVariant;
+    CompVar, Other : IComponentVariation;
+    FlatDoc : IDocument;
+    Comp : IComponent;
+    I, Kind, Found : Integer;
+Begin
+    ProjectPath := ExtractJsonValue(Params, 'project_path');
+    VarWanted := ExtractJsonValue(Params, 'variant');
+    Desig := ExtractJsonValue(Params, 'designator');
+    KindStr := LowerCase(ExtractJsonValue(Params, 'kind'));
+    AltPart := ExtractJsonValue(Params, 'alternate_part');
+    If (VarWanted = '') Or (Desig = '') Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'variant and designator are required');
+        Exit;
+    End;
+    If KindStr = 'fitted' Then Kind := 0
+    Else If KindStr = 'not_fitted' Then Kind := 1
+    Else If KindStr = 'alternate' Then Kind := 2
+    Else If KindStr = 'remove' Then Kind := -1
+    Else
+    Begin
+        Result := BuildErrorResponse(RequestId, 'INVALID_VALUE',
+            'kind is fitted, not_fitted, alternate or remove');
+        Exit;
+    End;
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace'); Exit; End;
+    If ProjectPath <> '' Then Project := FindProjectByPath(Workspace, ProjectPath)
+    Else Project := Workspace.DM_FocusedProject;
+    If Project = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_PROJECT', 'No project found'); Exit; End;
+    SmartCompile(Project);
+
+    Variant := Nil;
+    For I := 0 To Project.DM_ProjectVariantCount - 1 Do
+    Begin
+        V := Project.DM_ProjectVariants(I);
+        If V = Nil Then Continue;
+        If (UpperCase(V.DM_Name) = UpperCase(VarWanted))
+            Or (UpperCase(V.DM_Description) = UpperCase(VarWanted)) Then
+        Begin
+            Variant := V;
+            Break;
+        End;
+    End;
+    If Variant = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_VARIANT', 'No variant named ' + VarWanted);
+        Exit;
+    End;
+
+    UniqueId := '';
+    FlatDoc := Nil;
+    Try FlatDoc := Project.DM_DocumentFlattened; Except End;
+    If FlatDoc <> Nil Then
+    Begin
+        For I := 0 To FlatDoc.DM_ComponentCount - 1 Do
+        Begin
+            Comp := Nil;
+            Try Comp := FlatDoc.DM_Components(I); Except End;
+            If Comp = Nil Then Continue;
+            If UpperCase(Comp.DM_PhysicalDesignator) = UpperCase(Desig) Then
+            Begin
+                UniqueId := Comp.DM_UniqueId;
+                Break;
+            End;
+        End;
+    End;
+    If UniqueId = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_COMPONENT',
+            'No part ' + Desig + ' in the compiled project');
+        Exit;
+    End;
+
+    CompVar := Nil;
+    Try CompVar := Variant.DM_FindComponentVariationByUniqueId(UniqueId); Except End;
+    Before := 'none';
+    If CompVar <> Nil Then Before := VariationKindWord(CompVar.DM_VariationKind);
+
+    If Kind = -1 Then
+    Begin
+        If CompVar <> Nil Then
+        Begin
+            Found := -1;
+            For I := 0 To Variant.DM_VariationCount - 1 Do
+            Begin
+                Other := Variant.DM_Variations(I);
+                If Other = Nil Then Continue;
+                If Other.DM_UniqueId = UniqueId Then
+                Begin
+                    Found := I;
+                    Break;
+                End;
+            End;
+            If Found >= 0 Then Variant.DM_RemoveComponentVariation(Found);
+        End;
+    End
+    Else
+    Begin
+        If CompVar = Nil Then
+        Begin
+            CompVar := Variant.DM_AddComponentVariation;
+            CompVar.DM_SetUniqueId(UniqueId);
+            CompVar.DM_SetPhysicalDesignator(Desig);
+        End;
+        CompVar.DM_SetVariationKind(Kind);
+        If AltPart <> '' Then CompVar.DM_SetAlternatePart(AltPart);
+    End;
+
+    CompVar := Nil;
+    Try CompVar := Variant.DM_FindComponentVariationByUniqueId(UniqueId); Except End;
+    After := 'none';
+    AltPart := '';
+    If CompVar <> Nil Then
+    Begin
+        After := VariationKindWord(CompVar.DM_VariationKind);
+        Try AltPart := CompVar.DM_AlternatePart; Except End;
+    End;
+    MarkDocDirtyByPath(Project.DM_ProjectFullPath);
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonStr('variant', Variant.DM_Description) + ','
+        + JsonStr('designator', Desig) + ','
+        + JsonStr('unique_id', UniqueId) + ','
+        + JsonStr('before', Before) + ','
+        + JsonStr('after', After) + ','
+        + JsonStr('alternate_part', AltPart) + ','
+        + JsonBool('applied', ((Kind = -1) And (After = 'none'))
+            Or ((Kind >= 0) And (After = VariationKindWord(Kind))))));
+End;
+
+{..............................................................................}
+{ Proj_NetColor - read, and optionally set, the colour the project gives a    }
+{ net: IProject.DM_GetNetColorByName / DM_SetNetColorByName.   }
+{ Colours are Altium's BGR integers; color = -1 reads only.                   }
+{ Params: net (required), color, project_path.                                }
+{..............................................................................}
+Function Proj_NetColor(Params : String; RequestId : String) : String;
+Var
+    ProjectPath, NetName, ColorStr : String;
+    Workspace : IWorkspace;
+    Project : IProject;
+    Before, After, Wanted : Integer;
+Begin
+    ProjectPath := ExtractJsonValue(Params, 'project_path');
+    NetName := ExtractJsonValue(Params, 'net');
+    ColorStr := ExtractJsonValue(Params, 'color');
+    If NetName = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'net is required');
+        Exit;
+    End;
+    Wanted := StrToIntDef(ColorStr, -1);
+    { 536870912 (bit 29) is Altium's "no colour set" (measured on AD 26.11). }
+    If (ColorStr <> '') And ((Wanted < 0) Or ((Wanted > 16777215) And (Wanted <> 536870912))) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'INVALID_VALUE', 'color is 0 to 16777215, or 536870912 for none');
+        Exit;
+    End;
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace'); Exit; End;
+    If ProjectPath <> '' Then Project := FindProjectByPath(Workspace, ProjectPath)
+    Else Project := Workspace.DM_FocusedProject;
+    If Project = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_PROJECT', 'No project found'); Exit; End;
+    Before := Project.DM_GetNetColorByName(NetName);
+    If Wanted >= 0 Then
+    Begin
+        Project.DM_SetNetColorByName(NetName, Wanted);
+        MarkDocDirtyByPath(Project.DM_ProjectFullPath);
+    End;
+    After := Project.DM_GetNetColorByName(NetName);
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonStr('net', NetName) + ','
+        + JsonInt('color_before', Before) + ','
+        + JsonInt('color', After)));
+End;
+
+{ Member names of a compiled object class: nets by name, parts by designator. }
+Function ClassMembersJson(Cls : IObjectClass) : String;
+Var
+    I : Integer;
+    Member : IDMObject;
+    Name : String;
+Begin
+    Result := '';
+    For I := 0 To Cls.DM_MemberCount - 1 Do
+    Begin
+        Member := Nil;
+        Try Member := Cls.DM_Members(I); Except End;
+        If Member = Nil Then Continue;
+        Name := '';
+        Try Name := Member.DM_NetName; Except Name := ''; End;
+        If Name = '' Then
+        Begin
+            Try Name := Member.DM_PhysicalDesignator; Except Name := ''; End;
+        End;
+        If Result <> '' Then Result := Result + ',';
+        Result := Result + '"' + EscapeJsonString(Name) + '"';
+    End;
+    Result := '[' + Result + ']';
+End;
+
+{..............................................................................}
+{ Proj_GetDeclaredDesignObjects - the net classes, component classes,         }
+{ differential pairs and rooms the compiled schematics declare (directives,   }
+{ class parameters, sheet-based rooms): IDocument.DM_NetClasses,               }
+{ DM_ComponentClasses, DM_DifferentialPairs and DM_Rooms.       }
+{ What an ECO would create on the board, read before it does.                  }
+{ Params: project_path.                                                        }
+{..............................................................................}
+Function Proj_GetDeclaredDesignObjects(Params : String; RequestId : String) : String;
+Var
+    ProjectPath, NetCls, CompCls, Pairs, Rooms, PosNet, NegNet, DocPath : String;
+    Workspace : IWorkspace;
+    Project : IProject;
+    Doc : IDocument;
+    Cls : IObjectClass;
+    Pair : IDifferentialPair;
+    Room : IRoom;
+    D, I, Sheets : Integer;
+Begin
+    ProjectPath := ExtractJsonValue(Params, 'project_path');
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace'); Exit; End;
+    If ProjectPath <> '' Then Project := FindProjectByPath(Workspace, ProjectPath)
+    Else Project := Workspace.DM_FocusedProject;
+    If Project = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_PROJECT', 'No project found'); Exit; End;
+    SmartCompile(Project);
+    NetCls := ''; CompCls := ''; Pairs := ''; Rooms := '';
+    Sheets := 0;
+    For D := 0 To Project.DM_LogicalDocumentCount - 1 Do
+    Begin
+        Doc := Nil;
+        Try Doc := Project.DM_LogicalDocuments(D); Except End;
+        If Doc = Nil Then Continue;
+        If UpperCase(Doc.DM_DocumentKind) <> 'SCH' Then Continue;
+        Inc(Sheets);
+        DocPath := ExtractFileName(Doc.DM_FullPath);
+        For I := 0 To Doc.DM_NetClassCount - 1 Do
+        Begin
+            Cls := Doc.DM_NetClasses(I);
+            If Cls = Nil Then Continue;
+            If NetCls <> '' Then NetCls := NetCls + ',';
+            NetCls := NetCls + JsonObj(JsonStr('name', Cls.DM_Name) + ','
+                + JsonStr('sheet', DocPath) + ',' + JsonRaw('members', ClassMembersJson(Cls)));
+        End;
+        For I := 0 To Doc.DM_ComponentClassCount - 1 Do
+        Begin
+            Cls := Doc.DM_ComponentClasses(I);
+            If Cls = Nil Then Continue;
+            If CompCls <> '' Then CompCls := CompCls + ',';
+            CompCls := CompCls + JsonObj(JsonStr('name', Cls.DM_Name) + ','
+                + JsonStr('sheet', DocPath) + ',' + JsonRaw('members', ClassMembersJson(Cls)));
+        End;
+        For I := 0 To Doc.DM_DifferentialPairCount - 1 Do
+        Begin
+            Pair := Doc.DM_DifferentialPairs(I);
+            If Pair = Nil Then Continue;
+            PosNet := ''; NegNet := '';
+            Try PosNet := Pair.DM_PositiveNet.DM_NetName; Except End;
+            Try NegNet := Pair.DM_NegativeNet.DM_NetName; Except End;
+            If Pairs <> '' Then Pairs := Pairs + ',';
+            Pairs := Pairs + JsonObj(JsonStr('name', Pair.DM_Name) + ','
+                + JsonStr('sheet', DocPath) + ','
+                + JsonStr('positive', PosNet) + ',' + JsonStr('negative', NegNet));
+        End;
+        For I := 0 To Doc.DM_RoomCount - 1 Do
+        Begin
+            Room := Doc.DM_Rooms(I);
+            If Room = Nil Then Continue;
+            If Rooms <> '' Then Rooms := Rooms + ',';
+            Rooms := Rooms + JsonObj(JsonStr('name', Room.DM_RoomName) + ','
+                + JsonStr('sheet', DocPath) + ','
+                + JsonStr('scope', Room.DM_Scope1Expression));
+        End;
+    End;
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonInt('sheets_examined', Sheets) + ','
+        + JsonRaw('net_classes', '[' + NetCls + ']') + ','
+        + JsonRaw('component_classes', '[' + CompCls + ']') + ','
+        + JsonRaw('differential_pairs', '[' + Pairs + ']') + ','
+        + JsonRaw('rooms', '[' + Rooms + ']')));
+End;
+
+{ One naming object on a compiled net (label, power port, port, sheet       }
+{ entry, off-sheet connector) as JSON: its text, sheet and location in      }
+{ mils. A power port answers no text of its own, so the net name stands in. }
+Function NetNamingItemJson(Item : INetItem; Text : String) : String;
+Var
+    Sheet : String;
+    X, Y : Integer;
+Begin
+    Sheet := ''; X := 0; Y := 0;
+    If Text = '' Then
+    Begin
+        Try Text := Item.DM_NetName; Except End;
+    End;
+    Try Sheet := Item.DM_OwnerDocumentName; Except End;
+    Try X := Item.DM_LocationX; Except End;
+    Try Y := Item.DM_LocationY; Except End;
+    Result := JsonObj(JsonStr('text', Text) + ',' + JsonStr('sheet', Sheet) + ','
+        + JsonFloat('x', X / 10000) + ',' + JsonFloat('y', Y / 10000));
+End;
+
+{ What names one compiled net, and where: its labels, power ports, ports,  }
+{ sheet entries and off-sheet connectors, with the net's own flags.        }
+Function NetContentsJson(Net : INet; WithPins : Boolean) : String;
+Var
+    Item : INetItem;
+    Labels, Powers, Ports, Entries, Cross, Pins, Text : String;
+    I, PinCount : Integer;
+    AutoGen : Boolean;
+Begin
+    Labels := ''; Powers := ''; Ports := ''; Entries := ''; Cross := ''; Pins := '';
+    For I := 0 To Net.DM_NetLabelCount - 1 Do
+    Begin
+        Item := Nil; Text := '';
+        Try Item := Net.DM_NetLabels(I); Except Item := Nil; End;
+        If Item = Nil Then Continue;
+        Try Text := Item.DM_NetLabelText; Except End;
+        If Labels <> '' Then Labels := Labels + ',';
+        Labels := Labels + NetNamingItemJson(Item, Text);
+    End;
+    For I := 0 To Net.DM_PowerObjectCount - 1 Do
+    Begin
+        Item := Nil; Text := '';
+        Try Item := Net.DM_PowerObjects(I); Except Item := Nil; End;
+        If Item = Nil Then Continue;
+        Try Text := Item.DM_PowerText; Except End;
+        If Powers <> '' Then Powers := Powers + ',';
+        Powers := Powers + NetNamingItemJson(Item, Text);
+    End;
+    For I := 0 To Net.DM_PortCount - 1 Do
+    Begin
+        Item := Nil; Text := '';
+        Try Item := Net.DM_Ports(I); Except Item := Nil; End;
+        If Item = Nil Then Continue;
+        Try Text := Item.DM_PortName; Except End;
+        If Ports <> '' Then Ports := Ports + ',';
+        Ports := Ports + NetNamingItemJson(Item, Text);
+    End;
+    For I := 0 To Net.DM_SheetEntryCount - 1 Do
+    Begin
+        Item := Nil; Text := '';
+        Try Item := Net.DM_SheetEntrys(I); Except Item := Nil; End;
+        If Item = Nil Then Continue;
+        Try Text := Item.DM_NetName; Except End;
+        If Entries <> '' Then Entries := Entries + ',';
+        Entries := Entries + NetNamingItemJson(Item, Text);
+    End;
+    For I := 0 To Net.DM_CrossSheetConnectorCount - 1 Do
+    Begin
+        Item := Nil; Text := '';
+        Try Item := Net.DM_CrossSheetConnectors(I); Except Item := Nil; End;
+        If Item = Nil Then Continue;
+        Try Text := Item.DM_CrossSheetText; Except End;
+        If Cross <> '' Then Cross := Cross + ',';
+        Cross := Cross + NetNamingItemJson(Item, Text);
+    End;
+    PinCount := 0;
+    Try PinCount := Net.DM_PinCount; Except End;
+    If WithPins Then
+        For I := 0 To PinCount - 1 Do
+        Begin
+            Item := Nil; Text := '';
+            Try Item := Net.DM_Pins(I); Except Item := Nil; End;
+            If Item = Nil Then Continue;
+            Try Text := Item.DM_FullPinName; Except End;
+            If Pins <> '' Then Pins := Pins + ',';
+            Pins := Pins + '"' + EscapeJsonString(Text) + '"';
+        End;
+    AutoGen := False;
+    Try AutoGen := Net.DM_IsAutoGenerated; Except End;
+    Text := '';
+    Try Text := Net.DM_FullNetName; Except End;
+    Result := JsonObj(JsonStr('net', Net.DM_NetName) + ','
+        + JsonStr('full_name', Text) + ','
+        + JsonBool('auto_generated', AutoGen) + ','
+        + JsonInt('pin_count', PinCount) + ','
+        + JsonRaw('net_labels', '[' + Labels + ']') + ','
+        + JsonRaw('power_objects', '[' + Powers + ']') + ','
+        + JsonRaw('ports', '[' + Ports + ']') + ','
+        + JsonRaw('sheet_entries', '[' + Entries + ']') + ','
+        + JsonRaw('off_sheet_connectors', '[' + Cross + ']'));
+    If WithPins Then
+        Result := Copy(Result, 1, Length(Result) - 1) + ',' + JsonRaw('pins', '[' + Pins + ']') + '}';
+End;
+
+{..............................................................................}
+{ Proj_GetNetItems - what gives each compiled net its name and where: net    }
+{ labels, power ports, ports, sheet entries and off-sheet connectors, and    }
+{ whether the name was made up by the compiler.                             }
+{ Params: project_path (optional), net (optional, one net, any case),        }
+{ named_only ('true' = skip nets nothing names), limit (default 500).        }
+{..............................................................................}
+Function Proj_GetNetItems(Params : String; RequestId : String) : String;
+Var
+    ProjectPath, NetName, Items, Name : String;
+    Workspace : IWorkspace;
+    Project : IProject;
+    FlatDoc : IDocument;
+    Net : INet;
+    I, Limit, Listed, Examined, Naming : Integer;
+    NamedOnly, Truncated : Boolean;
+Begin
+    ProjectPath := ExtractJsonValue(Params, 'project_path');
+    NetName := ExtractJsonValue(Params, 'net');
+    NamedOnly := LowerCase(ExtractJsonValue(Params, 'named_only')) = 'true';
+    Limit := StrToIntDef(ExtractJsonValue(Params, 'limit'), 500);
+    If Limit < 1 Then Limit := 500;
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace'); Exit; End;
+    If ProjectPath <> '' Then Project := FindProjectByPath(Workspace, ProjectPath)
+    Else Project := Workspace.DM_FocusedProject;
+    If Project = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_PROJECT', 'No project found'); Exit; End;
+    SmartCompile(Project);
+    FlatDoc := Nil;
+    Try FlatDoc := Project.DM_DocumentFlattened; Except End;
+    If FlatDoc = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_FLAT_NETLIST',
+            'Project has no flattened netlist (compile the project first).');
+        Exit;
+    End;
+    Items := '';
+    Listed := 0;
+    Examined := 0;
+    Truncated := False;
+    For I := 0 To FlatDoc.DM_NetCount - 1 Do
+    Begin
+        Net := Nil;
+        Try Net := FlatDoc.DM_Nets(I); Except Net := Nil; End;
+        If Net = Nil Then Continue;
+        Inc(Examined);
+        Name := '';
+        Try Name := Net.DM_NetName; Except End;
+        If (NetName <> '') And (UpperCase(Name) <> UpperCase(NetName)) Then Continue;
+        If NamedOnly Then
+        Begin
+            Naming := 0;
+            Try
+                Naming := Net.DM_NetLabelCount + Net.DM_PowerObjectCount + Net.DM_PortCount
+                    + Net.DM_SheetEntryCount + Net.DM_CrossSheetConnectorCount;
+            Except End;
+            If Naming = 0 Then Continue;
+        End;
+        If Listed >= Limit Then
+        Begin
+            Truncated := True;
+            Break;
+        End;
+        If Items <> '' Then Items := Items + ',';
+        Items := Items + NetContentsJson(Net, NetName <> '');
+        Inc(Listed);
+    End;
+    If (NetName <> '') And (Listed = 0) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_NET', 'No compiled net named ' + NetName);
+        Exit;
+    End;
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonInt('nets_examined', Examined) + ','
+        + JsonInt('nets_listed', Listed) + ','
+        + JsonBool('truncated', Truncated) + ','
+        + JsonRaw('nets', '[' + Items + ']')));
+End;
+
+{ The project's documents in project order, its search paths and its        }
+{ generated documents, as JSON members (no braces).                         }
+Function ProjectSetupJson(Project : IProject) : String;
+Var
+    Docs, Paths, Gens, Path : String;
+    Doc : IDocument;
+    SP : ISearchPath;
+    I, Idx, Total : Integer;
+    Order : TStringList;
+    Sub, AllowPort, AllowEntry : Boolean;
+Begin
+    Order := TStringList.Create;
+    Total := Project.DM_LogicalDocumentCount + Project.DM_PhysicalDocumentCount;
+    For I := 0 To Total - 1 Do Order.Add('?');
+    For I := 0 To Project.DM_LogicalDocumentCount + Project.DM_PhysicalDocumentCount - 1 Do
+    Begin
+        Doc := Nil;
+        If I < Project.DM_LogicalDocumentCount Then
+        Begin
+            Try Doc := Project.DM_LogicalDocuments(I); Except Doc := Nil; End;
+        End
+        Else
+        Begin
+            Try Doc := Project.DM_PhysicalDocuments(I - Project.DM_LogicalDocumentCount); Except Doc := Nil; End;
+        End;
+        If Doc = Nil Then Continue;
+        Path := Doc.DM_FullPath;
+        Idx := -1;
+        Try Idx := Project.DM_IndexOfSourceDocument(Path); Except Idx := -1; End;
+        If (Idx >= 0) And (Idx < Total) Then
+            Order.Strings[Idx] := Path;
+    End;
+    Docs := '';
+    For I := 0 To Order.Count - 1 Do
+    Begin
+        If Order.Strings[I] = '?' Then Continue;
+        If Docs <> '' Then Docs := Docs + ',';
+        Docs := Docs + JsonObj(JsonInt('index', I) + ',' + JsonStr('path', Order.Strings[I]));
+    End;
+    Order.Free;
+    Paths := '';
+    For I := 0 To Project.DM_SearchPathCount - 1 Do
+    Begin
+        SP := Nil;
+        Try SP := Project.DM_SearchPaths(I); Except SP := Nil; End;
+        If SP = Nil Then Continue;
+        Path := ''; Sub := False;
+        Try Path := SP.DM_AbsolutePath; Except End;
+        If Path = '' Then
+        Begin
+            Try Path := SP.DM_Path; Except End;
+        End;
+        Try Sub := SP.DM_IncludeSubFolders; Except End;
+        If Paths <> '' Then Paths := Paths + ',';
+        Paths := Paths + JsonObj(JsonStr('path', Path) + ',' + JsonBool('include_subfolders', Sub));
+    End;
+    Gens := '';
+    For I := 0 To Project.DM_GeneratedDocumentCount - 1 Do
+    Begin
+        Doc := Nil;
+        Try Doc := Project.DM_GeneratedDocuments(I); Except Doc := Nil; End;
+        If Doc = Nil Then Continue;
+        If Gens <> '' Then Gens := Gens + ',';
+        Gens := Gens + '"' + EscapeJsonString(Doc.DM_FullPath) + '"';
+    End;
+    AllowPort := False; AllowEntry := False;
+    Try AllowPort := Project.DM_GetAllowPortNetNames; Except End;
+    Try AllowEntry := Project.DM_GetAllowSheetEntryNetNames; Except End;
+    Result := JsonRaw('documents', '[' + Docs + ']') + ','
+        + JsonRaw('search_paths', '[' + Paths + ']') + ','
+        + JsonRaw('generated_documents', '[' + Gens + ']') + ','
+        + JsonBool('allow_port_net_names', AllowPort) + ','
+        + JsonBool('allow_sheet_entry_net_names', AllowEntry);
+End;
+
+{..............................................................................}
+{ Proj_ProjectSetup - read, and optionally change, a project's document      }
+{ order, library search paths and the "ports / sheet entries name nets"      }
+{ options. Every change is read back; save the project to keep it.           }
+{ Params: project_path, move_document + move_to_index, add_search_path +     }
+{ include_subfolders, allow_port_net_names, allow_sheet_entry_net_names      }
+{ ('true' / 'false'; empty = keep). No change params = read only.            }
+{..............................................................................}
+Function Proj_ProjectSetup(Params : String; RequestId : String) : String;
+Var
+    ProjectPath, MoveDoc, MoveTo, AddPath, SubStr, PortStr, EntryStr, NotApplied : String;
+    Workspace : IWorkspace;
+    Project : IProject;
+    SP : ISearchPath;
+    I, NewIdx, Was, NowIdx, PathsBefore : Integer;
+    Changed, Found : Boolean;
+Begin
+    ProjectPath := ExtractJsonValue(Params, 'project_path');
+    MoveDoc := ExtractJsonValue(Params, 'move_document');
+    MoveTo := ExtractJsonValue(Params, 'move_to_index');
+    AddPath := ExtractJsonValue(Params, 'add_search_path');
+    SubStr := LowerCase(ExtractJsonValue(Params, 'include_subfolders'));
+    PortStr := LowerCase(ExtractJsonValue(Params, 'allow_port_net_names'));
+    EntryStr := LowerCase(ExtractJsonValue(Params, 'allow_sheet_entry_net_names'));
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace'); Exit; End;
+    If ProjectPath <> '' Then Project := FindProjectByPath(Workspace, ProjectPath)
+    Else Project := Workspace.DM_FocusedProject;
+    If Project = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_PROJECT', 'No project found'); Exit; End;
+    Changed := False;
+    NotApplied := '';
+    Was := -1; NowIdx := -1;
+    If MoveDoc <> '' Then
+    Begin
+        If Not IsIntStr(MoveTo) Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'BAD_PARAM', 'move_to_index must be a number');
+            Exit;
+        End;
+        NewIdx := StrToInt(MoveTo);
+        Was := Project.DM_IndexOfSourceDocument(MoveDoc);
+        If Was < 0 Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'NO_DOCUMENT', 'Not in the project: ' + MoveDoc);
+            Exit;
+        End;
+        Project.DM_MoveSourceDocument(MoveDoc, NewIdx);
+        NowIdx := Project.DM_IndexOfSourceDocument(MoveDoc);
+        Changed := True;
+        If NowIdx <> NewIdx Then NotApplied := NotApplied + '"move_to_index",';
+    End;
+    If AddPath <> '' Then
+    Begin
+        PathsBefore := Project.DM_SearchPathCount;
+        Project.DM_AddSearchPath(AddPath, SubStr = 'true');
+        Changed := True;
+        Found := False;
+        For I := 0 To Project.DM_SearchPathCount - 1 Do
+        Begin
+            SP := Nil;
+            Try SP := Project.DM_SearchPaths(I); Except SP := Nil; End;
+            If SP = Nil Then Continue;
+            Try
+                If (UpperCase(SP.DM_Path) = UpperCase(AddPath))
+                   Or (UpperCase(SP.DM_AbsolutePath) = UpperCase(AddPath)) Then Found := True;
+            Except End;
+        End;
+        If Not Found Then NotApplied := NotApplied + '"add_search_path",';
+    End;
+    If PortStr <> '' Then
+    Begin
+        Project.DM_SetAllowPortNetNames(PortStr = 'true');
+        Changed := True;
+        If Project.DM_GetAllowPortNetNames <> (PortStr = 'true') Then
+            NotApplied := NotApplied + '"allow_port_net_names",';
+    End;
+    If EntryStr <> '' Then
+    Begin
+        Project.DM_SetAllowSheetEntryNetNames(EntryStr = 'true');
+        Changed := True;
+        If Project.DM_GetAllowSheetEntryNetNames <> (EntryStr = 'true') Then
+            NotApplied := NotApplied + '"allow_sheet_entry_net_names",';
+    End;
+    If NotApplied <> '' Then NotApplied := Copy(NotApplied, 1, Length(NotApplied) - 1);
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonStr('project', Project.DM_ProjectFullPath) + ','
+        + JsonBool('changed', Changed) + ','
+        + JsonInt('moved_from', Was) + ','
+        + JsonInt('moved_to', NowIdx) + ','
+        + JsonRaw('not_applied', '[' + NotApplied + ']') + ','
+        + ProjectSetupJson(Project)));
 End;
 
 {..............................................................................}
@@ -4774,6 +5583,208 @@ End;
 { recompiles, returns the new compile tick so callers can verify it moved.    }
 {..............................................................................}
 
+{..............................................................................}
+{ ERC REPORT LEVELS - read and set the project's Error Reporting options:     }
+{ for each violation type, No Report, Warning, Error or Fatal Error.           }
+{                                                                              }
+{ IProject.DM_ErrorLevels(TErrorKind) : TErrorLevel and DM_SetErrorLevels,    }
+{ TErrorLevel = (eErrorLevelNoReport, eErrorLevelWarning, eErrorLevelError,   }
+{ eErrorLevelFatal), 0 to 3 (workspace manager API reference). The types are  }
+{ named by IWorkspace.DM_ViolationTypeDescription(kind), so the list is read }
+{ from Altium rather than kept here. Asked for because a multichannel design }
+{ reports "Nets with multiple names" by construction, and there was no way   }
+{ to set the level without the Project Options dialog.                       }
+{..............................................................................}
+
+Function ErcLevelName(Level : Integer) : String;
+Begin
+    If Level = 0 Then Result := 'no_report'
+    Else If Level = 1 Then Result := 'warning'
+    Else If Level = 2 Then Result := 'error'
+    Else If Level = 3 Then Result := 'fatal'
+    Else Result := IntToStr(Level);
+End;
+
+{ -1 when the text names no level. }
+Function ErcLevelFromText(Text : String) : Integer;
+Var
+    T : String;
+Begin
+    T := LowerCase(Trim(Text));
+    T := StringReplace(T, ' ', '_', -1);
+    If (T = 'no_report') Or (T = 'noreport') Or (T = 'none') Or (T = '0') Then Result := 0
+    Else If (T = 'warning') Or (T = '1') Then Result := 1
+    Else If (T = 'error') Or (T = '2') Then Result := 2
+    Else If (T = 'fatal') Or (T = 'fatal_error') Or (T = '3') Then Result := 3
+    Else Result := -1;
+End;
+
+Function ErcProject(Params : String; Var Problem : String) : IProject;
+Var
+    Workspace : IWorkspace;
+    Path : String;
+Begin
+    Result := Nil;
+    Problem := '';
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then
+    Begin
+        Problem := 'No workspace';
+        Exit;
+    End;
+    Path := ExtractJsonValue(Params, 'project_path');
+    If Path <> '' Then
+    Begin
+        Result := FindProjectByPath(Workspace, Path);
+        If Result = Nil Then Problem := 'Project not open: ' + Path;
+    End
+    Else
+    Begin
+        Result := Workspace.DM_FocusedProject;
+        If Result = Nil Then Problem := 'No focused project; pass project_path';
+    End;
+End;
+
+{ The violation type with this exact description (case ignored), or a      }
+{ number given as text. -1 when neither.                                    }
+Function ErcKindFromText(Workspace : IWorkspace; Text : String) : Integer;
+Var
+    I : Integer;
+    Desc : String;
+Begin
+    Result := -1;
+    If (Trim(Text) <> '') And (StrToIntDef(Trim(Text), -1) >= 0) Then
+    Begin
+        Result := StrToIntDef(Trim(Text), -1);
+        Exit;
+    End;
+    For I := 0 To 400 Do
+    Begin
+        Desc := '';
+        Try Desc := Workspace.DM_ViolationTypeDescription(I); Except Desc := ''; End;
+        If (Desc <> '') And (LowerCase(Desc) = LowerCase(Trim(Text))) Then
+        Begin
+            Result := I;
+            Exit;
+        End;
+    End;
+End;
+
+{ Proj_GetErcLevels - every violation type with its current report level. }
+{ Params: project_path (default the focused project), match (substring of  }
+{ the description, optional).                                              }
+Function Proj_GetErcLevels(Params : String; RequestId : String) : String;
+Var
+    Project : IProject;
+    Workspace : IWorkspace;
+    Problem, Match, Desc, Items : String;
+    I, Level, Count : Integer;
+Begin
+    Project := ErcProject(Params, Problem);
+    If Project = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PROJECT', Problem);
+        Exit;
+    End;
+    Workspace := GetWorkspace;
+    Match := LowerCase(ExtractJsonValue(Params, 'match'));
+    Items := '';
+    Count := 0;
+    For I := 0 To 400 Do
+    Begin
+        Desc := '';
+        Try Desc := Workspace.DM_ViolationTypeDescription(I); Except Desc := ''; End;
+        If (Desc <> '') And ((Match = '') Or (Pos(Match, LowerCase(Desc)) > 0)) Then
+        Begin
+            Level := -1;
+            Try Level := Project.DM_ErrorLevels(I); Except Level := -1; End;
+            If Items <> '' Then Items := Items + ',';
+            Items := Items + '{"kind":' + IntToStr(I)
+                + ',"description":"' + EscapeJsonString(Desc) + '"'
+                + ',"level":"' + ErcLevelName(Level) + '"}';
+            Inc(Count);
+        End;
+    End;
+    Result := BuildSuccessResponse(RequestId,
+        '{"project":"' + EscapeJsonString(Project.DM_ProjectFullPath) + '"'
+        + ',"count":' + IntToStr(Count)
+        + ',"levels":[' + Items + ']}');
+End;
+
+{ Proj_SetErcLevels - set report levels. Params: project_path (default the }
+{ focused project), levels = 'kind=level~~kind=level', a kind being its    }
+{ number or its exact description, a level no_report, warning, error,     }
+{ fatal or 0 to 3. Every one is read back. The project is marked modified; }
+{ save it (proj_save) to keep the change.                                 }
+Function Proj_SetErcLevels(Params : String; RequestId : String) : String;
+Var
+    Project : IProject;
+    Workspace : IWorkspace;
+    Problem, LevelsStr, Remaining, Op, KindText, LevelText, Items, Desc : String;
+    Eq, Kind, Want, Got, Done, Failed : Integer;
+Begin
+    Project := ErcProject(Params, Problem);
+    If Project = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PROJECT', Problem);
+        Exit;
+    End;
+    Workspace := GetWorkspace;
+    LevelsStr := ExtractJsonValue(Params, 'levels');
+    If LevelsStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM',
+            'levels is required: kind=level~~kind=level');
+        Exit;
+    End;
+    Items := '';
+    Done := 0;
+    Failed := 0;
+    Remaining := LevelsStr;
+    While True Do
+    Begin
+        Op := NextBatchOp(Remaining);
+        If Op = '' Then Break;
+        Eq := Pos('=', Op);
+        KindText := Trim(Copy(Op, 1, Eq - 1));
+        LevelText := Trim(Copy(Op, Eq + 1, Length(Op)));
+        Kind := -1;
+        If Eq > 0 Then Kind := ErcKindFromText(Workspace, KindText);
+        Want := ErcLevelFromText(LevelText);
+        Got := -1;
+        Desc := '';
+        If Kind >= 0 Then
+        Begin
+            Try Desc := Workspace.DM_ViolationTypeDescription(Kind); Except Desc := ''; End;
+        End;
+        If (Kind >= 0) And (Desc <> '') And (Want >= 0) Then
+        Begin
+            Try Project.DM_SetErrorLevels(Kind, Want); Except End;
+            Try Got := Project.DM_ErrorLevels(Kind); Except Got := -1; End;
+        End;
+        If Items <> '' Then Items := Items + ',';
+        Items := Items + '{"kind_given":"' + EscapeJsonString(KindText) + '"'
+            + ',"kind":' + IntToStr(Kind)
+            + ',"description":"' + EscapeJsonString(Desc) + '"'
+            + ',"level":"' + ErcLevelName(Got) + '"';
+        If (Kind < 0) Or (Desc = '') Then
+            Items := Items + ',"problem":"no violation type by that number or exact description"'
+        Else If Want < 0 Then
+            Items := Items + ',"problem":"level must be no_report, warning, error, fatal or 0 to 3"'
+        Else If Got <> Want Then
+            Items := Items + ',"problem":"written, but it reads back ' + ErcLevelName(Got) + '"';
+        Items := Items + '}';
+        If (Kind >= 0) And (Desc <> '') And (Want >= 0) And (Got = Want) Then Inc(Done)
+        Else Inc(Failed);
+    End;
+    If Done > 0 Then MarkDocDirtyByPath(Project.DM_ProjectFullPath);
+    Result := BuildSuccessResponse(RequestId,
+        '{"project":"' + EscapeJsonString(Project.DM_ProjectFullPath) + '"'
+        + ',"set":' + IntToStr(Done)
+        + ',"failed":' + IntToStr(Failed)
+        + ',"results":[' + Items + ']}');
+End;
+
 Function Proj_ForceRecompile(Params : String; RequestId : String) : String;
 Var
     Workspace : IWorkspace;
@@ -5080,6 +6091,7 @@ Begin
         'annotate':          Result := Proj_Annotate(Params, RequestId);
         'generate_output':   Result := Proj_GenerateOutput(Params, RequestId);
         'export_step':       Result := Proj_ExportSTEP(Params, RequestId);
+        'export_step_api':   Result := Proj_ExportSTEPApi(Params, RequestId);
         'export_dxf':        Result := Proj_ExportDXF(Params, RequestId);
         'export_image':      Result := Proj_ExportImage(Params, RequestId);
         'get_outjob_containers': Result := Proj_GetOutJobContainers(Params, RequestId);
@@ -5089,6 +6101,11 @@ Begin
         'get_active_variant': Result := Proj_GetActiveVariant(Params, RequestId);
         'set_active_variant': Result := Proj_SetActiveVariant(Params, RequestId);
         'create_variant':    Result := Proj_CreateVariant(Params, RequestId);
+        'set_component_variation': Result := Proj_SetComponentVariation(Params, RequestId);
+        'net_color':         Result := Proj_NetColor(Params, RequestId);
+        'get_net_items':     Result := Proj_GetNetItems(Params, RequestId);
+        'project_setup':     Result := Proj_ProjectSetup(Params, RequestId);
+        'get_declared_design_objects': Result := Proj_GetDeclaredDesignObjects(Params, RequestId);
         'delete_variant':    Result := Proj_DeleteVariant(Params, RequestId);
         'get_open_projects': Result := Proj_GetOpenProjects(RequestId);
         'save_all':          Result := Proj_SaveAll(RequestId);
@@ -5097,6 +6114,8 @@ Begin
         'get_connectivity':  Result := Proj_GetConnectivity(Params, RequestId);
         'get_connectivity_batch': Result := Proj_GetConnectivityBatch(Params, RequestId);
         'force_recompile':       Result := Proj_ForceRecompile(Params, RequestId);
+        'get_erc_levels':        Result := Proj_GetErcLevels(Params, RequestId);
+        'set_erc_levels':        Result := Proj_SetErcLevels(Params, RequestId);
         'get_compile_freshness': Result := Proj_GetCompileFreshness(Params, RequestId);
         'import_document':   Result := Proj_ImportDocument(Params, RequestId);
         'get_project_path':  Result := Proj_GetProjectPath(RequestId);

@@ -38,7 +38,8 @@ Three axes:
     ``readonly``   queries / reads; no mutation.
     ``silent``     mutates, no dialog -- the loop stays responsive.
     ``modal``      pops a non-suppressible Altium dialog that BLOCKS the
-                   polling loop until a human clicks (see the bridge audit).
+                   polling loop until it is answered; answer it yourself
+                   with app_press_dialog_button (see the bridge audit).
     ``partial``    succeeds but leaves the job incomplete; a follow-up tool
                    is required to finish.
 """
@@ -113,9 +114,10 @@ _SIMULATOR_TOOLS = frozenset({
     "lib_add_footprint_pads", "lib_add_footprint_track",
     "lib_add_footprint_tracks", "lib_add_pins",
     "lib_add_symbol_polygon", "lib_add_symbol_rectangle", "lib_add_symbol_text",
-    "lib_batch_rename", "lib_batch_set_params", "lib_create_footprint",
+    "lib_batch_rename", "lib_batch_set_params", "lib_create_3d_model",
+    "lib_create_footprint",
     "lib_create_ic_symbol", "lib_create_standard_footprint",
-    "lib_create_symbol", "lib_diff_libraries",
+    "lib_create_symbol", "lib_delete_footprint_primitives", "lib_diff_libraries",
     "lib_get_component_details", "lib_get_components",
     "lib_link_3d_model", "lib_link_footprint",
     "obj_create", "obj_delete", "obj_deselect_all", "obj_get_font_id",
@@ -192,17 +194,20 @@ INTERACTION_OVERRIDES = {
     # answer, and anyone filtering for operations that keep the session
     # responsive must not be handed this one.
     "app_update_from_libraries": MODAL,
+    # Pulls new code into the installation and can restart the Altium
+    # loop. It is filed under meta, which counts as offline, and offline
+    # would otherwise read as readonly.
+    "server_update": SILENT,
     # MEASURED MODAL during the live sweep of 2026-08-24. Each of these was
     # published as silent, so anything filtering for "keeps the session
     # responsive" was handed a tool that blocks the bridge until a human
     # answers a dialog. The dialog seen is named beside each one.
-    # Design Rule Checker (TDesignRuleCheckForm). Altium exposes no
-    # non-interactive DRC trigger, so the tool's only functional path is
-    # the modal one: it refuses unless called with allow_modal=True.
-    # Measured behind the dialog: a 30-minute dead loop to an 1800 s
-    # client timeout. pcb_get_clearance_violations reads stored
-    # violations instead and stays readonly.
-    "pcb_run_drc": MODAL,
+    # pcb_run_drc was here: PCB:DesignRuleCheck opens the Design Rule
+    # Checker (TDesignRuleCheckForm), measured behind it a 30-minute dead
+    # loop. It now runs IPCB_Board.RunBatchDesignRuleCheck by default,
+    # MEASURED 2026-10-23 on AD 26.11: 0.45 s, no dialog, report written,
+    # so it is silent; allow_modal=True still takes the dialog route.
+    "pcb_run_drc": SILENT,
     "proj_export_pdf": MODAL,         # Preview PCB / print preview
     "proj_run_output": MODAL,         # Altium's exporter dialogs
     # These three raise "Unsaved Changes" whenever the target is dirty, and
@@ -300,6 +305,9 @@ _CATEGORY_BY_NAME = {
     "list_nets": "core",
     "run_drc": "core",
     "run_erc": "core",
+    # Updates eda-agent itself, on every backend: about the tool surface,
+    # like tool_catalog, rather than about any one EDA tool.
+    "server_update": "meta",
 }
 
 

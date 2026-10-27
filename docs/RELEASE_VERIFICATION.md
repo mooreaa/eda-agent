@@ -1,4 +1,4 @@
-# Release verification: 2026.10.24.3
+# Release verification: 2026.10.26.10
 
 Unless a section records live verification explicitly, the Pascal below has
 been checked by FPC and the linter but **not executed by Altium's DelphiScript engine**. The two are not the
@@ -25,7 +25,7 @@ works elsewhere cannot be an undeclared identifier:
 | 3, filled body | `AreaColor`, `IsSolid` | yes, `Generic.pas` | low |
 | 5, 3D placement | `MoveByXY` | yes, `PCB_ReplicateLayout` | low |
 | 11, copy and rename | `LibReference` | yes, `Lib_CreateSymbol` | low |
-| 12, delete variant | `DM_RemoveProjectVariant` | no, nowhere | highest, and it destroys work |
+| 12, delete variant | `DM_RemoveProjectVariant` | no, nowhere | medium, ran live; it still destroys the entries |
 | 13, sheet symbol filename | `Text` on a sheet symbol's sub-object | yes, on other objects | medium |
 | 14, polygon pour options | `RemoveDead`, `RemoveNarrowNecks`, `RemoveIslandsByArea` | new here, and in two places at once | high, and it can stop the loop |
 | 15, 3D body on a board | `StandoffHeight` on a free body | only by step 5, itself unverified | highest, shared with step 5 |
@@ -58,7 +58,7 @@ works elsewhere cannot be an undeclared identifier:
 | 28, simulation run | `AddStringParameter` with `ObjectKind=Simulator` | yes, `Proj_UpdatePCB` | medium, a process run rather than a write |
 | 28, results saved | `SetFileName`, `DoFileSave` on the results document | yes, `App_CreateDocument` | low |
 | 28, settings reload | `SupportsReload`, `DoFileLoad`, `UpdateModifiedDate` | no, nowhere | highest, and it can stop the loop |
-| 29, slotted hole | `HoleType`, `HoleWidth` on a library pad | no, nowhere | high, and it can stop the loop |
+| 29, slotted hole | `HoleType`, `HoleWidth` on a library pad | only by `PCBGeneric.pas`, on a board pad, itself new | high, and it can stop the loop |
 | 29, pad mask expansion | `SolderMaskExpansion`, `SolderMaskExpansionValid` on a pad cache | yes, `PCB_SetViaSoldermaskRelief`, on a via's cache | medium, a library pad is new |
 | 29, non-plated hole | `Plated` on a library pad | read in `PCB.pas`, written nowhere else | medium |
 | 29, pad paste expansion | `PasteMaskExpansion`, `PasteMaskExpansionValid`, `SetState_Cache` | yes, `PCB_MakePasteGrid` | low, but now on a library pad |
@@ -77,8 +77,8 @@ works elsewhere cannot be an undeclared identifier:
 | 33, DbLib part | `CurrentPartID` on a placed DbLib part | yes, `SetSchProperty` | low |
 | 33, pad designator | `Name` on a pad, through the generic setter | yes, `PCB_RenumberPads` | low |
 | 33, poll timer | `Enabled` on the poll timer, read back after arming | yes, `StartMCPPump` writes it | low |
-| 34, 3D body opacity | `BodyOpacity3D` on a component body | no, nowhere | high, a wrong member name stops the loop; used by several scripts in reference/ |
-| 34, slot rotation | `HoleRotation` written on a library pad | no, nowhere | medium, read on the board side already |
+| 34, 3D body opacity | `BodyOpacity3D` on a component body | yes, `AddExtrudedBody`, on a new extruded body | high, a wrong member name stops the loop; used by several scripts in reference/ |
+| 34, slot rotation | `HoleRotation` written on a library pad | only by `PCBGeneric.pas`, on a board pad, itself new | medium, read on the board side already |
 | 34, pad copper centre | `BoundingRectangle` on a library pad | yes, `BuildViolationJson`, on any primitive | low |
 | 34, pad setter | `SetState_Cache` on a library pad | yes, `Lib_AddFootprintPads` | low |
 | 34, arc mirror | `StartAngle`, `EndAngle` written on a placed arc | yes, `Lib_AddSymbolArc` | low |
@@ -91,7 +91,7 @@ works elsewhere cannot be an undeclared identifier:
 | 36, settle after an add | `SetState_CurrentComponent` on the footprint already current | yes, `Lib_Link3DModel` | low, ran after all eight add kinds and survived save and restart |
 | 36, modify bracket | `BeginModify`, `EndModify` round an obj_modify write and a placed body's move | yes, `PCB_SetTrackWidth` | low |
 | 36, mask sides | `UseSeparateExpansions`, `SolderMaskBottomExpansion` on the pad cache | yes, `Lib_SetPadProperties` | medium, missing from the API reference; read and written live on pads and vias |
-| 36, via hole edge | `SolderMaskExpansionFromHoleEdge` written on a via | no, nowhere | high, the expansion assigned straight onto a via faults (measured again); this member and the cache route did not |
+| 36, via hole edge | `SolderMaskExpansionFromHoleEdge` written on a via | only by `PCBGeneric.pas`, through the pad cast, itself new | high, the expansion assigned straight onto a via faults (measured again); this member and the cache route did not |
 | 36, mechanical enabled | `MechanicalLayerEnabled` read on a library layer | yes, `Lib_GetMechLayers` | low |
 | 36, rule gap | `Gap` read on a typed clearance rule | yes, `PCB_SetRuleProperties` | low |
 | 36, designator mirror | `Location` written on a placed designator | yes, `SetSchProperty` | low |
@@ -104,13 +104,45 @@ works elsewhere cannot be an undeclared identifier:
 | 37, grid switches | `SnapGridOn`, `VisibleGridOn` on a schematic | no, nowhere | low, switched off and on live and read back |
 | 37, pin labels | `ShowName`, `ShowDesignator` on a pin | yes, `Library.pas` | low |
 | 37, pin text | `Name_FontMode`, `Name_CustomFontID`, `Name_CustomColor`, `Designator_FontMode`, `Designator_CustomFontID`, `Designator_CustomColor` on a pin | no, nowhere | medium, read live; the writes are not run live |
+| 39, polygon pour settings | `Grid`, `TrackSize`, `MinTrack`, `ArcApproximation`, `NeckWidthThreshold`, `IslandAreaThreshold`, `PolyHatchStyle`, `PourOver`, `UseOctagons` on a polygon | only by `PCBGeneric.pas`, itself new | low, read and written back live on AD 26.11 |
+| 39, keepout restrictions | `IsKeepoutForCopper`, `IsKeepoutForTrack`, `IsKeepoutForVia`, `IsKeepoutForSMDPad`, `IsKeepoutForTHPad` | only by `PCBGeneric.pas`, itself new | low, written and read back live on keep-out tracks |
+| 39, primitive net | `AddPCBObject` on a net | yes, `BindPrimitiveToNet` | low |
+| 39, region arcs | `ShapeSegmentCount`, `UpdateContourFromShape` on a board region | yes, `Lib_AddFootprintRegions` | low |
+| 39, entry font | `TextFontID` on a sheet entry | no, nowhere | low, read and written back live on AD 26.11 |
+| 39, display mode | `DisplayMode` on a placed part | yes, `Library.pas`, on a library part | low, refused out of range and written live |
+| 39, pin map | `MapAsString` on a footprint model | no, nowhere | low, written, read back and restored live |
+| 39, footprint choice | `IsCurrent` on a placed part's footprint model | yes, `Library.pas` | medium, not yet run on a part with several models |
 | 38, stack-up apply | `CopperThickness`, `DielectricHeight`, `DielectricConstant`, `DielectricType` on a board layer | yes, `PCB_ModifyLayer` | low, the same writes pcb_modify_layer makes, each read back |
-| 39, entry label font | `TextFontID` on a sheet entry and a harness entry | no, nowhere | highest, a new identifier on two interfaces, checked only against Altium.Sch.Interfaces.dll; step 39 item 2 stops at the first fault |
-| 40, display mode | `DisplayMode` written on a placed component | yes, `Library.pas`, on library symbols | low, written, saved and reloaded live; the pins move and the wires do not |
-| 40, mode count | `DisplayModeCount` read on a component | no, nowhere | low, read live on two parts |
-| 40, footprint pin map | `MapAsString` on a placed part's footprint implementation | no, nowhere | low, read and written live; Altium merges by pin and does not check pads, and the read-back catches the first |
-| 41, footprint chosen at placement | `IsCurrent` written False and True on a just-placed part's footprint implementations | yes, `Lib_NormalizeImplementations` both ways on library symbols, `AddPlacedFootprintModel` True on placed parts | low, run live: both choices held with the order used, and the saved file had one current model each; the read-back stays, and a choice that does not hold takes the part off the sheet |
-| 42, footprint chosen on a placed part | `IsCurrent` written False and True on a part already on a sheet, through the Footprint key and relink, and written back when the choice fails | yes, step 41 on a just-placed part | low, run live on a scratch sheet: chosen, not renamed, through the Footprint key and relink; the restore after a failed choice is checked only by the mirror |
+| 40, body standoff | `StandoffHeight` written on a library 3D body already in place, not a STEP one | yes, `Lib_Link3DModel` and `AddExtrudedBody`, on a body just created | low, run live on an extruded body |
+| 40, model Z offset | `SetState` (RotX, RotY, RotZ, Dz) on a STEP body's model | no, nowhere | low, signature measured live from the saved record; the rotations passed are the saved file's |
+| 40, model reassigned | `Model` assigned back to a STEP body after SetState | yes, `Lib_Link3DModel`, on a body just created | low, it is what makes the Z offset save, measured live |
+| 40, body height | `OverallHeight` written on a library 3D body | yes, `SetPCBProperty`, on a board body | low |
+| 40, body opacity | `BodyOpacity3D` written on a library 3D body | yes, `SetPCBProperty`, on a board body | low |
+| 40, body layer | `Layer` written on a library 3D body | yes, `Lib_MoveBodiesToLayer` | low |
+| 41, symbol parts | `SetState_CurrentSchComponentAddPart`, `SetState_CurrentSchComponentRemovePart` on the library | no, nowhere | medium, each step read back; ran live both ways |
+| 41, display modes | `SetState_CurrentSchComponentAddDisplayMode`, `SetState_CurrentSchComponentRemoveDisplayMode` on the library | no, nowhere | medium, each step read back; ran live both ways |
+| 41, part to remove | `CurrentPartID`, `DisplayMode` written on a library symbol | yes, `Lib_CreateSymbol` | low |
+| 41, model to STEP | `ExportToStep` on a 3D model | no, nowhere | medium, writes a file only; ran live |
+| 41, board STEP | `Board3DModelExporter`, `ExportBoard3DModel` | no, nowhere | medium, writes a file only; ran live, and the dialog route stays behind it |
+| 41, impedance profiles | `GetImpedanceProfileCount`, `GetImpedanceProfileByIndex`, `GetTraceImpedanceByIndex`, `CalculatedImpedance` | no, nowhere | high for the per-profile reads, not yet run on a board with a profile; each read is guarded |
+| 42, variant API | `DM_AddProjectVariant`, `DM_SetName`, `DM_SetDescription` on a project and its new variant | no, nowhere | medium, ran live; the process route stays behind it |
+| 42, variant entries | `DM_AddComponentVariation`, `DM_RemoveComponentVariation`, `DM_SetVariationKind`, `DM_SetAlternatePart` | no, nowhere | medium, ran live and read back |
+| 42, net colours | `DM_SetNetColorByName` on a project | no, nowhere | low, ran live, set and cleared |
+| 42, rule answers | `FindDominantRuleForObject`, `FindDominantRuleForObjectPair`, `Scope1Includes`, `CheckUnaryScope` | no, nowhere | low, reads only; ran live |
+| 42, net clean-up | `CleanNet` on the board | no, nowhere | medium, edits routing; ran live |
+| 42, drill pairs | `IsBackdrill`, `PlotDrillGuide`, `PlotDrillDrawing` on a drill pair | no, nowhere | low, ran live and restored |
+| 42, part 3D | `SaveModelToFile` on a placed part | no, nowhere | low, writes a file only; ran live |
+| 42, fast lookup | `GetPcbComponentByRefDes` on the board | no, nowhere | medium, every designator lookup runs it first; ran live, with the walk behind it |
+| 42, generic board properties | `HolePositiveTolerance`, `MitreCorners`, `BorderWidth`, `EnablePinSwapping`, `BarCodeShowText`, `Multiline` | no, nowhere | low, ran live and read back |
+| 42, pin swapping | `SetState_SwapIdPart`, `SetState_SwapIdPin` on a symbol pin | no, nowhere | low, ran live and read back |
+| 42, symbol aliases | `Alias_Add`, `Alias_Remove` on a symbol | no, nowhere | low, ran live and read back |
+| 42, sheet options | `SetState_ReferenceZonesOn`, `SetState_CustomXZones`, `SetState_ShowTemplateGraphics` on a sheet | no, nowhere | low, ran live and restored |
+| 43, xSignals | `CreateFromPins`, `AssignPinPairClass` on the board's pin pair manager | no, nowhere | medium, ran live; the new xSignal is read back by name |
+| 43, text anchors | `ChangeNameAutoposition`, `ChangeCommentAutoposition` on a placed part | yes, `PCB_AutoplaceSilkscreen` | low, ran live; hidden text keeps its place |
+| 43, auto position | `AutoPosition_NameComment` on a placed part | no, nowhere | low, ran live |
+| 43, part text properties | `LockStrings`, `FootprintDescription`, `DefaultPCB3DModel` on a placed part | only by `PCBGeneric.pas`, itself new | low, the first two written and read back live |
+| 43, project setup | `DM_MoveSourceDocument`, `DM_AddSearchPath`, `DM_SetAllowPortNetNames`, `DM_SetAllowSheetEntryNetNames` on a project | no, nowhere | medium, ran live, read back, saved and reopened |
+| 43, library check | `Sch_LibraryRuleChecker_Create`, `ShowReport`, `Duplicate_Pins`, `Missing_Footprint` on a library's rule checker | no, nowhere | low, writes a report file only; ran live |
 
 Steps 5 and 2 are the ones that justify a live session. The bottom rows
 write properties this codebase already exercises, so they are checking
@@ -286,7 +318,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.10.24.3`, `version_match` =
+Expect `altium_script_version` = `2026.10.26.10`, `version_match` =
 `true`, and `mcp_server_version` = `0.7.1`.
 
 Those are two different versions and they fail differently.
@@ -783,19 +815,16 @@ reporting 2 for a symbol created single-part whose every pin carries
 `OwnerPartId 1`, while `lib_get_component_details` reported 1 for an
 identically created symbol.
 
-## 12. Deleting a project variant (highest risk in this release)
+## 12. Deleting a project variant
 
-`DM_RemoveProjectVariant` is the only write in Altium's entire variant
-API, and nothing in this codebase has ever called it, so it carries the
-undeclared-identifier risk in full: if the name is wrong it faults where
-`Try/Except` cannot catch it and takes the polling loop with it.
+`DM_RemoveProjectVariant` ran live on AD 26.11.1.5 (step 42): a scratch
+variant with one entry was deleted, `verified` true, `entries_removed`
+1, and the loop kept answering.
 
-It is also the only step here that destroys work which cannot be
-rebuilt from this bridge. A variant's entries record which components
-are not fitted and which carry an alternate part, and there is no
-documented way to add a variation entry back. Deleting a populated
-variant means re-making every one of those decisions in the Variant
-Management dialog.
+Deleting a populated variant still destroys the decisions in it. They
+can now be rebuilt from this bridge, one part at a time, with
+`proj_set_component_variation` (step 42), but nothing records them
+first, so list them with `proj_list_variants` before deleting.
 
 **Work on a copy of a project, or take an `app_checkpoint` first.**
 
@@ -1940,6 +1969,12 @@ Scratch documents only.
    report's modified time is now. If the second run reads false, check
    that Create Report File is ticked in the checker before suspecting
    the code.
+   Then `pcb_run_drc` with no arguments: no dialog appears
+   (`app_list_open_dialogs` reads none), `mode` "batch", `drc_confirmed`
+   true, `report_path` in the bridge workspace, the focus unchanged, and
+   the report's Rule Violations total equals `violation_count`. Recorded
+   2026-10-23 on AD 26.11.1.5, scratch board: 0.45 s, 3 violations
+   (Un-Routed Net), report 14 KB HTML.
 2. **Managed (Workspace) placement.** Needs a signed-in Workspace and
    an open sheet that already carries one managed part, since the
    Workspace name is read off open sheets. `lib_get_vault_name`:
@@ -2023,6 +2058,18 @@ documents only.
     ProcName form `Dispatcher.pas>StartMCPServer` is the one Altium's own
     menu files use; if the script does not start, record what Altium
     showed.
+11. **Several sessions.** Two sessions, A on a scratch board and B on a
+    scratch library. B focuses its library; A then reads its board's
+    nets without focusing anything: A's reply carries
+    `session_document.restored` naming the board, and the nets are the
+    board's. Click a third document by hand, then call a tool from A: the
+    board comes back. `app_get_active_document` from B answers what is
+    really in front; with `session=true` it brings the library back.
+    Close A's board and call A again: `session_document.missing`, and the
+    command runs on what is in front. Then, with both sessions sending
+    reads, run `eda-agent relaunch --restart`: neither session reports a
+    timeout, the trace shows `POLL_QUEUED ... restart`, and a session
+    whose server started before the deploy gets `server_outdated` once.
 
 Offline only, already covered by tests: the wheel carries the EasyEDA
 extension source and `eda-agent easyeda-extension path|build` finds or
@@ -2305,353 +2352,248 @@ the board Altium resolves as current.
 Not yet run live: the documents open on the test machine at the time
 included unsaved boards that were not ours to risk.
 
-## 39. FontId on a sheet entry, entry label fonts, and paths inside process strings
+## 39. Property layer, decimal mils, fonts and footprint models
 
-Two field fixes:
+Run live on AD 26.11 with the script build before step 40 on a scratch copy of a two-layer
+round board project, pinging after every step. All passed.
 
-* `obj_query object_type=eSheetEntry properties=Name,FontId` raised
-  "Undeclared identifier: FontId" as a modal, and the polling loop
-  stopped. `SchObjectHasFontId` now gates `FontId` in the reader, the
-  writer and the preflight. Sheet and harness entries, pins, components,
-  sheet symbols, harness connectors, wires, buses, bus entries, junctions,
-  no-ERC markers, lines, rectangles and images answer `unreadable` /
-  `unknown`;
-* an entry's label font had no property at all. It is the new
-  `TextFontId` on eSheetEntry and eHarnessEntry, read and written only
-  through typed `ISch_SheetEntry` / `ISch_HarnessEntry` locals.
-  `GetState_TextFontID` / `SetState_TextFontID` are in
-  `Altium.Sch.Interfaces.dll` and the SchDoc record field is `TextFontID`,
-  but the identifier is new here, so **it is the risk in this section**.
+1. **Polygon pour settings (#125).** `obj_query` on `polygon` reads Grid
+   20, TrackSize 8, MinTrack 3, ArcApproximation 0.5, NeckWidthThreshold
+   5, IslandAreaThreshold 2500, PolyHatchStyle 5, PourOver 1, PourIndex,
+   Poured. Grid 5.5, IslandAreaThreshold 1234.5 and a new Name write and
+   read back; PourOver 3 is refused and unchanged.
+2. **Keepout restrictions (#131).** The five restrictions read true on the
+   board-outline keep-out tracks and arcs; IsKeepoutForTrack false, then
+   true, on six tracks; asked of 279 vias the read is blank and the loop
+   stays up.
+3. **Region arcs and net (#119, #126).** `pcb_place_region` with one
+   vertex swept 180 degrees reports `arc_edges` 1 and the shape read back;
+   Net=GND joins the GND net, Net=NO_SUCH_NET is refused, Net= leaves it
+   on no net.
+4. **Decimal corners (#124, #130).** `pcb_place_polygon_rect` at
+   20000.25, 20000.5 to 20960.6299, 20500.75 reads those bounds back
+   exactly.
+5. **Footprint selection (#120).** `lib_select_footprint_primitives` on a
+   PcbLib footprint selects one pad by name, two pads by type, and clears
+   with a set that matches nothing.
+6. **FontId gate.** FontId reads on net labels, power objects, parameters
+   and designators; on wires, pins and components it is reported
+   unreadable instead of raising. On a sheet entry FontId is refused and
+   `TextFontId` reads 1, writes 12 and reads 12.
+7. **Display mode and pin map.** A one-mode part refuses DisplayMode 1 and
+   takes 0. FootprintPinMap reads "(1:1),(2:2)", takes "1:2;2:1" and reads
+   "(1:2),(2:1)", takes the original back, and refuses "1-2".
+8. **Footprint by name.** A placement naming a model the symbol lacks is
+   placed on the library's model and listed in `footprint_issues` with the
+   model it carries; naming that model in lower case counts in
+   `footprints_chosen`; the Footprint key on the placed part is applied
+   through the choice, not a rename.
+9. **One path spelling.** WorkspaceManager:OpenObject with a forward-slash
+   FileName for an open SchLib leaves one copy open (22 documents before
+   and after).
 
-On the Python side, `CanonicalPathValue` (step 37) never sees a path inside
-a process parameter string. `sch_template._focus` opened a library it could
-not focus with `ObjectKind=Document|FileName=R:/...` built from the caller's
-path, and Altium filed the copy as "/Hardware/.../Passive.SchLib": a second
-document that read as modified, raised "Save changes?" on every reload and
-broke AutoSave. The bridge now writes `FileName=` in a `parameters` /
-`params` string, and lists under a `*paths` key, with backslashes (the
-Pascal rule exactly). `_focus` also reuses a document Altium already has
-open under another drive letter mapped to the same share.
+Not run live: a part with several PCB models (the scratch library's parts
+carry one each), so the clear-then-set order and the restore after a
+failed choice are covered only by the source checks.
 
-On a scratch sheet with one sheet symbol and one entry:
+---
 
-1. **Names that would fault.** `obj_query object_type=eSheetEntry
-   properties=Name,FontId`: FontId empty and `unreadable`, and `app_ping`
-   still answers. `obj_modify` on the entry with `FontId=3`: `unknown`,
-   nothing changed.
-2. **Entry font.** `obj_query ... properties=Name,TextFontId` reads a
-   number. `obj_modify ... set=TextFontId=<obj_get_font_id Arial 7>` reads
-   back, and the entry label redraws in Arial 7 after a refresh. If either
-   call faults, the identifier is wrong: stop and record it.
-3. **Harness entry.** The same read and write on an eHarnessEntry, if a
-   harness connector can be placed on the scratch sheet.
-4. **Objects that have FontId still work.** `FontId` read and written on a
-   port and a net label reads back.
-5. **Process string.** With a scratch SchLib closed, `obj_run_process
-   process_name=WorkspaceManager:OpenObject
-   parameters=ObjectKind=Document|FileName=<drive>:/<dir>/x.SchLib`:
-   `app_list_documents` lists it once, with backslashes, and closing it
-   raises no save prompt.
-6. **Template focus.** `sch_preview_template` with a forward-slash
-   `library_path` on a closed library: opened once, no save prompt.
-7. **Alias.** With the library open as `R:\...`, the same call through
-   another drive letter mapped to the same share: focused, not opened a
-   second time. This depends on `application.get_open_documents` listing
-   free documents, which it reads from `DM_Projects`.
+## 40. Editing a 3D body already in a footprint
 
-Not yet run live: the bridge was down on the test machine when the fixes
-were made. They are checked only by source-level tests
-(`tests/test_sch_fontid.py`, `tests/test_docpaths.py`) and the linter;
-FPC was not run.
+New: `lib_set_3d_body`. `lib_link_3d_model` writes a body's standoff only
+while it creates the body, so correcting one meant deleting the body and
+linking the model again. This reads, and optionally changes, the standoff,
+OverallHeight, BodyOpacity3D and Layer of the bodies in one footprint, in
+place, inside a modify bracket.
 
-## 40. Display mode and footprint pin map on a placed part
+Field report behind it, AD 26.10.1.5: a STEP model whose origin is at its
+mid-height was linked with `offset_z=25.59` (0.65 mm). `applied` reported
+`standoff_height` true, yet the model was seen sitting with its middle on
+the board.
 
-Two properties on eSchComponent, for the house style that draws every
-MOSFET on the generic NMOS symbol in its compact alternate (display mode 1)
-and maps G/D/S to numbered pads through the footprint model's pin map.
-Until now both had to be set by hand in Properties → Mode and the PCB Model
-dialog.
+**What the live run found, and changed.** A STEP body ignores its own
+`StandoffHeight`. Written by script and saved, it read back 25.5906 mil
+from Altium and from the file, and the Properties panel still showed
+Standoff Height 0 mm. The panel's value is the model's `MODEL.3D.DZ` in
+the saved record, which nothing had written. That explains the field
+report. `IPCB_Model.SetState` was then measured on a scratch copy: writing
+`(10, 20, 30, 12 mil)` and saving put `ROTX=10`, `ROTY=20`, `ROTZ=30`,
+`DZ=12mil` in the record, so the signature is `SetState(RotX, RotY, RotZ :
+Double; Dz : TCoord)`, and only `Body.Model := Model` after it makes it
+save. `IPCB_Model.Rotation` reads the 2D rotation (0 with 10/20/30 set),
+and no getter for the 3D ones is known. So on a STEP body (`ModelType` 1)
+`standoff_height` now writes the model's Z offset with the rotations the
+SAVED file holds, read by `pcblib_models.saved_body_models`. In the test
+library most STEP models sit at a non-zero rotation (90/0/90, -90/180/0),
+so writing zeros there would have tipped them over. A body whose saved
+record is missing, or names another model file, or a footprint whose
+saved body count differs, is listed in `skipped` and left alone. A
+library path that is not a file is refused before Altium sees it: asked
+to open one, Altium opens a new, empty library under that name.
 
-* `DisplayMode`, read and written, and `DisplayModeCount`, read only.
-  `obj_modify object_type=eSchComponent filter=Designator.Text=Q1
-  set=DisplayMode=1`. The value must be 0 to `DisplayModeCount - 1`;
-  anything else is reported `failed` and nothing is written. The pins move
-  to the new mode's pin ends and the wires stay put, so a switched part
-  needs re-wiring, and the compiled netlist is stale until the sheet is
-  saved and reloaded.
-* `FootprintPinMap`, read and written: the pin map of the part's current
-  PCB footprint model. Altium's own form, `(G:1),(D:2),(S:3)`, or the PCB
-  Model dialog's, `G->1;D->2;S->3`, which the bridge rewrites into the
-  first. The old map is read first, and after the write the map is read
-  back; unless it holds exactly the entries asked for (order and spaces
-  aside), the old map is put back and the write is reported `failed`.
-  Altium merges the string into the old map pin by pin, so write the
-  whole map: a partial one, and `FootprintPinMap=`, read back with the old
-  entries in them and are refused. A part with no footprint model reads
-  `''` and refuses the write.
+1. **Read.** `lib_set_3d_body footprint_name=<fp> library_path=<lib>` on a
+   footprint with one body: `changed` 0, `before` equals `after`, and
+   `saved_bodies` gives the model's Z offset and rotations as saved.
+2. **STEP standoff.** `standoff_height=0.5 units=mm` on a STEP body with a
+   rotation: `model_z_offset_written` [1]. Save, read again:
+   `saved_bodies` reads the new Z offset and the same rotations, and the
+   panel's Standoff Height shows 0.5 mm.
+3. **Other standoff.** On an extruded body: the body's own
+   `standoff_height_mils` changes and nothing is written to a model.
+4. **Opacity and layer.** `opacity=0.5 layer=Mechanical15`: the panel
+   shows 50% and the body is on Mechanical15. `opacity=50` and
+   `layer=TopLayer` are refused.
+5. **Unsaved footprint.** On a STEP body of a footprint copied and not
+   saved: `skipped` names it, `changed` 0; with `opacity` as well,
+   `changed` 1 and the standoff still skipped.
+6. **Missing library.** A `library_path` that is not a file: refused, and
+   no document opens.
+7. **Index.** `body_index=2` on a one-body footprint is refused with
+   `NO_BODY`.
 
-Both are gated to eSchComponent in the reader, the writer and the
-preflight, so every other type answers `unreadable` / `unknown` instead of
-raising the undeclared-identifier modal that stops the loop. Typed
-`ISch_Component` and `ISch_Implementation` locals are the only access.
+Run live on AD 26.11.1.5 with that change's script on a scratch copy of a working
+PcbLib, pinging after every step. All passed: 1 on SOT-23-3, 8-SOIC and
+C0603; 2 on 6-TSOP (Z offset 41.3386 to 19.685 mil, rotations 90/0/90
+kept), and on SOT-23-3 the panel and the 3D view were checked by eye;
+3 on QFN16_8TR8210 (0 to 7.874 mil); 4 on SOT-23-3, kept after save,
+close and reopen; 5 on a copy of 6-TSOP; 7 on SOT-23-3. Item 6 was run
+before the guard and opened an empty library; the guard is unit-tested.
+Not run: a footprint with several STEP bodies, which the test library
+lacks, so that the saved records list in the editor's order is assumed
+and only checked by model file name and body count.
 
-The names were confirmed, not guessed:
+---
 
-* the script engine's property table in `ScriptingSystem.dll` (the same
-  table is in `EditScript.dll`) declares `DisplayMode` (`GetState_DisplayMode`
-  / `SetState_DisplayMode`, type `TDisplayMode`), `DisplayModeCount`
-  (`GetState_DisplayModeCount` / `SetState_DisplayModeCount_Check`) and
-  `MapAsString` (`GetState_MapAsString` / `SetState_MapAsString`) on the
-  interfaces above;
-* `SCH.ISch_Component` and `SCH.ISch_Implementation` in
-  `Altium.SDK.Interfaces.dll`, reflected, carry the same accessors;
-* the Schematic API reference
-  (altium-dxp-developer/schematic-api-design-objects-interfaces-reference)
-  declares the three properties with those accessors, and gives the map
-  format as `(SchematicPinNumber:ModelPinNumber)`, e.g. `(1:1),(2:2)`;
-* public scripts read `Component.DisplayModeCount` (two SchLib utilities)
-  and `SchModel.MapAsString` (the Altium-Designer-addons OpenLib scripts),
-  and `Library.pas` already writes `Component.DisplayMode`.
+## 41. Dialog-free STEP export, symbol parts, model export and impedance profiles
 
-**The risk was the map's format.** No format string for it is among
-`AdvSch.dll`'s strings, so only the reference vouched for it until item 5
-read `(G:1),(D:2),(S:3)` off a hand-mapped part on AD 25.8. `Map_Import_FromUser`
-and `DefinerByInterfaceDesignator` are left alone: the first opens the
-dialog, and the second is an indexed property the bridge has never used.
+New: `lib_set_symbol_parts`, `lib_export_3d_model`,
+`pcb_get_impedance_profiles`, and a dialog-free first route in
+`proj_export_step`. Each call was measured live before use. Measured and NOT used: `IPCB_Model.GetState`
+runs, but its four var parameters come back unchanged, so a script cannot
+read a STEP model's 3D rotations (step 40's file read stays).
 
-On a scratch sheet with one NMOS, Q1 (display modes 0 and 1), on a
-three-pad footprint, and for item 5 only, a part whose map was set by hand:
+1. **Symbol parts.** `lib_create_symbol name=<sym> part_count=3`, pins on
+   parts 1 and 3, then `lib_set_symbol_parts part_count=5
+   display_mode_count=2`: 5 parts, 2 modes, `pins_removed` 0,
+   `complete` true. `part_count=2`: 2 parts, `pins_removed` 2 (part 3's).
+   `display_mode_count=1`: 1 mode. An unknown symbol is refused.
+2. **Model to STEP.** `lib_export_3d_model` on a footprint with one
+   embedded STEP model: `written` true, a valid STEP file. It is
+   Altium's Open CASCADE re-encoding (117 KB from a 268 KB original),
+   not the vendor's bytes. `body_index=2` is refused with `NO_BODY`.
+3. **Board STEP.** `proj_export_step` on a scratch board: `route`
+   `exporter`, `dialogs_answered` empty, a valid 7 MB STEP file in 17 s.
+   Again with `overwrite=True`: the same, and no dialog is left open.
+4. **Impedance profiles.** `pcb_get_impedance_profiles` on three boards:
+   `profile_count` 0, `read_errors` 0 on each.
 
-1. **Names that would fault.** `obj_query object_type=eNetLabel
-   properties=Text,DisplayMode,DisplayModeCount,FootprintPinMap`: the three
-   empty and `unreadable`, and `app_ping` still answers. `obj_modify` on
-   the label with `DisplayMode=1`: `unknown`, nothing changed.
-2. **Mode read.** `obj_query object_type=eSchComponent
-   filter=Designator.Text=Q1 properties=DisplayMode,DisplayModeCount` reads
-   `0` and `2`. If it faults, the identifier is wrong: stop and record it.
-3. **Mode write.** `set=DisplayMode=1`: no `failed`, `DisplayMode` reads
-   `1`, the part redraws as the compact symbol with nothing left of the old
-   body, and `ePin` `ConnectionX,ConnectionY` give the mode-1 pin ends.
-   Save, close and reload: still mode 1. Set it back to 0.
-4. **Range.** `DisplayMode=2`, `DisplayMode=-1` and `DisplayMode=x`: each
-   `failed`, `DisplayMode` unchanged.
-5. **Map read, before any write.** `obj_query ...
-   properties=Designator.Text,FootprintPinMap` on a placed part whose map
-   was set by hand in the PCB Model dialog to G→1, D→2, S→3. Record the
-   exact string. If
-   it is not `(G:1),(D:2),(S:3)` up to order and spaces, the reference's
-   format is wrong for AD 25: stop, and change `PinMapAsAltium` to the
-   string read here before item 6.
-6. **Map write.** On Q1, `set=FootprintPinMap=G->1;D->2;S->3`: no
-   `failed`, the read-back is item 5's form, and the PCB Model dialog shows
-   the map. Save, close and reload: still mapped. Compile, and Update PCB's
-   ECO preview pairs G, D and S with pads 1, 2 and 3.
-7. **Refusals.** `FootprintPinMap=G->;D->2` and the same on a part with no
-   footprint model: `failed`, map unchanged. `FootprintPinMap=(G:9)` on the
-   three-pad footprint: record whether Altium takes it (the read-back
-   decides what is reported). `FootprintPinMap=`: record whether the map
-   clears.
+Run live on AD 26.11.1.5 with that change's script on scratch libraries and a
+scratch board (closed without saving), pinging after every step. All
+passed. Not run: item 4 on a board that HAS a profile (none of the three
+did), so the per-profile and per-layer reads are unmeasured and each is
+guarded; a symbol's added display mode drawn and placed; a linked rather
+than embedded model.
 
-A relink or Update from Libraries replaces a placed part's models with the
-library's, map included, so a map set here on a placed part lasts until
-then; the durable fix for a wrong map is in the library symbol.
+---
 
-Run live on AD 25.8.1.18 on 2026-10-24, with the script as built at commit
-64a71c3 (before step 41), on a free scratch sheet holding one NMOS from
-`Mosfet.SchLib` (two display modes, twenty PCB models). `app_ping` answered after every item and no dialog opened:
+## 42. Variant entries, rule answers, drill pairs and more
 
-1. Passed. On a net label the three reads came back empty under
-   `unreadable`, and `DisplayMode=1` under `unknown`.
-2. Passed: `0` and `2`.
-3. Passed. `DisplayMode` read `1`; the pins reported the mode-1 ends
-   (G 1900,2000, D 2000,2100, S 2000,1900 against 1800,2000, 2000,2200,
-   2000,1800 in mode 0); a screenshot showed the compact symbol on exactly
-   those ends with nothing left of the old body. The saved record carried
-   `DisplayMode=1`, and it read `1` after a close and reopen. Set back to 0,
-   the record drops the field, which is how Altium stores mode 0.
-4. Passed: `2`, `-1` and `x` each `failed`, mode unchanged.
-5. Passed: `(G:1),(D:2),(S:3)`, the reference's format.
-6. Passed, against the current model (LFPAK33-8, mapped D→3, G→2, S→1 by
-   the library). `G->1;D->2;S->3` wrote and read back `(D:2),(G:1),(S:3)`;
-   the saved file's map records for that model, and only that model, said
-   G→1, D→2, S→3; and the map read the same after a close and reopen.
-   Altium's own form, `(G:1),(D:2),(S:3)`, wrote too. The PCB Model dialog
-   and Update PCB's ECO preview were not looked at: a free sheet has no
-   project to compile, so the saved records stand in for them.
-7. `G->;D->2`: `failed`, map unchanged. `(G:9)` alone: `failed`, map
-   unchanged, because Altium merges by pin and the read-back still held D
-   and S. `(G:9),(D:2),(S:3)`: written, so Altium does not check pad numbers
-   against the footprint; a wrong pad shows up at compile or ECO. `''`:
-   `failed`, map unchanged, so there is no way to clear a map through
-   `MapAsString`. The part with no footprint model was not tried: none was
-   to hand.
+New: `proj_set_component_variation`, `proj_net_color`,
+`proj_get_declared_design_objects`, `pcb_find_dominant_rule`,
+`pcb_check_rule_scope`, `pcb_clean_net`, `pcb_get_drill_pairs`,
+`pcb_set_drill_pair`, `pcb_export_component_3d`, `lib_set_symbol_aliases`,
+`sch_set_sheet_options`, and new `obj_query` / `obj_modify` properties
+(hole tolerances, barcode and multiline text, dimension text and arrows,
+pour options, part and pin swapping). `proj_create_variant` now creates
+through `DM_AddProjectVariant` first, and every designator lookup on a
+board asks `GetPcbComponentByRefDes` first. Measured and NOT built:
+`Board.DoUndo` runs but takes back none of a script's edits.
 
-Item 5 was also the only call on a production sheet, and it only read. The
-order a map reads back in differs (sorted after a write, record order after
-a reload), which is why the comparison ignores order.
+1. **Variants.** On a scratch project with none: `proj_create_variant`
+   `route` api, 1 variant. `proj_set_component_variation` on one part:
+   not_fitted, then alternate with a part name (read back, and listed by
+   `proj_list_variants`), then remove (`after` none), then fitted. Then
+   `proj_delete_variant`: `verified` true, 0 variants.
+2. **Net colour.** Read `none`, set `#FF8000` (read back), set `none`.
+3. **Rules.** `pcb_find_dominant_rule rule_name=Width` on three nets
+   with their own width rules and one without: each named its own rule
+   and the last the catch-all. A pad pair for Clearance: the board rule.
+   `pcb_check_rule_scope` on `InNet('VBUS')`: true for VBUS, false for
+   GND. An unknown pad is refused.
+4. **Net clean-up.** `pcb_clean_net` on a routed net: 21 to 23 pieces
+   (tracks split where others meet them).
+5. **Drill pairs.** Read the one pair; set backdrill and drill guide,
+   read back, restore.
+6. **Properties.** Read every new property on pads, vias, pours, parts
+   and texts (no dimension on the board). Pad tolerances `unset`, then
+   2 and -1.5 (read back 2 and 1.5: Altium keeps the size), then
+   `unset`. A part's pin swapping and a pour's mitre corners and border
+   written, read back and restored; `MitreCorners=maybe` refused. A
+   barcode text's show-text and multiline flags take; its sizes are
+   recalculated by Altium.
+7. **Part 3D.** `pcb_export_component_3d` on a capacitor: a STEP file;
+   an unknown part refused.
+8. **Library.** On a scratch symbol: pin swap ids written and read back
+   (`SwapIdPart` is the part's, shared by every pin); aliases added and
+   one removed.
+9. **Sheet.** `sch_set_sheet_options` read; reference zones, the custom
+   zones and margin and template graphics written, read back and
+   restored. On a standard sheet size `zones_x` and `margin_width` do
+   not take, and `not_applied` names them.
+10. **Declared objects.** `proj_get_declared_design_objects` on a
+    three-sheet project: `sheets_examined` 3, all lists empty.
 
-## 41. A placement's footprint is the one it names
+Run live on AD 26.11.1.5 with that change's script on a scratch project
+and library, pinging after every step. All passed as described. Not
+run: a dimension, a project that declares classes or pairs, and a
+barcode text made in the GUI to read its kind numbers from.
 
-Step 40's run placed an NMOS with `footprint: "PowerPAK SC-70 (S)"` and got
-LFPAK33-8, the model the library marks current. `Gen_PlaceSchComponentsFromLibrary`
-read the field and dropped it (a comment said `CurrentFootprintModelName` is
-read-only, which is true, and nothing else was tried), and the reply said
-nothing. FootprintPinMap maps the CURRENT model, so the map then went to
-LFPAK33-8.
+---
 
-Now `footprint` must name one of the symbol's own PCBLIB models, matched by
-`ModelName` ignoring case and outer spaces, first match if two share a name:
+## 43. xSignals, shared packages, text positions, net naming, library check and project setup
 
-* found: the part is placed, then every other PCBLIB model gets
-  `IsCurrent := False`, that one `IsCurrent := True`, and every flag is
-  read back. Only when it alone is current, and `CurrentFootprintImpl`
-  reads its name, is it counted in `footprints_chosen`. Otherwise the part
-  is taken back off the sheet (`RemoveSchObject`, as `SwapSchSymbol` does)
-  and reported `designator:FOOTPRINT_NOT_APPLIED` in `failed_refdes`.
-  Simulation and other model types keep their own current model.
-* not found, or the symbol has no footprint model: the part is not placed,
-  `designator:FOOTPRINT_NOT_ON_SYMBOL`, and `footprint_hint` lists the
-  models it does carry. A footprint from another library is
-  `sch_relink_components`' job (`footprint` with `footprint_library`).
+New: `pcb_create_xsignals`, `pcb_get_xsignals`, `pcb_find_same_package`,
+`pcb_auto_position_text`, `proj_get_net_items`, `proj_project_setup`,
+`lib_check_schlib`, and the part properties `LockStrings`,
+`NameAutoPosition`, `CommentAutoPosition`, `FootprintDescription`,
+`DefaultPCB3DModel` and `PackageSpecificHash` (read only) on
+`obj_query` / `obj_modify`.
 
-Without `footprint` nothing changes. `sch_draw_template` sends a template
-part's `footprint` the same way; a plan's Footprint is still stamped
-afterwards through `sch_set_components_parameters`.
+1. **xSignals.** On a board with none: `pcb_create_xsignals` from an
+   MCU pin to an LED data pin through a series resistor, with a class
+   name: one xSignal, its `path` the two end pads and both resistor
+   pads, its length the routed length (821 mil, 9 tracks, 5 vias), and
+   `class_assigned` true. `pcb_get_xsignals` lists it.
+2. **Same package.** On a 143-part board: five groups (the 0402
+   capacitors, the 0805 capacitors, the LEDs, the resistors, two
+   SOT-23-5 parts), none without a hash. With `designator=R1`: the
+   other three resistors.
+3. **Text positions.** On a shown designator, anchors top_left,
+   bottom_center and bottom_right each move it, and the reply's
+   positions change. On a hidden designator the anchor is recorded and
+   the text stays where it is (`name_shown` false). With no anchor, a
+   part already at an anchor stays there. An unknown part is listed in
+   `not_found`; an unknown anchor name is refused.
+4. **Part properties.** `obj_modify` `LockStrings=true`,
+   `CommentAutoPosition=3`, `FootprintDescription` text: all read back.
+5. **Net naming.** `proj_get_net_items named_only=true` on a
+   three-sheet project: the 16 named nets of 91, each label with its
+   sheet and position in mils (a label on two sheets lists both). One
+   net (GND): its power ports, carrying the net name, and its pins.
+6. **Library check.** `lib_check_schlib` on a scratch library: Altium
+   writes `<library>.ERR` beside it, read back as "No Footprint" and
+   "No Description" on its one symbol. With only `duplicate_pins`
+   checked: no problems.
+7. **Project setup.** Read: documents in project order, no search
+   paths. Moved a sheet from 5 to 2, added a search path with
+   subfolders and set ports to name nets: all read back. Saved, closed
+   and reopened: all three were kept. Moved it back and restored the
+   option; a document not in the project is refused.
 
-`IsCurrent` (`GetState_IsCurrent` / `SetState_IsCurrent`) is in
-`ScriptingSystem.dll`'s property table next to `MapAsString`, and on
-`SCH.ISch_Implementation` in `Altium.SDK.Interfaces.dll`; `Library.pas`
-writes it both ways and `AddPlacedFootprintModel` writes True on placed
-parts. `RemoveSchObject` is on `ISch_BasicContainer` in the same assembly
-and already used on a sheet. **The risk is behaviour, not the name:**
-whether Altium's setter clears the siblings itself, or promotes another
-model when the current one is cleared, is not measured. Clearing first
-ends right in the first two cases, and the read-back refuses the third.
-
-On a free scratch sheet, with `Mosfet.SchLib`'s NMOS (twenty PCB models,
-LFPAK33-8 current in the library):
-
-1. **Chosen.** `sch_place_components` with `{lib_reference: "NMOS",
-   library_path: <Mosfet.SchLib>, designator: "Q1", footprint: "PowerPAK
-   SC-70 (S)"}`, `allow_manual_layout: true`: `placed` 1,
-   `footprints_chosen` 1, no `failed_refdes`. Save: Q1's RECORD=45 entries
-   carry `IsCurrent=T` on PowerPAK SC-70 (S) and on no other. The
-   Properties panel shows that footprint.
-2. **Case.** Q2 with `footprint: "powerpak sc-70 (s)"`: chosen as in item 1.
-3. **Refused.** Q3 with `footprint: "SOT-89"`: `placed` 0,
-   `failed_refdes` `Q3:FOOTPRINT_NOT_ON_SYMBOL`, `footprint_hint` names
-   the twenty models, the component count on the sheet is unchanged, and
-   `app_ping` answers.
-4. **Unchanged without it.** Q4 with no `footprint`: LFPAK33-8 current,
-   `footprints_chosen` 0.
-5. **The setter.** If item 1 reports `FOOTPRINT_NOT_APPLIED`, Altium's
-   setter does neither of the two things the order allows for: stop and
-   record which flags read back (place without `footprint` and read the
-   saved records after each write by hand).
-6. **Then the map.** Close and reopen: Q1 still on PowerPAK SC-70 (S).
-   `obj_modify ... filter=Designator.Text=Q1 set=FootprintPinMap=G->1;D->2;S->3`,
-   save: the map records that changed are PowerPAK SC-70 (S)'s, and
-   LFPAK33-8's still read the library's D→3, G→2, S→1.
-
-Also checked by `tests/test_sch_place_footprint.py`, which runs a
-line-for-line Python mirror of the three helpers against implementations
-whose setter is plain, clears its siblings, ignores the write, or promotes
-another model, and by the linter. FPC was not run.
-
-Run live on AD 25.8.1.18 with 2026.10.24.3 on 2026-10-24, on a free scratch
-sheet outside every project. The records were read from the saved file
-after each item. `app_ping` answered throughout, no dialog opened, and the
-344 open documents listed the same, none modified, before and after:
-
-1. Passed: `placed` 4 of 5, `footprints_chosen` 2, and Q1's saved records
-   carry `IsCurrent=T` on PowerPAK SC-70 (S) alone among its twenty
-   models. `FootprintPinMap` read that model's library map,
-   `(D:2),(G:1),(S:3)`. The Properties panel was not looked at.
-2. Passed: Q2, asked for in lower case, came out the same as Q1.
-3. Passed: `Q3:FOOTPRINT_NOT_ON_SYMBOL`, `footprint_hint` named the
-   twenty models, and four components were on the sheet, not five.
-4. Passed: Q4, placed without `footprint`, kept LFPAK33-8 and read its map
-   `(D:3),(G:2),(S:1)`.
-5. Not needed: no `FOOTPRINT_NOT_APPLIED`. Altium's setter takes the
-   clear-then-set order; which of the two kinds it is was not separated.
-6. Passed after a close and reopen. The library already maps PowerPAK
-   SC-70 (S) as G→1, D→2, S→3, so `G->3;D->1;S->2` was written instead of
-   the map above. Of the 61 model entries on the sheet, exactly one changed
-   in the saved file: Q1's PowerPAK SC-70 (S) map. LFPAK33-8's still read
-   D→3, G→2, S→1.
-
-The running MCP server was the Python from before these commits, so its
-tool text is the old one and the footprint was not passed through
-`payload_safe`; no footprint name with a `;` was tried.
-
-## 42. A footprint by name on a part already placed
-
-The same fault had a second form. `sch_set_components_parameters`'
-`Footprint` (both handlers) and `sch_relink_components`' `footprint` go
-through `SetPlacedFootprintName`, which renamed the current model whatever
-the part carried. A Footprint of PowerPAK SC-70 (S) on the NMOS turned
-LFPAK33-8's model, its library link and its pin map (D→3, G→2, S→1)
-included, into a second "PowerPAK SC-70 (S)" beside the real one, and
-FootprintPinMap then edited the impostor.
-
-Now a model of that name on the part, found as in step 41, is chosen:
-`SelectPlacedFootprint` makes it the only current one, with its own link and
-map. If that does not read back, the flags read before the choice are put
-back (cleared ones first, then the current ones), and the key is reported
-not applied; nothing is renamed. Only a part with no model of that name has
-its current model renamed, as before, which is what a plan's Footprint stamp
-on a one-model part relies on. The single-part handler's `applied` is now the
-helper's verdict, since a chosen model reads back in its own case.
-`sch_relink_components` with `footprint_library` repoints the model just
-chosen; on a part with no footprint model it still adds one first.
-
-No new identifier: the writes are step 41's `IsCurrent`, now on parts that
-are already on a sheet.
-
-On a free scratch sheet with Q1, an NMOS placed WITHOUT `footprint`
-(LFPAK33-8 current):
-
-1. **Chosen, not renamed.** `sch_set_components_parameters` with
-   `{designator: "Q1", Footprint: "PowerPAK SC-70 (S)"}`:
-   `footprints_applied` 1. Save: twenty PCBLIB records still, one named
-   LFPAK33-8 and one PowerPAK SC-70 (S), `IsCurrent=T` on the second alone,
-   and LFPAK33-8's map records unchanged.
-2. **Case.** The single-part handler with `Footprint: "lfpak33-8"`:
-   `applied` true, `after` `LFPAK33-8`, current again.
-3. **Relink.** `sch_relink_components(designators=["Q1"], footprint="SOT-23")`
-   (no library change): `not_applied` empty, `after.footprint` `SOT-23`,
-   still twenty distinct names.
-4. **Rename kept.** A part with one footprint model, Footprint set to a name
-   it lacks: renamed as before, `footprints_applied` 1.
-5. **Then the map.** `FootprintPinMap=G->1;D->2;S->3` on Q1 after item 1:
-   only PowerPAK SC-70 (S)'s map records change.
-
-Also checked by `tests/test_sch_place_footprint.py` (the routine's order,
-five more removed safeguards, and the mirror run against the same four
-setters, a failed choice putting the flags back) and the linter.
-
-Run live in the same session as step 41, on its Q4 and on D1, a BAT54H from
-`Diode.SchLib` whose only model is SOD-123:
-
-1. Passed: `footprints_applied` 1. Twenty distinct model names in the
-   saved file, `IsCurrent=T` on PowerPAK SC-70 (S) alone, and LFPAK33-8
-   still named so with its own map. The same call renamed LFPAK33-8
-   before this step.
-2. Passed through `sch_set_components_parameters`: `Footprint: "lfpak33-8"`
-   applied, LFPAK33-8 current again, and still spelled `LFPAK33-8`. The
-   single-part handler (`set_sch_component_parameters`) has no Python
-   caller, so no tool reaches it; its `applied` change was not run.
-3. Passed: `not_applied` empty, `footprint` LFPAK33-8 before and SOT-23
-   after, `footprint_models_added` 0.
-4. Passed: D1's SOD-123 model and its link entity were renamed SOD-323.
-5. Passed, on the model item 3 chose rather than item 1's. With SOT-23
-   current, `G->2;D->1;S->3` changed SOT-23's map records and nothing else.
-   Across items 2 to 5, the saved file differed from item 1's in exactly
-   three entries: D1's rename, SOT-23 becoming current with the new map,
-   and PowerPAK SC-70 (S) no longer current.
-
-A choice that does not read back, and so the restore, did not occur; only
-the mirror covers it.
+Run live on AD 26.11.1.5 with that change's script on a scratch project,
+board and library. All passed as described. Not run: an xSignal class
+read back by name (the class listing shows net classes only), and a
+project with ports or sheet entries.
 
 ---
 
@@ -2801,3 +2743,357 @@ Repeatable live acceptance on disposable documents:
    close the disposable documents at the end.
 
 Live results for this candidate are recorded below once performed.
+
+## Appendix R: Rosen fork, live runs on AD 25.8.1 (2026-10-23 to 2026-10-25)
+
+These runs were made on the hw-rosen-eshade fork (branch `fix/fontid-guard-and-entry-font`, scripts of 2026-10-23 to 2026-10-24) before mainline carried the same features (53344ad, 95ef16f). The code they describe was replaced by mainline's in the merge of 2026-10-26; they are kept as the only record of these properties run on AD 25.8.1. Function names in them (SelectPlacedFootprint, WritePlacedPinMap, docpaths) are the fork's, not mainline's.
+
+### R39. FontId on a sheet entry, entry label fonts, and paths inside process strings
+
+Two field fixes:
+
+* `obj_query object_type=eSheetEntry properties=Name,FontId` raised
+  "Undeclared identifier: FontId" as a modal, and the polling loop
+  stopped. `SchObjectHasFontId` now gates `FontId` in the reader, the
+  writer and the preflight. Sheet and harness entries, pins, components,
+  sheet symbols, harness connectors, wires, buses, bus entries, junctions,
+  no-ERC markers, lines, rectangles and images answer `unreadable` /
+  `unknown`;
+* an entry's label font had no property at all. It is the new
+  `TextFontId` on eSheetEntry and eHarnessEntry, read and written only
+  through typed `ISch_SheetEntry` / `ISch_HarnessEntry` locals.
+  `GetState_TextFontID` / `SetState_TextFontID` are in
+  `Altium.Sch.Interfaces.dll` and the SchDoc record field is `TextFontID`,
+  but the identifier is new here, so **it is the risk in this section**.
+
+On the Python side, `CanonicalPathValue` (step 37) never sees a path inside
+a process parameter string. `sch_template._focus` opened a library it could
+not focus with `ObjectKind=Document|FileName=R:/...` built from the caller's
+path, and Altium filed the copy as "/Hardware/.../Passive.SchLib": a second
+document that read as modified, raised "Save changes?" on every reload and
+broke AutoSave. The bridge now writes `FileName=` in a `parameters` /
+`params` string, and lists under a `*paths` key, with backslashes (the
+Pascal rule exactly). `_focus` also reuses a document Altium already has
+open under another drive letter mapped to the same share.
+
+On a scratch sheet with one sheet symbol and one entry:
+
+1. **Names that would fault.** `obj_query object_type=eSheetEntry
+   properties=Name,FontId`: FontId empty and `unreadable`, and `app_ping`
+   still answers. `obj_modify` on the entry with `FontId=3`: `unknown`,
+   nothing changed.
+2. **Entry font.** `obj_query ... properties=Name,TextFontId` reads a
+   number. `obj_modify ... set=TextFontId=<obj_get_font_id Arial 7>` reads
+   back, and the entry label redraws in Arial 7 after a refresh. If either
+   call faults, the identifier is wrong: stop and record it.
+3. **Harness entry.** The same read and write on an eHarnessEntry, if a
+   harness connector can be placed on the scratch sheet.
+4. **Objects that have FontId still work.** `FontId` read and written on a
+   port and a net label reads back.
+5. **Process string.** With a scratch SchLib closed, `obj_run_process
+   process_name=WorkspaceManager:OpenObject
+   parameters=ObjectKind=Document|FileName=<drive>:/<dir>/x.SchLib`:
+   `app_list_documents` lists it once, with backslashes, and closing it
+   raises no save prompt.
+6. **Template focus.** `sch_preview_template` with a forward-slash
+   `library_path` on a closed library: opened once, no save prompt.
+7. **Alias.** With the library open as `R:\...`, the same call through
+   another drive letter mapped to the same share: focused, not opened a
+   second time. This depends on `application.get_open_documents` listing
+   free documents, which it reads from `DM_Projects`.
+
+Not yet run live: the bridge was down on the test machine when the fixes
+were made. They are checked only by source-level tests
+(`tests/test_sch_fontid.py`, `tests/test_docpaths.py`) and the linter;
+FPC was not run.
+
+### R40. Display mode and footprint pin map on a placed part
+
+Two properties on eSchComponent, for the house style that draws every
+MOSFET on the generic NMOS symbol in its compact alternate (display mode 1)
+and maps G/D/S to numbered pads through the footprint model's pin map.
+Until now both had to be set by hand in Properties → Mode and the PCB Model
+dialog.
+
+* `DisplayMode`, read and written, and `DisplayModeCount`, read only.
+  `obj_modify object_type=eSchComponent filter=Designator.Text=Q1
+  set=DisplayMode=1`. The value must be 0 to `DisplayModeCount - 1`;
+  anything else is reported `failed` and nothing is written. The pins move
+  to the new mode's pin ends and the wires stay put, so a switched part
+  needs re-wiring, and the compiled netlist is stale until the sheet is
+  saved and reloaded.
+* `FootprintPinMap`, read and written: the pin map of the part's current
+  PCB footprint model. Altium's own form, `(G:1),(D:2),(S:3)`, or the PCB
+  Model dialog's, `G->1;D->2;S->3`, which the bridge rewrites into the
+  first. The old map is read first, and after the write the map is read
+  back; unless it holds exactly the entries asked for (order and spaces
+  aside), the old map is put back and the write is reported `failed`.
+  Altium merges the string into the old map pin by pin, so write the
+  whole map: a partial one, and `FootprintPinMap=`, read back with the old
+  entries in them and are refused. A part with no footprint model reads
+  `''` and refuses the write.
+
+Both are gated to eSchComponent in the reader, the writer and the
+preflight, so every other type answers `unreadable` / `unknown` instead of
+raising the undeclared-identifier modal that stops the loop. Typed
+`ISch_Component` and `ISch_Implementation` locals are the only access.
+
+The names were confirmed, not guessed:
+
+* the script engine's property table in `ScriptingSystem.dll` (the same
+  table is in `EditScript.dll`) declares `DisplayMode` (`GetState_DisplayMode`
+  / `SetState_DisplayMode`, type `TDisplayMode`), `DisplayModeCount`
+  (`GetState_DisplayModeCount` / `SetState_DisplayModeCount_Check`) and
+  `MapAsString` (`GetState_MapAsString` / `SetState_MapAsString`) on the
+  interfaces above;
+* `SCH.ISch_Component` and `SCH.ISch_Implementation` in
+  `Altium.SDK.Interfaces.dll`, reflected, carry the same accessors;
+* the Schematic API reference
+  (altium-dxp-developer/schematic-api-design-objects-interfaces-reference)
+  declares the three properties with those accessors, and gives the map
+  format as `(SchematicPinNumber:ModelPinNumber)`, e.g. `(1:1),(2:2)`;
+* public scripts read `Component.DisplayModeCount` (two SchLib utilities)
+  and `SchModel.MapAsString` (the Altium-Designer-addons OpenLib scripts),
+  and `Library.pas` already writes `Component.DisplayMode`.
+
+**The risk was the map's format.** No format string for it is among
+`AdvSch.dll`'s strings, so only the reference vouched for it until item 5
+read `(G:1),(D:2),(S:3)` off a hand-mapped part on AD 25.8. `Map_Import_FromUser`
+and `DefinerByInterfaceDesignator` are left alone: the first opens the
+dialog, and the second is an indexed property the bridge has never used.
+
+On a scratch sheet with one NMOS, Q1 (display modes 0 and 1), on a
+three-pad footprint, and for item 5 only, a part whose map was set by hand:
+
+1. **Names that would fault.** `obj_query object_type=eNetLabel
+   properties=Text,DisplayMode,DisplayModeCount,FootprintPinMap`: the three
+   empty and `unreadable`, and `app_ping` still answers. `obj_modify` on
+   the label with `DisplayMode=1`: `unknown`, nothing changed.
+2. **Mode read.** `obj_query object_type=eSchComponent
+   filter=Designator.Text=Q1 properties=DisplayMode,DisplayModeCount` reads
+   `0` and `2`. If it faults, the identifier is wrong: stop and record it.
+3. **Mode write.** `set=DisplayMode=1`: no `failed`, `DisplayMode` reads
+   `1`, the part redraws as the compact symbol with nothing left of the old
+   body, and `ePin` `ConnectionX,ConnectionY` give the mode-1 pin ends.
+   Save, close and reload: still mode 1. Set it back to 0.
+4. **Range.** `DisplayMode=2`, `DisplayMode=-1` and `DisplayMode=x`: each
+   `failed`, `DisplayMode` unchanged.
+5. **Map read, before any write.** `obj_query ...
+   properties=Designator.Text,FootprintPinMap` on a placed part whose map
+   was set by hand in the PCB Model dialog to G→1, D→2, S→3. Record the
+   exact string. If
+   it is not `(G:1),(D:2),(S:3)` up to order and spaces, the reference's
+   format is wrong for AD 25: stop, and change `PinMapAsAltium` to the
+   string read here before item 6.
+6. **Map write.** On Q1, `set=FootprintPinMap=G->1;D->2;S->3`: no
+   `failed`, the read-back is item 5's form, and the PCB Model dialog shows
+   the map. Save, close and reload: still mapped. Compile, and Update PCB's
+   ECO preview pairs G, D and S with pads 1, 2 and 3.
+7. **Refusals.** `FootprintPinMap=G->;D->2` and the same on a part with no
+   footprint model: `failed`, map unchanged. `FootprintPinMap=(G:9)` on the
+   three-pad footprint: record whether Altium takes it (the read-back
+   decides what is reported). `FootprintPinMap=`: record whether the map
+   clears.
+
+A relink or Update from Libraries replaces a placed part's models with the
+library's, map included, so a map set here on a placed part lasts until
+then; the durable fix for a wrong map is in the library symbol.
+
+Run live on AD 25.8.1.18 on 2026-10-24, with the script as built at commit
+64a71c3 (before step 41), on a free scratch sheet holding one NMOS from
+`Mosfet.SchLib` (two display modes, twenty PCB models). `app_ping` answered after every item and no dialog opened:
+
+1. Passed. On a net label the three reads came back empty under
+   `unreadable`, and `DisplayMode=1` under `unknown`.
+2. Passed: `0` and `2`.
+3. Passed. `DisplayMode` read `1`; the pins reported the mode-1 ends
+   (G 1900,2000, D 2000,2100, S 2000,1900 against 1800,2000, 2000,2200,
+   2000,1800 in mode 0); a screenshot showed the compact symbol on exactly
+   those ends with nothing left of the old body. The saved record carried
+   `DisplayMode=1`, and it read `1` after a close and reopen. Set back to 0,
+   the record drops the field, which is how Altium stores mode 0.
+4. Passed: `2`, `-1` and `x` each `failed`, mode unchanged.
+5. Passed: `(G:1),(D:2),(S:3)`, the reference's format.
+6. Passed, against the current model (LFPAK33-8, mapped D→3, G→2, S→1 by
+   the library). `G->1;D->2;S->3` wrote and read back `(D:2),(G:1),(S:3)`;
+   the saved file's map records for that model, and only that model, said
+   G→1, D→2, S→3; and the map read the same after a close and reopen.
+   Altium's own form, `(G:1),(D:2),(S:3)`, wrote too. The PCB Model dialog
+   and Update PCB's ECO preview were not looked at: a free sheet has no
+   project to compile, so the saved records stand in for them.
+7. `G->;D->2`: `failed`, map unchanged. `(G:9)` alone: `failed`, map
+   unchanged, because Altium merges by pin and the read-back still held D
+   and S. `(G:9),(D:2),(S:3)`: written, so Altium does not check pad numbers
+   against the footprint; a wrong pad shows up at compile or ECO. `''`:
+   `failed`, map unchanged, so there is no way to clear a map through
+   `MapAsString`. The part with no footprint model was not tried: none was
+   to hand.
+
+Item 5 was also the only call on a production sheet, and it only read. The
+order a map reads back in differs (sorted after a write, record order after
+a reload), which is why the comparison ignores order.
+
+### R41. A placement's footprint is the one it names
+
+Step 40's run placed an NMOS with `footprint: "PowerPAK SC-70 (S)"` and got
+LFPAK33-8, the model the library marks current. `Gen_PlaceSchComponentsFromLibrary`
+read the field and dropped it (a comment said `CurrentFootprintModelName` is
+read-only, which is true, and nothing else was tried), and the reply said
+nothing. FootprintPinMap maps the CURRENT model, so the map then went to
+LFPAK33-8.
+
+Now `footprint` must name one of the symbol's own PCBLIB models, matched by
+`ModelName` ignoring case and outer spaces, first match if two share a name:
+
+* found: the part is placed, then every other PCBLIB model gets
+  `IsCurrent := False`, that one `IsCurrent := True`, and every flag is
+  read back. Only when it alone is current, and `CurrentFootprintImpl`
+  reads its name, is it counted in `footprints_chosen`. Otherwise the part
+  is taken back off the sheet (`RemoveSchObject`, as `SwapSchSymbol` does)
+  and reported `designator:FOOTPRINT_NOT_APPLIED` in `failed_refdes`.
+  Simulation and other model types keep their own current model.
+* not found, or the symbol has no footprint model: the part is not placed,
+  `designator:FOOTPRINT_NOT_ON_SYMBOL`, and `footprint_hint` lists the
+  models it does carry. A footprint from another library is
+  `sch_relink_components`' job (`footprint` with `footprint_library`).
+
+Without `footprint` nothing changes. `sch_draw_template` sends a template
+part's `footprint` the same way; a plan's Footprint is still stamped
+afterwards through `sch_set_components_parameters`.
+
+`IsCurrent` (`GetState_IsCurrent` / `SetState_IsCurrent`) is in
+`ScriptingSystem.dll`'s property table next to `MapAsString`, and on
+`SCH.ISch_Implementation` in `Altium.SDK.Interfaces.dll`; `Library.pas`
+writes it both ways and `AddPlacedFootprintModel` writes True on placed
+parts. `RemoveSchObject` is on `ISch_BasicContainer` in the same assembly
+and already used on a sheet. **The risk is behaviour, not the name:**
+whether Altium's setter clears the siblings itself, or promotes another
+model when the current one is cleared, is not measured. Clearing first
+ends right in the first two cases, and the read-back refuses the third.
+
+On a free scratch sheet, with `Mosfet.SchLib`'s NMOS (twenty PCB models,
+LFPAK33-8 current in the library):
+
+1. **Chosen.** `sch_place_components` with `{lib_reference: "NMOS",
+   library_path: <Mosfet.SchLib>, designator: "Q1", footprint: "PowerPAK
+   SC-70 (S)"}`, `allow_manual_layout: true`: `placed` 1,
+   `footprints_chosen` 1, no `failed_refdes`. Save: Q1's RECORD=45 entries
+   carry `IsCurrent=T` on PowerPAK SC-70 (S) and on no other. The
+   Properties panel shows that footprint.
+2. **Case.** Q2 with `footprint: "powerpak sc-70 (s)"`: chosen as in item 1.
+3. **Refused.** Q3 with `footprint: "SOT-89"`: `placed` 0,
+   `failed_refdes` `Q3:FOOTPRINT_NOT_ON_SYMBOL`, `footprint_hint` names
+   the twenty models, the component count on the sheet is unchanged, and
+   `app_ping` answers.
+4. **Unchanged without it.** Q4 with no `footprint`: LFPAK33-8 current,
+   `footprints_chosen` 0.
+5. **The setter.** If item 1 reports `FOOTPRINT_NOT_APPLIED`, Altium's
+   setter does neither of the two things the order allows for: stop and
+   record which flags read back (place without `footprint` and read the
+   saved records after each write by hand).
+6. **Then the map.** Close and reopen: Q1 still on PowerPAK SC-70 (S).
+   `obj_modify ... filter=Designator.Text=Q1 set=FootprintPinMap=G->1;D->2;S->3`,
+   save: the map records that changed are PowerPAK SC-70 (S)'s, and
+   LFPAK33-8's still read the library's D→3, G→2, S→1.
+
+Also checked by `tests/test_sch_place_footprint.py`, which runs a
+line-for-line Python mirror of the three helpers against implementations
+whose setter is plain, clears its siblings, ignores the write, or promotes
+another model, and by the linter. FPC was not run.
+
+Run live on AD 25.8.1.18 with the fork script of 2026-10-24 (build 3) on 2026-10-24, on a free scratch
+sheet outside every project. The records were read from the saved file
+after each item. `app_ping` answered throughout, no dialog opened, and the
+344 open documents listed the same, none modified, before and after:
+
+1. Passed: `placed` 4 of 5, `footprints_chosen` 2, and Q1's saved records
+   carry `IsCurrent=T` on PowerPAK SC-70 (S) alone among its twenty
+   models. `FootprintPinMap` read that model's library map,
+   `(D:2),(G:1),(S:3)`. The Properties panel was not looked at.
+2. Passed: Q2, asked for in lower case, came out the same as Q1.
+3. Passed: `Q3:FOOTPRINT_NOT_ON_SYMBOL`, `footprint_hint` named the
+   twenty models, and four components were on the sheet, not five.
+4. Passed: Q4, placed without `footprint`, kept LFPAK33-8 and read its map
+   `(D:3),(G:2),(S:1)`.
+5. Not needed: no `FOOTPRINT_NOT_APPLIED`. Altium's setter takes the
+   clear-then-set order; which of the two kinds it is was not separated.
+6. Passed after a close and reopen. The library already maps PowerPAK
+   SC-70 (S) as G→1, D→2, S→3, so `G->3;D->1;S->2` was written instead of
+   the map above. Of the 61 model entries on the sheet, exactly one changed
+   in the saved file: Q1's PowerPAK SC-70 (S) map. LFPAK33-8's still read
+   D→3, G→2, S→1.
+
+The running MCP server was the Python from before these commits, so its
+tool text is the old one and the footprint was not passed through
+`payload_safe`; no footprint name with a `;` was tried.
+
+### R42. A footprint by name on a part already placed
+
+The same fault had a second form. `sch_set_components_parameters`'
+`Footprint` (both handlers) and `sch_relink_components`' `footprint` go
+through `SetPlacedFootprintName`, which renamed the current model whatever
+the part carried. A Footprint of PowerPAK SC-70 (S) on the NMOS turned
+LFPAK33-8's model, its library link and its pin map (D→3, G→2, S→1)
+included, into a second "PowerPAK SC-70 (S)" beside the real one, and
+FootprintPinMap then edited the impostor.
+
+Now a model of that name on the part, found as in step 41, is chosen:
+`SelectPlacedFootprint` makes it the only current one, with its own link and
+map. If that does not read back, the flags read before the choice are put
+back (cleared ones first, then the current ones), and the key is reported
+not applied; nothing is renamed. Only a part with no model of that name has
+its current model renamed, as before, which is what a plan's Footprint stamp
+on a one-model part relies on. The single-part handler's `applied` is now the
+helper's verdict, since a chosen model reads back in its own case.
+`sch_relink_components` with `footprint_library` repoints the model just
+chosen; on a part with no footprint model it still adds one first.
+
+No new identifier: the writes are step 41's `IsCurrent`, now on parts that
+are already on a sheet.
+
+On a free scratch sheet with Q1, an NMOS placed WITHOUT `footprint`
+(LFPAK33-8 current):
+
+1. **Chosen, not renamed.** `sch_set_components_parameters` with
+   `{designator: "Q1", Footprint: "PowerPAK SC-70 (S)"}`:
+   `footprints_applied` 1. Save: twenty PCBLIB records still, one named
+   LFPAK33-8 and one PowerPAK SC-70 (S), `IsCurrent=T` on the second alone,
+   and LFPAK33-8's map records unchanged.
+2. **Case.** The single-part handler with `Footprint: "lfpak33-8"`:
+   `applied` true, `after` `LFPAK33-8`, current again.
+3. **Relink.** `sch_relink_components(designators=["Q1"], footprint="SOT-23")`
+   (no library change): `not_applied` empty, `after.footprint` `SOT-23`,
+   still twenty distinct names.
+4. **Rename kept.** A part with one footprint model, Footprint set to a name
+   it lacks: renamed as before, `footprints_applied` 1.
+5. **Then the map.** `FootprintPinMap=G->1;D->2;S->3` on Q1 after item 1:
+   only PowerPAK SC-70 (S)'s map records change.
+
+Also checked by `tests/test_sch_place_footprint.py` (the routine's order,
+five more removed safeguards, and the mirror run against the same four
+setters, a failed choice putting the flags back) and the linter.
+
+Run live in the same session as step 41, on its Q4 and on D1, a BAT54H from
+`Diode.SchLib` whose only model is SOD-123:
+
+1. Passed: `footprints_applied` 1. Twenty distinct model names in the
+   saved file, `IsCurrent=T` on PowerPAK SC-70 (S) alone, and LFPAK33-8
+   still named so with its own map. The same call renamed LFPAK33-8
+   before this step.
+2. Passed through `sch_set_components_parameters`: `Footprint: "lfpak33-8"`
+   applied, LFPAK33-8 current again, and still spelled `LFPAK33-8`. The
+   single-part handler (`set_sch_component_parameters`) has no Python
+   caller, so no tool reaches it; its `applied` change was not run.
+3. Passed: `not_applied` empty, `footprint` LFPAK33-8 before and SOT-23
+   after, `footprint_models_added` 0.
+4. Passed: D1's SOD-123 model and its link entity were renamed SOD-323.
+5. Passed, on the model item 3 chose rather than item 1's. With SOT-23
+   current, `G->2;D->1;S->3` changed SOT-23's map records and nothing else.
+   Across items 2 to 5, the saved file differed from item 1's in exactly
+   three entries: D1's rename, SOT-23 becoming current with the new map,
+   and PowerPAK SC-70 (S) no longer current.
+
+A choice that does not read back, and so the restore, did not occur; only
+the mirror covers it.
+
+---

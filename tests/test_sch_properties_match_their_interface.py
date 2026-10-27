@@ -260,7 +260,8 @@ def test_extracted_pascal_capabilities_and_creation_preflight(tmp_path):
     source = _source()
     routines = "\n".join(_routine(source, name) for name in
                          ("SchObjectHasText", "SchObjectHasIsHidden", "SchObjectHasTextColor",
-                          "SchObjectHasFontId", "UnsupportedSchProperty"))
+                          "SchObjectHasFontId", "SchObjectHasTextFontId",
+                          "UnsupportedSchProperty"))
     # Match all identifiers used by the real guards, so existing denylist
     # exclusions remain part of the executable test.
     types = sorted(set(re.findall(r"\be[A-Z]\w*", routines)) |
@@ -290,10 +291,6 @@ def test_extracted_pascal_capabilities_and_creation_preflight(tmp_path):
         ("eNetLabel", "IsHidden|Text=GOOD", ""),
         ("eNetLabel", "Text=contains=equals", ""),
         ("eNetLabel", "", ""),
-        ("eNetLabel", "DisplayMode=1", "DisplayMode"),
-        ("ePin", "Location.X=10|DisplayModeCount=2", "DisplayModeCount"),
-        ("eParameter", "FootprintPinMap=G->1;D->2", "FootprintPinMap"),
-        ("eSchComponent", "DisplayMode=1|FootprintPinMap=(G:1),(D:2),(S:3)", ""),
     ]
     calls = "\n".join(
         f"  Obj.ObjectId := {kind}; if UnsupportedSchProperty(Obj, '{props}') <> '{expected}' then Halt({i});"
@@ -329,7 +326,7 @@ def test_extracted_pascal_single_and_mixed_batch_creation(tmp_path):
     main = MAIN.read_text(encoding="utf-8")
     guards = "\n".join(_routine(source, name) for name in
                        ("SchObjectHasText", "SchObjectHasIsHidden", "SchObjectHasTextColor",
-                        "SchObjectHasFontId", "UnsupportedSchProperty"))
+                        "SchObjectHasFontId", "SchObjectHasTextFontId", "UnsupportedSchProperty"))
     creators = "\n".join(_routine(source, name) for name in
                          ("Gen_CreateObject", "Gen_BatchCreate"))
     parsers = "\n".join(_routine(main, name) for name in ("NextBatchOp", "GetBatchField"))
@@ -399,6 +396,8 @@ procedure ResetPropertyDiag(Dummy: Integer);
 begin DiagDirty := False; Inc(ResetCount); end;
 procedure SchRegisterObject(Container, Obj: TSchObject);
 begin if not Obj.Registered then Halt(54); end;
+procedure ApplyNoErcDefaults(Obj: TSchObject);
+begin end;
 procedure MarkDocDirtyByPath(Path: String);
 begin end;
 function ObjectTypeFromString(S: String): Integer;

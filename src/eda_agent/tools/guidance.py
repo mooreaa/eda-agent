@@ -158,7 +158,7 @@ _RECIPES: tuple[dict[str, Any], ...] = (
         "document_kind": "library",
         "backends": ("altium",),
         "use": ["obj_query", "obj_modify", "lib_get_pin_list",
-                "sch_set_component_part_id"],
+                "sch_set_component_part_id", "lib_set_symbol_parts"],
         "avoid": [],
         "note": (
             "Suffix the scope with @N, as lib_component:NAME@2, for both "
@@ -169,7 +169,9 @@ _RECIPES: tuple[dict[str, Any], ...] = (
             "check to run afterwards. Changing a pin's electrical type on a "
             "part the editor is not showing is obj_modify with the @N scope "
             "and a filter on the pin's Designator; it does not need a "
-            "rebuild."),
+            "rebuild. lib_set_symbol_parts adds or removes parts and "
+            "alternate display modes (removed from the end, with their "
+            "pins)."),
     },
     {
         "task": "Place a part from a library onto a schematic",
@@ -404,22 +406,154 @@ _RECIPES: tuple[dict[str, Any], ...] = (
                      "standoff", "opacity", "library"),
         "document_kind": "library",
         "backends": ("altium",),
-        "use": ["lib_link_3d_model", "lib_auto_link_3d_models",
+        "use": ["lib_link_3d_model", "lib_set_3d_body", "lib_create_3d_model",
+                "lib_export_3d_model",
+                "lib_auto_link_3d_models",
                 "lib_update_footprint_heights_from_3d"],
         "avoid": [
             ("pcb_place_3d_body", "places a free body on a BOARD, not "
                                   "inside the footprint in front"),
+            ("obj_modify", "its StandoffHeight and BodyOpacity3D writes "
+                           "act on a BOARD, not the library in front"),
             ("obj_run_process", "an Altium process this build does not "
                                 "know does nothing and reports no error, "
                                 "so a guessed 3D command looks like it ran"),
         ],
         "note": (
             "lib_link_3d_model puts a STEP model in a footprint with its "
-            "offsets and rotations; lib_auto_link_3d_models matches models "
+            "offsets and rotations; lib_create_3d_model builds one from "
+            "solids read off the datasheet drawing, for a part no package "
+            "family covers (connector, LED with a lens, header); "
+            "lib_set_3d_body reads or changes an "
+            "existing body's standoff, overall height, opacity and layer "
+            "in place (on a STEP body the standoff is the model's Z offset, "
+            "and its saved_bodies give the saved rotations and Z offset); "
+            "lib_auto_link_3d_models matches models "
             "to footprints by name across a library; and "
             "lib_update_footprint_heights_from_3d sets each footprint's "
             "height from its body. lib_get_footprint_primitives counts the "
             "bodies a footprint carries and the layer each is on."),
+    },
+    {
+        "task": "Simulate a supply, inrush, hot-plug or load step in Altium",
+        "keywords": ("simulate", "simulation", "spice", "transient", "inrush",
+                     "hotplug", "hot-plug", "ringing", "droop", "sim", "ngspice",
+                     "waveform"),
+        "document_kind": "any",
+        "backends": ("altium",),
+        "use": ["sim_run_deck", "sim_get_results", "sim_get_readiness",
+                "sim_setup_analysis", "sim_run"],
+        "avoid": [
+            ("sim_attach_primitives", "it writes parameters, not the model "
+                                      "link Altium needs, so a sheet of your "
+                                      "own symbols still fails with Missing "
+                                      "component models"),
+        ],
+        "note": (
+            "sim_run_deck runs a plain SPICE deck you write (sources, the "
+            "cable, fuse, ESD, bulk and load as elements, .TRAN, a .PLOT "
+            "line, .END) in Altium's simulator and opens the waves as a "
+            "chart; the reply gives each wave's min, max and final value. "
+            "sim_run runs a schematic whose parts all carry simulation "
+            "models, such as Altium's own simulation examples. An IC's "
+            "behaviour needs its vendor's SPICE model."),
+    },
+    {
+        "task": "Place parts in a ring or on an arc (LED rings, round boards)",
+        "keywords": ("ring", "circle", "circular", "round", "radial", "polar",
+                     "arc", "concentric", "led ring"),
+        "document_kind": "board",
+        "backends": ("altium",),
+        "use": ["pcb_place_ring", "pcb_copy_tracks_radial", "pcb_move_components"],
+        "avoid": [],
+        "note": (
+            "pcb_place_ring spaces parts evenly round a circle or an arc, each "
+            "turned to face the centre (rotation_offset sets which way), in "
+            "one exact batch placement; call it once per ring. "
+            "pcb_copy_tracks_radial copies one cell's routing round the same "
+            "centre."),
+    },
+    {
+        "task": "Make a PDF of the schematics or the board without a person there",
+        "keywords": ("pdf", "print", "schematic pdf", "smart pdf", "publish",
+                     "documentation", "drawing"),
+        "document_kind": "any",
+        "backends": ("altium",),
+        "use": ["proj_list_outjob_containers", "proj_run_outjob",
+                "proj_create_outjob"],
+        "avoid": [
+            ("proj_export_pdf", "it opens Altium's PRINT dialog with the "
+                                "user's real printer selected and a live "
+                                "Print button; nothing is written until a "
+                                "person finishes it, and a wrong press "
+                                "prints paper"),
+        ],
+        "note": (
+            "A PDF is written without dialogs by an OutJob container whose "
+            "medium is PDF (Publish). proj_list_outjob_containers lists the "
+            "project's OutJobs and their containers; proj_run_outjob runs "
+            "one. With no OutJob, ask the user which of their OutJobs to copy "
+            "and use proj_create_outjob."),
+    },
+    {
+        "task": "Route a USB or differential pair at a controlled impedance",
+        "keywords": ("usb", "differential", "diff", "pair", "impedance", "90",
+                     "100", "ohm", "coupled", "dp", "dm", "lvds", "matched"),
+        "document_kind": "board",
+        "backends": ("altium",),
+        "use": ["pcb_get_layer_stackup", "pcb_get_impedance_profiles",
+                "pcb_calc_trace_width_for_impedance",
+                "pcb_create_diff_pair", "pcb_create_design_rule",
+                "pcb_set_rule_properties", "pcb_autoroute"],
+        "avoid": [
+            ("pcb_place_tracks", "two tracks drawn one by one are not coupled "
+                                 "and drift apart at every corner"),
+        ],
+        "note": (
+            "If pcb_get_impedance_profiles lists a profile for the target, "
+            "use Altium's own width and gap from it. Otherwise read the "
+            "stack-up (dielectric height to the reference plane, Er), "
+            "then pcb_calc_trace_width_for_impedance with geometry "
+            "microstrip_diff for the target (USB 2.0: 90 ohm differential) "
+            "and a chosen gap. pcb_create_diff_pair names the pair; "
+            "pcb_create_design_rule rule_type differential_pairs with scope "
+            "InDifferentialPair('<name>') sets the gap, and "
+            "pcb_set_rule_properties its widths. pcb_autoroute routes the pair "
+            "first, coupled at that width and gap, and reports it under "
+            "pairs (length, skew); a pair it reports with a note was routed "
+            "at defaults, not to an impedance. Keep a solid ground plane "
+            "beside it: each pair's ``reference`` names the plane next to its "
+            "layer and that plane's net. A part in series with the pair (an "
+            "ESD protector, a common-mode choke) splits each line into two "
+            "nets; the router follows a pair through a small flow-through "
+            "part (source \"through U1\"), but defining both halves as pairs "
+            "is surer, and a pair the schematic does not define is removed "
+            "by the next schematic sync."),
+    },
+    {
+        "task": "Pour copper and stitch it on a round or shaped board",
+        "keywords": ("pour", "ground", "gnd", "stitch", "stitching",
+                     "keepout", "keep-out", "outline", "round", "circular",
+                     "shaped", "thermal"),
+        "document_kind": "board",
+        "backends": ("altium",),
+        "use": ["pcb_place_polygon_board", "pcb_keepout_board_outline",
+                "pcb_modify_polygon", "pcb_place_polygon_rect",
+                "pcb_place_stitching_vias", "pcb_repour_polygons"],
+        "avoid": [
+            ("pcb_place_region", "a region is fixed copper; it does not pour "
+                                 "around other nets or clear dead copper"),
+        ],
+        "note": (
+            "pcb_place_polygon_board pours over the board's own outline, arcs "
+            "included, after drawing the outline as a keep-out "
+            "(pcb_keepout_board_outline) so the copper keeps its distance "
+            "from the edge. Or draw the keep-out and use pcb_place_polygon_rect "
+            "larger than the board: the pour stops at the keep-out and dead "
+            "copper is removed (pcb_modify_polygon sets that on a pour "
+            "already there). Pour top and bottom with the ground net, then "
+            "pcb_place_stitching_vias with no rectangle stitches the whole "
+            "board on grid points inside its outline, never in a pad."),
     },
     {
         "task": "Move every 3D body of a library onto one layer",
@@ -472,6 +606,225 @@ _RECIPES: tuple[dict[str, Any], ...] = (
             "eComponentBodyObject, obj_modify writes StandoffHeight and "
             "OverallHeight in mils and BodyOpacity3D from 0 (clear) to 1 "
             "(solid), not a percentage."),
+    },
+    {
+        "task": "Check which design rule really applies to a pad, part or net",
+        "keywords": ("rule", "applies", "dominant", "scope", "priority",
+                     "clearance", "width", "matches", "covers"),
+        "when": (("rule", "applies"), ("rule", "scope"), ("dominant", "rule"),
+                 ("which", "rule")),
+        "document_kind": "board",
+        "backends": ("altium",),
+        "use": ["pcb_find_dominant_rule", "pcb_check_rule_scope",
+                "pcb_get_design_rules"],
+        "avoid": [],
+        "note": (
+            "pcb_find_dominant_rule asks Altium which rule of a kind governs "
+            "one object, or a pair (\"U1.3\" a pad, \"U1\" a part, "
+            "\"net:GND\" a net), priorities resolved: what DRC and the router "
+            "use. pcb_check_rule_scope says whether one named rule's scopes "
+            "take in the objects at all. Run both after writing a rule."),
+    },
+    {
+        "task": "Mark parts not fitted, or give them an alternate part, in a variant",
+        "keywords": ("fitted", "dnp", "alternate", "populate",
+                     "variation"),
+        "when": (("not", "fitted"), ("dnp",), ("alternate", "part"),
+                 ("variation",)),
+        "document_kind": "project",
+        "backends": ("altium",),
+        "use": ["proj_list_variants", "proj_set_component_variation",
+                "proj_create_variant", "proj_delete_variant",
+                "proj_set_active_variant", "proj_save"],
+        "avoid": [],
+        "note": (
+            "proj_set_component_variation sets one part's entry in a "
+            "variant (fitted, not_fitted, alternate) or removes it, and "
+            "reads it back; save the project afterwards."),
+    },
+    {
+        "task": "Set up drill pairs, backdrills and drill drawings",
+        "keywords": ("drill", "pair", "backdrill", "back-drill", "drawing",
+                     "guide", "blind", "buried"),
+        "when": (("drill", "pair"), ("backdrill",), ("drill", "drawing")),
+        "document_kind": "board",
+        "backends": ("altium",),
+        "use": ["pcb_get_drill_pairs", "pcb_set_drill_pair"],
+        "avoid": [],
+        "note": "Hole tolerances are obj_modify HolePositiveTolerance / "
+                "HoleNegativeTolerance on pads and vias, in mils.",
+    },
+    {
+        "task": "Put a barcode, QR code or multiline text on the board",
+        "keywords": ("barcode", "qr", "serial", "label", "multiline",
+                     "text", "frame", "code"),
+        "when": (("barcode",), ("qr",), ("multiline",)),
+        "document_kind": "board",
+        "backends": ("altium",),
+        "use": ["pcb_place_text", "obj_query", "obj_modify"],
+        "avoid": [],
+        "note": (
+            "Place the text, then obj_modify on eTextObject: BarCodeKind, "
+            "BarCodeRenderMode (Altium's numbers: read one back from a "
+            "barcode made in the GUI), BarCodeFullWidth / FullHeight / "
+            "XMargin / YMargin / MinWidth in mils, BarCodeShowText, "
+            "BarCodeInverted; or Multiline with MultilineTextWidth / Height."),
+    },
+    {
+        "task": "Format a board dimension's text and arrows",
+        "keywords": ("dimension", "arrow", "precision", "units", "prefix",
+                     "suffix", "extension"),
+        "when": (("dimension", "text"), ("dimension", "arrow"),
+                 ("dimension", "precision")),
+        "document_kind": "board",
+        "backends": ("altium",),
+        "use": ["pcb_place_dimension", "obj_query", "obj_modify"],
+        "avoid": [],
+        "note": (
+            "obj_modify on eDimensionObject: TextHeight, TextWidth, "
+            "TextLineWidth, TextGap, ArrowSize, ArrowLength, ArrowLineWidth, "
+            "ExtensionOffset, ExtensionLineWidth, ExtensionPickGap (mils); "
+            "TextPrecision, TextDimensionUnit, TextPosition, ArrowPosition "
+            "(Altium's numbers); TextFormat, TextPrefix, TextSuffix."),
+    },
+    {
+        "task": "Set a schematic sheet's reference zones, margin or border",
+        "keywords": ("zones", "zone", "margin", "border", "sheet",
+                     "template", "graphics"),
+        "when": (("sheet", "zone"), ("sheet", "margin"), ("sheet", "border")),
+        "document_kind": "schematic",
+        "backends": ("altium",),
+        "use": ["sch_set_sheet_options", "sch_set_sheet_size"],
+        "avoid": [],
+        "note": "sch_set_sheet_options with no arguments reads the settings.",
+    },
+    {
+        "task": "Give a library symbol aliases (other part names)",
+        "keywords": ("alias", "aliases", "symbol", "name", "variant", "part"),
+        "when": (("alias",), ("aliases",)),
+        "document_kind": "library",
+        "backends": ("altium",),
+        "use": ["lib_set_symbol_aliases"],
+        "avoid": [],
+        "note": "Save the library afterwards.",
+    },
+    {
+        "task": "Compare the classes and pairs the schematic declares with the board",
+        "keywords": ("class", "classes", "differential", "pair", "room",
+                     "declared", "directive", "schematic", "board"),
+        "when": (("declared", "class"), ("schematic", "class"),
+                 ("net", "class", "directive")),
+        "document_kind": "project",
+        "backends": ("altium",),
+        "use": ["proj_get_declared_design_objects", "pcb_get_net_classes",
+                "pcb_get_differential_pairs"],
+        "avoid": [],
+        "note": (
+            "proj_get_declared_design_objects reads the compiled project: "
+            "what an Update PCB would create. A class or pair there and not "
+            "on the board means the update has not been run."),
+    },
+    {
+        "task": "Set up pin and part swapping",
+        "keywords": ("swap", "swapping", "pin", "part", "gate", "equivalent"),
+        "when": (("swap",), ("swapping",)),
+        "document_kind": "library",
+        "backends": ("altium",),
+        "use": ["obj_query", "obj_modify"],
+        "avoid": [],
+        "note": (
+            "Symbol pins take SwapIdPart, SwapIdPin, SwapIdPair and "
+            "SwapIdPartPin through obj_modify (lib_component:NAME scope in "
+            "a SchLib). On the board, a part's EnablePinSwapping and "
+            "EnablePartSwapping switch it on."),
+    },
+    {
+        "task": "Length-match a bus through series resistors or capacitors",
+        "keywords": ("xsignal", "xsignals", "series", "length", "match",
+                     "ddr", "termination", "coupling"),
+        "when": (("xsignal",), ("length", "series"), ("match", "through")),
+        "document_kind": "board",
+        "backends": ("altium",),
+        "use": ["pcb_create_xsignals", "pcb_get_xsignals",
+                "pcb_create_design_rule", "pcb_tune_length"],
+        "avoid": [("pcb_get_trace_lengths", "measures one net, so it "
+                                            "stops at the series part")],
+        "note": (
+            "pcb_create_xsignals takes the two end pins (\"U4.4\", "
+            "\"LED1.3\") and Altium finds the path through the series "
+            "parts; give class_name to group them for a matched-length "
+            "rule. pcb_get_xsignals reads the lengths back."),
+    },
+    {
+        "task": "Find where a net gets its name",
+        "keywords": ("net", "name", "named", "label", "power", "port",
+                     "sheet", "entry", "connector", "auto"),
+        "when": (("net", "named"), ("net", "name", "where"),
+                 ("auto", "generated", "net")),
+        "document_kind": "project",
+        "backends": ("altium",),
+        "use": ["proj_get_net_items", "proj_get_nets"],
+        "avoid": [],
+        "note": (
+            "proj_get_net_items lists each compiled net's labels, power "
+            "ports, ports, sheet entries and off-sheet connectors with "
+            "sheet and position, and flags names the compiler made up. "
+            "named_only=True skips nets nothing names."),
+    },
+    {
+        "task": "Check a schematic library with Altium's component rule check",
+        "keywords": ("schlib", "library", "check", "rule", "duplicate",
+                     "missing", "footprint", "description", "pins"),
+        "when": (("library", "check"), ("schlib", "check"),
+                 ("missing", "footprint", "symbol")),
+        "document_kind": "library",
+        "backends": ("altium",),
+        "use": ["lib_check_schlib", "lib_audit_styles"],
+        "avoid": [],
+        "note": "Reads Altium's <library>.ERR report back as one entry per symbol.",
+    },
+    {
+        "task": "Find parts with the same package, to copy a channel's layout",
+        "keywords": ("same", "package", "identical", "channel", "repeat",
+                     "copy", "replicate", "footprint"),
+        "when": (("same", "package"), ("identical", "parts"),
+                 ("repeated", "channel")),
+        "document_kind": "board",
+        "backends": ("altium",),
+        "use": ["pcb_find_same_package", "pcb_replicate_layout",
+                "pcb_copy_component_placement"],
+        "avoid": [],
+        "note": "With a designator it lists the parts sharing that part's package.",
+    },
+    {
+        "task": "Reset designator and comment positions on placed parts",
+        "keywords": ("designator", "comment", "position", "autoposition",
+                     "anchor", "text", "lock", "strings"),
+        "when": (("designator", "position"), ("comment", "position"),
+                 ("autoposition",)),
+        "document_kind": "board",
+        "backends": ("altium",),
+        "use": ["pcb_auto_position_text", "obj_modify",
+                "pcb_autoplace_silkscreen", "pcb_set_text_visibility"],
+        "avoid": [],
+        "note": (
+            "Altium moves only shown text: a hidden designator takes the "
+            "anchor and stays where it is. obj_modify on eComponentObject "
+            "also writes LockStrings, NameAutoPosition and "
+            "CommentAutoPosition. pcb_autoplace_silkscreen is the one that "
+            "looks for silk clearance."),
+    },
+    {
+        "task": "Reorder a project's documents or add library search paths",
+        "keywords": ("order", "reorder", "document", "sheet", "search",
+                     "path", "library", "port", "entry", "names"),
+        "when": (("reorder",), ("search", "path"), ("document", "order"),
+                 ("port", "net", "names")),
+        "document_kind": "project",
+        "backends": ("altium",),
+        "use": ["proj_project_setup", "proj_save", "proj_get_options"],
+        "avoid": [],
+        "note": "Changes stay in memory until proj_save.",
     },
 )
 

@@ -458,6 +458,10 @@ def register_uiauto_tools(mcp):
         Differences"), ``engineering_change_order``, ``wizard``,
         ``progress`` or ``unknown``. Grids and owner-drawn lists can't be
         read (``has_unreadable_content``). Presses nothing.
+        ``needs_a_human`` means no driver answers it blindly: read the
+        message and press the answer the task calls for with
+        app_press_dialog_button. Ask the user only when the choice is
+        theirs, never to click a button for you.
 
         Returns:
             Dict with ``blocked``, ``dialog_count``, ``dialogs``,
@@ -475,9 +479,10 @@ def register_uiauto_tools(mcp):
         return dialog_report.report(pid)
 
     @mcp.tool()
-    async def app_press_dialog_button(button_caption: str,
+    async def app_press_dialog_button(button_caption: str = "",
                                       dialog_title: str = "",
-                                      allow_irreversible: bool = False
+                                      allow_irreversible: bool = False,
+                                      button: str = "",
                                       ) -> dict[str, Any]:
         """Press ONE named button in an open Altium dialog.
 
@@ -492,11 +497,16 @@ def register_uiauto_tools(mcp):
             dialog_title: substring picking one dialog when several are
                 open. Empty uses the first.
             allow_irreversible: permit a committing press.
+            button: the same as ``button_caption``, the name clients reach
+                for first.
 
         Returns:
             ``ok``, the dialog and button actually matched, and whether
             the dialog closed afterwards.
         """
+        button_caption = button_caption or button
+        if not button_caption:
+            return {"ok": False, "reason": "give the button's caption"}
         pid, problem = _altium_pid()
         if problem:
             return problem
@@ -1241,9 +1251,13 @@ def register_uiauto_tools(mcp):
             from ..config import get_config
             path = os.path.join(str(get_config().workspace_dir),
                                 f"altium_{int(_time.time())}.png")
+        folder = os.path.dirname(os.path.abspath(path))
+        created_folder = not os.path.isdir(folder)
+        os.makedirs(folder, exist_ok=True)
         if not ocr.capture_png(target, path):
             return {"ok": False, "reason": "capture failed", "path": path}
         return {"ok": True, "path": path, "hwnd": target,
+                "created_folder": created_folder,
                 "note": "read the file to look at it"}
 
     @mcp.tool()
