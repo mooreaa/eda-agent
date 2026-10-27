@@ -57,7 +57,20 @@ Done in 2026.10.27.102: mainline merge, 4 (refusal half), 5, 11, 22, 24, 25, 26.
 
 ## Releases
 
-### 2026.10.27.104
+### 2026.10.27.104 (deployed 2026-10-27, smoke-tested on scratch documents)
+
+Smoke test, run from this checkout through the bridge on a free scratch sheet and a scratch copy
+of the restored Rosen board:
+- passed: `app_ping` version match; the stack, PDF and checkpoint guards refuse (checkpoint saw
+  5 open projects); `pcb_stack_from_file` fails f1e4aeb and passes afe927c; `obj_zoom
+  document` fits the sheet with its border (screenshot) and is refused on a board;
+  `obj_deselect_all`; `app_screenshot` native 2010 x 1479.
+- `pcb_physical_stack` (upstream, AD19+ MasterLayerStack) runs on AD 25.8.1 with no modal and
+  matches the file reader layer for layer. So S1 can be built on it.
+- not run live: the Description key (needs a placed part), the `PATH_MISMATCH` close refusal
+  (needs a phantom or an aliased path).
+- Known failing on mainline itself: `test_no_project_loop_looks_a_sheet_up_uncounted` (f3bd57f's
+  probe listing), plus the Flask-only dashboard test.
 
 Mainline merged again to f3bd57f (upstream script 2026.10.27.48: decimal mils in more handlers,
 filtered object walks, via deletion on any layer, simulation probes), on top of .103.
