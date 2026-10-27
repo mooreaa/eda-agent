@@ -57,6 +57,15 @@ Done in 2026.10.27.102: mainline merge, 4 (refusal half), 5, 11, 22, 24, 25, 26.
 
 ## Releases
 
+### 2026.10.27.109 (deployed, live-tested on a scratch board, pushed to the fork)
+
+`pcb_build_stack`: a whole stack, copper and dielectrics, in one call, with read-back and an undo
+(close unsaved, reopen). Built and verified live on AD 25.8.1 with the Rosen six-layer plan on a
+scratch copy of the restored board; details and what AD 25.8 scripts can and cannot do to the
+stack are in `docs/RELEASE_VERIFICATION.md`, Appendix V. S1 is done. S2 is mostly answered: the
+Layer Stack Manager opens on a "Printed Electronics Stackup" view that lists the copper bottom up
+with no dielectrics, which is what Aaron's screenshot showed.
+
 ### 2026.10.27.104 (deployed 2026-10-27, smoke-tested on scratch documents)
 
 Smoke test, run from this checkout through the bridge on a free scratch sheet and a scratch copy

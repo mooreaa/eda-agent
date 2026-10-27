@@ -6048,10 +6048,12 @@ def register_pcb_tools(mcp):
 
         THE WAY TO SET A STACK-UP. Goes through the AD19+ MasterLayerStack,
         where each dielectric is a layer of its own, so a plane or signal
-        layer can sit anywhere. The top and bottom copper are kept
-        (renamed, re-thicknessed) and everything between them is replaced
-        by the plan. A layer between them that carries primitives stops the
-        build before anything changes. Solder mask, overlay and paste are
+        layer can sit anywhere. The top and bottom copper are kept,
+        and so is each inner plane or signal layer the plan has a layer of
+        the same type for, in order (renamed, re-thicknessed, its contents
+        kept). Every old dielectric is replaced. Inner copper the plan has
+        no place for is removed, and if it carries primitives the build is
+        refused before anything changes. Solder mask, overlay and paste are
         left alone.
 
         The board must be open and SAVED: after the build the stack is read
@@ -6092,12 +6094,17 @@ def register_pcb_tools(mcp):
         if entry is None:
             return {"ok": False, "reason": f"{pcbdoc_path} is not open in Altium"}
         current = await bridge.send_command_async("pcb.physical_stack", {})
+        inspected = await bridge.send_command_async("pcb.stack_edit", {"op": "inspect"})
         try:
-            ops = stack_build.plan_ops((current or {}).get("layers", []), plan)
+            ops = stack_build.plan_ops((current or {}).get("layers", []), plan,
+                                       (inspected or {}).get("layers", []))
         except stack_build.StackPlanError as exc:
             return {"ok": False, "reason": str(exc)}
         if dry_run:
             return {"ok": True, "dry_run": True, "ops": ops,
+                    "then": ("the dielectric edits, worked out from the stack "
+                             "read back after these: extras in a gap removed, "
+                             "the rest set to the plan"),
                     "current": stack_build.board_section(current.get("layers", []))}
         if entry.get("modified"):
             return {"ok": False, "reason": (
@@ -6106,16 +6113,30 @@ def register_pcb_tools(mcp):
                 "ops": ops}
         applied: list[dict[str, Any]] = []
         failure: dict[str, Any] | None = None
-        for op in ops:
+
+        async def run(batch):
+            nonlocal failure
+            for op in batch:
+                try:
+                    res = await bridge.send_command_async("pcb.stack_edit", op)
+                except Exception as exc:                    # noqa: BLE001
+                    failure = {"op": op, "error": str(exc)}
+                    return
+                applied.append({"op": op, "result": res})
+                if op["op"] == "remove" and isinstance(res, dict) and not res.get("removed"):
+                    failure = {"op": op, "error": "the layer is still in the stack"}
+                    return
+
+        await run(ops)
+        if failure is None:
+            middle = await bridge.send_command_async("pcb.physical_stack", {})
             try:
-                res = await bridge.send_command_async("pcb.stack_edit", op)
-            except Exception as exc:                        # noqa: BLE001
-                failure = {"op": op, "error": str(exc)}
-                break
-            applied.append({"op": op, "result": res})
-            if op["op"] == "remove" and isinstance(res, dict) and not res.get("removed"):
-                failure = {"op": op, "error": "the layer is still in the stack"}
-                break
+                second = stack_build.dielectric_ops((middle or {}).get("layers", []), plan)
+            except stack_build.StackPlanError as exc:
+                failure = {"op": {"op": "plan_dielectrics"}, "error": str(exc)}
+                second = []
+            ops = ops + second
+            await run(second)
         readback = await bridge.send_command_async("pcb.physical_stack", {})
         layers_back = (readback or {}).get("layers", [])
         mismatches = stack_build.check(layers_back, plan)

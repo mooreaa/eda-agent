@@ -5469,7 +5469,8 @@ End;
 { physical stack on AD 25.8.1 (Rosen controller, 2026-10-27); these go       }
 { through IPCB_MasterLayerStack.CreateLayer / InsertAbove / InsertBelow /     }
 { RemoveLayer, where a dielectric is a layer of its own.                      }
-{ Params: op = insert | remove | set_copper.                                  }
+{ Params: op = inspect | insert | remove | set_copper.                        }
+{   inspect: every physical layer's name, layer_id and used_by_prims.       }
 {   insert: kind (signal | plane | dielectric), ref (a physical layer's name),}
 {     where (above | below), name, thickness_mils, and for a dielectric type  }
 {     (Altium's number), constant, material.                                  }
@@ -5492,9 +5493,17 @@ Begin
     Else Count := 30;
     For I := 1 To Count Do
     Begin
-        If Kind = 'plane' Then Id := LayerUtils.InternalPlaneLayer(I)
-        Else If Kind = 'dielectric' Then Id := LayerUtils.DielectricLayer(I)
-        Else Id := LayerUtils.MidLayer(I);
+        { LayerUtils.DielectricLayer is undeclared to scripts on AD 25.8.1,  }
+        { and LayerID reads the V7 numbers (top 1, MidLayer n 1+n, bottom  }
+        { 32, InternalPlane n 38+n). Dielectrics read 0 and are created    }
+        { from 0, so they need no free id.                                 }
+        If Kind = 'dielectric' Then
+        Begin
+            Result := 0;
+            Exit;
+        End;
+        If Kind = 'plane' Then Id := 38 + I
+        Else Id := 1 + I;
         Taken := False;
         L := MLS.First(eLayerClass_Physical);
         While L <> Nil Do
@@ -5521,9 +5530,11 @@ Var
     Ref, L, NewL : IPCB_LayerObject;
     DL : IPCB_DielectricLayer;
     EL : IPCB_ElectricalLayer;
-    Op, Kind, RefName, Where, Name, NewName, ThickS, TypeS, ConstS, MatS : String;
+    Op, Kind, RefName, Where, Name, NewName, ThickS, TypeS, ConstS, MatS, Items : String;
     Id : TLayer;
     Removed : Boolean;
+    LS7 : IPCB_LayerStack_V7;
+    RefObj, NewObj : IPCB_LayerObject_V7;
 Begin
     Op := LowerCase(ExtractJsonValue(Params, 'op'));
     Kind := LowerCase(ExtractJsonValue(Params, 'kind'));
@@ -5545,10 +5556,18 @@ Begin
 
     If Op = 'insert' Then
     Begin
-        If (Kind <> 'signal') And (Kind <> 'plane') And (Kind <> 'dielectric') Then
+        { Copper only. A script cannot create a dielectric on AD 25.8.1:     }
+        { MasterLayerStack.CreateLayer gave Nil for every id tried (V7      }
+        { numbers, 0, and the saved stack's $104xxxx). Copper goes in       }
+        { through the V7 stack's InsertInStackAbove / Below, as upstream's  }
+        { pcb_add_layer does, and Altium then adds a dielectric beside it   }
+        { in the physical stack by itself; pcb_build_stack sets that one    }
+        { with set_dielectric. Only the V7 Dielectric fields corrupted the  }
+        { Rosen stack, and nothing here touches them.                       }
+        If (Kind <> 'signal') And (Kind <> 'plane') Then
         Begin
             Result := BuildErrorResponse(RequestId, 'INVALID_PARAM',
-                'kind is signal, plane or dielectric');
+                'kind is signal or plane; Altium adds the dielectrics itself');
             Exit;
         End;
         If (Where <> 'above') And (Where <> 'below') Then
@@ -5557,10 +5576,13 @@ Begin
             Exit;
         End;
         Ref := StackFindPhysical(MLS, RefName);
+        If Ref <> Nil Then
+            If Pos('|' + UpperCase(Ref.Name) + '|', UpperCase(StackClassNames(MLS, eLayerClass_Electrical))) = 0 Then
+                Ref := Nil;
         If Ref = Nil Then
         Begin
             Result := BuildErrorResponse(RequestId, 'NOT_IN_STACK',
-                'No physical layer named ' + RefName + '; pcb_physical_stack lists them');
+                'No copper layer named ' + RefName + '; pcb_physical_stack lists them');
             Exit;
         End;
         If (Name <> '') And (StackFindPhysical(MLS, Name) <> Nil) Then
@@ -5576,44 +5598,71 @@ Begin
                 'Every ' + Kind + ' layer id is already in the stack');
             Exit;
         End;
+        LS7 := Board.LayerStack_V7;
+        RefObj := LS7.LayerObject(Ref.LayerID);
+        NewObj := LS7.LayerObject(Id);
+        If (RefObj = Nil) Or (NewObj = Nil) Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'NOT_CREATED',
+                'The V7 stack has no layer object for ' + RefName + ' or the new layer');
+            Exit;
+        End;
         PCBServer.PreProcess;
         Try
-            NewL := MLS.CreateLayer(Id);
-            If NewL <> Nil Then
-            Begin
-                If Where = 'above' Then MLS.InsertAbove(Ref, NewL)
-                Else MLS.InsertBelow(Ref, NewL);
-                If Name <> '' Then NewL.Name := Name;
-                If Kind = 'dielectric' Then
-                Begin
-                    DL := NewL;
-                    If TypeS <> '' Then DL.DielectricType := StrToInt(TypeS);
-                    If MatS <> '' Then DL.DielectricMaterial := MatS;
-                    If ConstS <> '' Then DL.DielectricConstant := StrToFloatDef(ConstS, 1);
-                    If ThickS <> '' Then DL.DielectricHeight := MilsToCoordF(StrToFloatDef(ThickS, 0));
-                End
-                Else If ThickS <> '' Then
-                Begin
-                    EL := NewL;
-                    EL.CopperThickness := MilsToCoordF(StrToFloatDef(ThickS, 0));
-                End;
-            End;
+            If Where = 'above' Then LS7.InsertInStackAbove(RefObj, NewObj)
+            Else LS7.InsertInStackBelow(RefObj, NewObj);
             PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
                 PCBM_BoardRegisteration, c_NoEventData);
         Finally
             PCBServer.PostProcess;
         End;
+        NewL := Nil;
+        L := MLS.First(eLayerClass_Physical);
+        While L <> Nil Do
+        Begin
+            If L.LayerID = Id Then NewL := L;
+            L := MLS.Next(eLayerClass_Physical, L);
+        End;
         If NewL = Nil Then
         Begin
             Result := BuildErrorResponse(RequestId, 'NOT_CREATED',
-                'Altium did not create a ' + Kind + ' layer');
+                'Altium did not put the new ' + Kind + ' layer in the stack');
             Exit;
+        End;
+        EL := NewL;
+        PCBServer.PreProcess;
+        Try
+            If Name <> '' Then NewL.Name := Name;
+            If ThickS <> '' Then EL.CopperThickness := MilsToCoordF(StrToFloatDef(ThickS, 0));
+            PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
+                PCBM_BoardRegisteration, c_NoEventData);
+        Finally
+            PCBServer.PostProcess;
         End;
         MarkDocDirtyByPath(Board.FileName);
         Result := BuildSuccessResponse(RequestId, JsonObj(
             JsonStr('op', Op) + ',' + JsonStr('kind', Kind) + ','
             + JsonStr('name', NewL.Name) + ',' + JsonInt('layer_id', NewL.LayerID) + ','
             + JsonStr('ref', Ref.Name) + ',' + JsonStr('where', Where)));
+        Exit;
+    End;
+
+    If Op = 'inspect' Then
+    Begin
+        { Read only: each physical layer's id and whether primitives sit on
+          it, so pcb_build_stack can refuse a plan before its first write. }
+        Items := '';
+        L := MLS.First(eLayerClass_Physical);
+        While L <> Nil Do
+        Begin
+            If Items <> '' Then Items := Items + ',';
+            Items := Items + JsonObj(JsonStr('name', L.Name) + ','
+                + JsonInt('layer_id', L.LayerID) + ','
+                + JsonBool('used_by_prims', L.UsedByPrims));
+            L := MLS.Next(eLayerClass_Physical, L);
+        End;
+        Result := BuildSuccessResponse(RequestId, JsonObj(
+            JsonStr('op', Op) + ',' + JsonRaw('layers', '[' + Items + ']')));
         Exit;
     End;
 
@@ -5656,6 +5705,35 @@ Begin
         Exit;
     End;
 
+    If Op = 'set_dielectric' Then
+    Begin
+        If Pos('|' + UpperCase(L.Name) + '|', UpperCase(StackClassNames(MLS, eLayerClass_Dielectric))) = 0 Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'NOT_A_DIELECTRIC',
+                Name + ' is not a dielectric layer');
+            Exit;
+        End;
+        DL := L;
+        PCBServer.PreProcess;
+        Try
+            If NewName <> '' Then L.Name := NewName;
+            If TypeS <> '' Then DL.DielectricType := StrToInt(TypeS);
+            If MatS <> '' Then DL.DielectricMaterial := MatS;
+            If ConstS <> '' Then DL.DielectricConstant := StrToFloatDef(ConstS, 1);
+            If ThickS <> '' Then DL.DielectricHeight := MilsToCoordF(StrToFloatDef(ThickS, 0));
+            PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
+                PCBM_BoardRegisteration, c_NoEventData);
+        Finally
+            PCBServer.PostProcess;
+        End;
+        MarkDocDirtyByPath(Board.FileName);
+        Result := BuildSuccessResponse(RequestId, JsonObj(
+            JsonStr('op', Op) + ',' + JsonStr('name', L.Name) + ','
+            + JsonRaw('thickness_mils', FloatToJsonStr(CoordToMilsF(DL.DielectricHeight))) + ','
+            + StackDielectricJson(DL)));
+        Exit;
+    End;
+
     If Op = 'set_copper' Then
     Begin
         EL := L;
@@ -5677,7 +5755,7 @@ Begin
     End;
 
     Result := BuildErrorResponse(RequestId, 'INVALID_PARAM',
-        'op is insert, remove or set_copper');
+        'op is inspect, insert, remove, set_copper or set_dielectric');
 End;
 
 { The impedance profile named Name, Nil when there is none. }

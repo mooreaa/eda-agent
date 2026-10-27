@@ -5,9 +5,10 @@
 The Rosen controller (AD 25.8.1, 2026-10-27) needed a 4-layer board turned
 into L1 Top / L2 GND / L3 Sig / L4 Pwr / L5 GND / L6 Bottom. Done with the
 LayerStack_V7 tools it read back right and came out corrupt. These tests run
-the planner and the tool against a fake stack that behaves like the
-MasterLayerStack: physical layers in a list, inserts relative to a named
-layer, the outer copper kept.
+the planner and the tool against a fake stack that behaves as AD 25.8.1 did
+live on a scratch copy of that board: copper inserted below a layer lands
+after that layer's dielectrics, Altium adds a dielectric under each new copper
+layer by itself, and no dielectric can be created any other way.
 """
 from __future__ import annotations
 
@@ -53,26 +54,84 @@ def _d(t, kind="prepreg", dk=4.0):
 
 
 SIX_LAYER = [_cu("L1 Top"), _d(4.33), _cu("L2 GND", True), _d(3.937, "core", 4.3),
-             _cu("L3 Signal"), _d(37.4, "core", 4.3), _cu("L4 Power", True),
+             _cu("L3 Signal"), _d(37.4, "core", 4.3), _cu("L4 Power"),
              _d(3.937, "core", 4.3), _cu("L5 GND", True), _d(4.33), _cu("L6 Bottom")]
 
 
 # Planner ---------------------------------------------------------------------
 
-def test_plan_removes_inner_renames_outer_then_inserts_top_down():
+PLANES_USED = [{"name": "Top Layer", "layer_id": 16777217, "used_by_prims": True},
+               {"name": "Internal Plane 1", "layer_id": 16842753, "used_by_prims": True},
+               {"name": "Internal Plane 2", "layer_id": 16842754, "used_by_prims": True},
+               {"name": "Bottom Layer", "layer_id": 16842751, "used_by_prims": True}]
+
+
+def test_plan_keeps_the_planes_and_inserts_copper_around_them():
     plan = stack_build.normalise(SIX_LAYER)
-    ops = stack_build.plan_ops(FOUR_LAYER, plan)
-    removes = [o["name"] for o in ops if o["op"] == "remove"]
-    assert removes == ["Dielectric 1", "Dielectric 2", "Internal Plane 1", "Dielectric 3",
-                       "Internal Plane 2", "Dielectric 4"]
+    ops = stack_build.plan_ops(FOUR_LAYER, plan, PLANES_USED)
+    assert [o for o in ops if o["op"] == "remove"] == []
+    finals = {o["name"]: o["new_name"] for o in ops
+              if o["op"] == "set_copper" and o["name"].startswith("__")}
+    assert set(finals.values()) == {"L1 Top", "L6 Bottom", "L2 GND", "L5 GND"}
     inserts = [(o["kind"], o["name"], o["ref"]) for o in ops if o["op"] == "insert"]
-    assert inserts[0] == ("dielectric", "Dielectric 1", "L1 Top")
-    assert inserts[1] == ("plane", "L2 GND", "Dielectric 1")
-    assert inserts[3] == ("signal", "L3 Signal", "Dielectric 2")
-    assert len(inserts) == 9
-    first_insert = next(i for i, o in enumerate(ops) if o["op"] == "insert")
-    last_remove = max(i for i, o in enumerate(ops) if o["op"] == "remove")
-    assert last_remove < first_insert
+    assert inserts == [("signal", "L3 Signal", "L2 GND"), ("signal", "L4 Power", "L3 Signal")]
+
+
+def test_dielectric_phase_fits_each_gap_and_sets_it():
+    plan = stack_build.normalise(SIX_LAYER)
+    back = [{"name": "L1 Top", "kind": "copper"},
+            {"name": "Dielectric 1", "kind": "dielectric"},
+            {"name": "Dielectric 2", "kind": "dielectric"},
+            {"name": "L2 GND", "kind": "copper"},
+            {"name": "Dielectric 3", "kind": "dielectric"},
+            {"name": "L3 Signal", "kind": "copper"},
+            {"name": "Dielectric6", "kind": "dielectric"},
+            {"name": "L4 Power", "kind": "copper"},
+            {"name": "Dielectric7", "kind": "dielectric"},
+            {"name": "L5 GND", "kind": "copper"},
+            {"name": "Dielectric 4", "kind": "dielectric"},
+            {"name": "Dielectric 5", "kind": "dielectric"},
+            {"name": "L6 Bottom", "kind": "copper"}]
+    ops = stack_build.dielectric_ops(back, plan)
+    assert [o["name"] for o in ops if o["op"] == "remove"] == ["Dielectric 2", "Dielectric 5"]
+    finals = [o for o in ops if o["op"] == "set_dielectric" and o["name"].startswith("__")]
+    assert [o["new_name"] for o in finals] == [f"Dielectric {n}" for n in range(1, 6)]
+    assert finals[2]["thickness_mils"] == "37.4" and finals[2]["type"] == "1"
+
+
+def test_a_gap_short_of_dielectrics_is_refused():
+    plan = stack_build.normalise([_cu("A"), _d(2), _d(2), _cu("B")])
+    back = [{"name": "A", "kind": "copper"}, {"name": "D", "kind": "dielectric"},
+            {"name": "B", "kind": "copper"}]
+    with pytest.raises(stack_build.StackPlanError, match="cannot add one"):
+        stack_build.dielectric_ops(back, plan)
+
+
+def test_copper_that_came_out_wrong_is_refused():
+    plan = stack_build.normalise([_cu("A"), _d(2), _cu("B")])
+    back = [{"name": "A", "kind": "copper"}, {"name": "D", "kind": "dielectric"},
+            {"name": "X", "kind": "copper"}]
+    with pytest.raises(stack_build.StackPlanError, match="came out"):
+        stack_build.dielectric_ops(back, plan)
+
+
+def test_a_busy_layer_the_plan_drops_is_refused_before_any_change():
+    plan = stack_build.normalise([_cu("A"), _d(4), _cu("B")])
+    with pytest.raises(stack_build.StackPlanError, match="Internal Plane 1, Internal Plane 2"):
+        stack_build.plan_ops(FOUR_LAYER, plan, PLANES_USED)
+
+
+def test_an_idle_layer_the_plan_drops_is_removed():
+    idle = [dict(i, used_by_prims=False) for i in PLANES_USED]
+    plan = stack_build.normalise([_cu("A"), _d(4), _cu("B")])
+    ops = stack_build.plan_ops(FOUR_LAYER, plan, idle)
+    assert {"op": "remove", "name": "Internal Plane 1"} in ops
+
+
+@pytest.mark.parametrize("layer_id,kind", [
+    (16842753, "plane"), (16777218, "signal"), (39, "plane"), (2, "signal"), (None, "signal")])
+def test_copper_type_from_layer_id(layer_id, kind):
+    assert stack_build.copper_type(layer_id) == kind
 
 
 @pytest.mark.parametrize("bad,why", [
@@ -115,6 +174,7 @@ class _FakeAltium:
         self.calls: list[tuple[str, dict]] = []
         self.closed = False
         self.reopened = False
+        self.auto = 0
 
     def _find(self, name):
         return next((i for i, layer in enumerate(self.layers)
@@ -135,6 +195,8 @@ class _FakeAltium:
         if command == "application.run_process":
             self.reopened = True
             return {"success": True}
+        if command == "pcb.stack_edit" and params.get("op") == "inspect":
+            return {"layers": [dict(i) for i in PLANES_USED]}
         if command != "pcb.stack_edit":
             raise AssertionError(command)
         if self.fail_on and params.get("name") == self.fail_on:
@@ -150,17 +212,31 @@ class _FakeAltium:
                 layer["thickness_mils"] = float(params["thickness_mils"])
             return {"name": layer["name"]}
         if op == "insert":
-            at = self._find(params["ref"]) + (1 if params["where"] == "below" else 0)
-            kind = "dielectric" if params["kind"] == "dielectric" else "copper"
-            t = float(params["thickness_mils"])
-            if self.drift and params["name"] == self.drift:
-                t += 1.0
-            new = {"name": params["name"], "kind": kind, "thickness_mils": t}
-            if kind == "dielectric":
-                new["dielectric_type"] = int(params["type"])
-                new["constant"] = float(params.get("constant", 1))
-            self.layers.insert(at, new)
-            return {"name": new["name"]}
+            if params["kind"] == "dielectric":
+                raise RuntimeError("NOT_CREATED")
+            at = self._find(params["ref"]) + 1
+            while at < len(self.layers) and self.layers[at]["kind"] == "dielectric":
+                at += 1
+            self.auto += 1
+            self.layers[at:at] = [
+                {"name": params["name"], "kind": "copper",
+                 "thickness_mils": float(params["thickness_mils"])},
+                {"name": f"Dielectric{5 + self.auto}", "kind": "dielectric",
+                 "thickness_mils": 12.6, "dielectric_type": 0, "constant": 4.8}]
+            return {"name": params["name"]}
+        if op == "set_dielectric":
+            layer = self.layers[self._find(params["name"])]
+            layer["name"] = params.get("new_name") or layer["name"]
+            if "thickness_mils" in params:
+                t = float(params["thickness_mils"])
+                if self.drift and layer["name"] == self.drift:
+                    t += 1.0
+                layer["thickness_mils"] = t
+            if "type" in params:
+                layer["dielectric_type"] = int(params["type"])
+            if "constant" in params:
+                layer["constant"] = float(params["constant"])
+            return {"name": layer["name"]}
         raise AssertionError(op)
 
 
@@ -183,7 +259,7 @@ def _build(monkeypatch, fake, **kwargs):
 
 
 def _edits(fake):
-    return [c for c, _ in fake.calls if c == "pcb.stack_edit"]
+    return [c for c, p in fake.calls if c == "pcb.stack_edit" and p.get("op") != "inspect"]
 
 
 def test_dry_run_changes_nothing(monkeypatch):
@@ -213,9 +289,9 @@ def test_an_unsaved_board_is_refused(monkeypatch):
 
 
 def test_a_failed_step_is_undone_by_closing_unsaved(monkeypatch):
-    fake = _FakeAltium(FOUR_LAYER, fail_on="Internal Plane 1")
+    fake = _FakeAltium(FOUR_LAYER, fail_on="L3 Signal")
     out = _build(monkeypatch, fake, dry_run=False)
-    assert out["ok"] is False and out["failure"]["op"]["name"] == "Internal Plane 1"
+    assert out["ok"] is False and out["failure"]["op"]["name"] == "L3 Signal"
     assert out["undone"] is True and fake.closed and fake.reopened
     close = next(p for c, p in fake.calls if c == "application.close_document")
     assert close["discard"] == "true"
@@ -237,12 +313,16 @@ def test_a_bad_plan_never_reaches_the_bridge(monkeypatch):
     assert out["ok"] is False and fake.calls == []
 
 
-def test_the_script_inserts_through_the_master_layer_stack():
+def test_the_script_never_writes_the_v7_dielectric_fields():
+    """Only LayerObj.Dielectric.* corrupted the Rosen stack. Copper goes in
+    through the V7 stack (that part works); every dielectric value is written
+    on the AD19+ dielectric layer object."""
     src = (REPO / "scripts" / "altium" / "PCB.pas").read_text(encoding="utf-8", errors="replace")
     start = src.index("Function PCB_StackEdit(")
     body = src[start:src.index("\nEnd;", start)]
-    for call in ("MLS.CreateLayer(Id)", "MLS.InsertBelow(Ref, NewL)", "MLS.InsertAbove(Ref, NewL)",
-                 "MLS.RemoveLayer(L)", "L.UsedByPrims", "DL.DielectricHeight"):
+    for call in ("LS7.InsertInStackBelow(RefObj, NewObj)", "LS7.InsertInStackAbove(RefObj, NewObj)",
+                 "MLS.RemoveLayer(L)", "L.UsedByPrims", "DL.DielectricHeight",
+                 "EL.CopperThickness", "'set_dielectric'"):
         assert call in body, call
-    assert "LayerStack_V7" not in body
+    assert ".Dielectric.Dielectric" not in body
     assert "'stack_edit':" in src

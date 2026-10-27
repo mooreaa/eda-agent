@@ -1,4 +1,4 @@
-# Release verification: 2026.10.27.105
+# Release verification: 2026.10.27.109
 
 Unless a section records live verification explicitly, the Pascal below has
 been checked by FPC and the linter but **not executed by Altium's DelphiScript engine**. The two are not the
@@ -375,7 +375,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.10.27.105`, `version_match` =
+Expect `altium_script_version` = `2026.10.27.109`, `version_match` =
 `true`, and `mcp_server_version` = `0.7.1`.
 
 Those are two different versions and they fail differently.
@@ -3752,19 +3752,44 @@ only). Run `pcb_physical_stack` read-only on a scratch board first; an
 ## Appendix V: Rosen branch, whole-stack writer
 
 `pcb_build_stack(pcbdoc_path, layers, dry_run=True)` sets a board's copper and
-dielectric layers, top to bottom, through the AD19+ MasterLayerStack: the new
-Pascal command `pcb.stack_edit` (`insert` via `CreateLayer` +
-`InsertAbove`/`InsertBelow` with `LayerUtils.MidLayer` / `InternalPlaneLayer` /
-`DielectricLayer` ids, `remove` via `RemoveLayer`, `set_copper`). The top and
-bottom copper are kept and renamed; everything between them is replaced; a
-layer carrying primitives stops the build. The board must be saved first:
-after the build the stack is read back with `pcb_physical_stack`, and on any
-difference the board is closed without saving and reopened.
+dielectric layers, top to bottom. Found live on AD 25.8.1 while building it:
 
-Live check, on a scratch copy of a 4-layer board only:
-1. `pcb_build_stack` with the plan, `dry_run=True`: the ops list, nothing changed.
-2. Apply: `ok` true and `stack` equal to the plan.
-3. Save the scratch board; `pcb_stack_from_file` with the plan as `expected`:
-   `ok` true, no `views_disagree` finding.
-4. Open the Layer Stack Manager on it and look: the copper conductive, the
-   dielectrics between them, the order top to bottom as planned.
+- a script cannot create a dielectric: `MasterLayerStack.CreateLayer` gave Nil
+  for V7 numbers, 0 and the saved stack's `$104xxxx` ids, and
+  `LayerUtils.DielectricLayer` is an undeclared identifier (a modal);
+- `LayerID` on a physical layer reads the V7 numbers (top 1, MidLayer n 1+n,
+  bottom 32, InternalPlane n 38+n, dielectrics 0);
+- copper inserted with the V7 stack's `InsertInStackBelow` lands below the
+  reference layer's dielectrics, and Altium adds a dielectric under it in the
+  physical stack by itself;
+- `MasterLayerStack.RemoveLayer`, a layer's `Name`, `CopperThickness` and the
+  dielectric layer's own type, height, Dk and material all write correctly.
+  Only the V7 `LayerObject.Dielectric` fields corrupted the Rosen stack.
+
+So the build runs in two phases through the new Pascal command
+`pcb.stack_edit` (`inspect`, `insert` copper, `remove`, `set_copper`,
+`set_dielectric`). Copper: existing inner planes and signal layers are matched
+in order to planned ones of the same type and kept, the rest removed (refused
+before any change if they carry primitives), the outer copper renamed, new
+copper inserted top down. Dielectrics: from the stack read back, each copper
+gap keeps as many of Altium's dielectrics as the plan has, removes the extras
+and sets the rest. The board must be saved first; on a failure or a read-back
+difference it is closed without saving and reopened.
+
+Verified live on AD 25.8.1 (script 2026.10.27.109), on a scratch copy of the
+Rosen controller's restored 4-layer board, with the six-layer plan of its
+stack-up notes (L1 Top / L2 GND plane / L3 Signal / L4 Power / L5 GND plane /
+L6 Bottom; 4.33, 3.94, 37.4, 3.94, 4.33 mil):
+1. Dry run: the copper ops; nothing changed.
+2. Apply: 22 edits, `ok` true, the read-back equal to the plan; the two old
+   planes kept as L2 and L5.
+3. Saved; `pcb_stack_from_file` with the plan as `expected`: `ok`, no
+   findings (the legacy view agrees too), no mismatches, board 62.2 mil.
+4. Earlier attempts on the way there failed and undid themselves as designed
+   (closed unsaved, reopened, file unchanged).
+
+The Layer Stack Manager opened on that board shows only its "Printed
+Electronics Stackup" tab, in which copper rows are listed bottom up, one shows
+"Non-Conductive" and no dielectric rows appear, while `pcb_physical_stack`
+reads style 0 and the correct stack. Aaron's screenshot of the broken Rosen
+board looked like that view.
