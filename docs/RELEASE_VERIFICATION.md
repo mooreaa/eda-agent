@@ -1,4 +1,4 @@
-# Release verification: 2026.10.27.102
+# Release verification: 2026.10.27.103
 
 Unless a section records live verification explicitly, the Pascal below has
 been checked by FPC and the linter but **not executed by Altium's DelphiScript engine**. The two are not the
@@ -371,7 +371,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.10.27.102`, `version_match` =
+Expect `altium_script_version` = `2026.10.27.103`, `version_match` =
 `true`, and `mcp_server_version` = `0.7.1`.
 
 Those are two different versions and they fail differently.
@@ -3615,3 +3615,36 @@ on a scratch sheet or read-only:
    `width` and `height`; the OCR path still upscales its own copy 2x.
 7. Template ports (Rosen #11): a net containing GND points down (orientation 3)
    whatever its style, unless the template gives an orientation.
+
+---
+
+## Appendix U: Rosen branch, layer-stack guard and the Description key
+
+Found on the Rosen controller on AD 25.8.1, 2026-10-27. A 4- to 6-layer change
+made through `pcb_add_layer`, `pcb_remove_layer` and `pcb_modify_layer` read
+back exactly as intended in `pcb_get_layer_stackup`. The Layer Stack Manager
+showed the copper inverted, two layers non-conductive and no dielectrics. The
+saved file's V9 stack had two dielectrics between L1 and L2 (-0.3944 mil and
+2.165 mil) where the legacy view said 4.33 mil. Those tools, and
+`pcb_get_layer_stackup`, use the pre-AD19 `LayerStack_V7` model.
+
+1. New tool `pcb_stack_from_file` (offline): reads a saved PcbDoc's V9
+   physical stack and the legacy copper chain, and reports non-positive
+   thicknesses, copper against copper, and any disagreement between the two
+   views; `expected` compares against a planned stack. On the Rosen board's
+   broken revision it reports the -0.3944 mil layer and the 1.77 / 4.33 mil
+   disagreement. On the restored revision it reports `ok`.
+2. `pcb_add_layer`, `pcb_remove_layer`, `pcb_modify_layer` (dielectric fields
+   only) and `pcb_apply_stackup_template(dry_run=False)` refuse with
+   `LEGACY_STACK_WRITE` unless `legacy_stack_write=True`, and when allowed
+   answer with a `verify` note. No Pascal changed for this; nothing to run live
+   beyond calling one of them without the flag and seeing the refusal.
+3. `sch_set_components_parameters`: a `Description` (or `ComponentDescription`)
+   key writes the part's ComponentDescription instead of creating a parameter
+   Altium drops on reload. Live check on a scratch sheet: stamp a description,
+   save, close, reload, and read `ComponentDescription` with `obj_query`.
+
+Not yet run on AD 25.8.1: upstream's `pcb_physical_stack` and
+`pcb_set_dielectric` (AD19+ MasterLayerStack, verified upstream on AD 26.11
+only). Run `pcb_physical_stack` read-only on a scratch board first; an
+"Undeclared identifier" modal there means the AD 25.8 interface differs.

@@ -151,7 +151,8 @@ _OFFLINE_SUBSTRINGS = ("_calc_", "calc_", "_compute_", "compute_")
 # the package checks compute over a package description and never reach an
 # editor, so they work with nothing running.
 _OFFLINE_BY_NAME = frozenset({"footprint_check_package",
-                              "footprint_render_package"})
+                              "footprint_render_package",
+                              "pcb_stack_from_file"})
 
 # ...except calculators that read their input FROM THE BOARD. The
 # substring rule above assumes a calc tool is pure maths; these query

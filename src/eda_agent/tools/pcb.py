@@ -5980,12 +5980,84 @@ def register_pcb_tools(mcp):
         result = await bridge.send_command_async("pcb.get_trace_lengths", params)
         return result
 
+    #: The pre-AD19 stack writes (LayerStack_V7: InsertLayer,
+    #: RemoveFromStack, LayerObject.Dielectric). On AD 25.8.1 (Rosen
+    #: controller, 2026-10-27) a 4- to 6-layer change through them read
+    #: back as intended in pcb_get_layer_stackup while the saved physical
+    #: stack held a -0.39 mil dielectric and the Layer Stack Manager showed
+    #: the copper inverted with two layers non-conductive.
+    def _legacy_stack_refusal(tool: str) -> dict[str, Any]:
+        return {
+            "ok": False, "success": False,
+            "error": "LEGACY_STACK_WRITE",
+            "details": (
+                f"{tool} writes the stack through the pre-AD19 LayerStack_V7 "
+                "interface. On AD 25.8.1 such writes left a different, "
+                "corrupt physical stack while pcb_get_layer_stackup read "
+                "back the intended one. Prefer the Layer Stack Manager, or "
+                "pcb_set_dielectric for a dielectric layer's own values. "
+                "Pass legacy_stack_write=True to go ahead on a scratch copy, "
+                "then save and check the result with pcb_stack_from_file."),
+        }
+
+    _VERIFY_NOTE = ("written through the pre-AD19 stack interface; save the "
+                    "board and run pcb_stack_from_file on it before trusting "
+                    "the stack, since pcb_get_layer_stackup reads the same "
+                    "old view")
+
+    @mcp.tool()
+    async def pcb_stack_from_file(
+        pcbdoc_path: str,
+        expected: Optional[list[dict[str, Any]]] = None,
+    ) -> dict[str, Any]:
+        """Read a SAVED PcbDoc's layer stack from the file, no Altium needed.
+
+        Reads the AD19+ physical stack the Layer Stack Manager and the
+        fab outputs use (every copper and dielectric layer, top down,
+        with thickness, type, material and Dk) and the pre-AD19 copper
+        chain that pcb_get_layer_stackup reads, and reports where they
+        disagree. Use it after any stack change, on the saved file.
+
+        Args:
+            pcbdoc_path: the .PcbDoc on disk (save the board first).
+            expected: optional copper and dielectric layers top down, each
+                ``{"kind": "copper"|"dielectric", "name"?,
+                "thickness_mils"?, "dielectric_type"?,
+                "dielectric_constant"?}``; differences go in ``mismatches``.
+
+        Returns:
+            ``{"ok", "layers", "legacy_chain", "summary", "findings"}``
+            and, with ``expected``, ``mismatches``. ``ok`` is false on any
+            error finding or mismatch: a non-positive thickness, copper
+            against copper, or the two views disagreeing.
+        """
+        import os
+
+        from ..fileio import altium_pcb_stack
+
+        if not os.path.isfile(pcbdoc_path):
+            return {"ok": False, "reason": f"no such file: {pcbdoc_path}"}
+        try:
+            out = altium_pcb_stack.read_stack(pcbdoc_path)
+        except Exception as exc:                    # noqa: BLE001
+            return {"ok": False, "reason": f"could not read the stack: {exc}"}
+        if expected is not None:
+            out["mismatches"] = altium_pcb_stack.compare_expected(
+                out["layers"], expected)
+            out["ok"] = out["ok"] and not out["mismatches"]
+        return out
+
     @mcp.tool()
     async def pcb_get_layer_stackup() -> dict[str, Any]:
         """Get the full PCB layer stackup information.
 
         Returns copper layers with thickness, dielectric type/height/constant,
         and board name.
+
+        This is the pre-AD19 view (one dielectric under each copper layer).
+        It can disagree with the real stack: on AD 25.8.1 it read back a
+        stack the Layer Stack Manager showed corrupt. pcb_physical_stack
+        reads the AD19+ stack live; pcb_stack_from_file reads a saved one.
 
         Returns:
             Dictionary with "layers" array (each with name, order,
@@ -6075,7 +6147,8 @@ def register_pcb_tools(mcp):
         }
 
     @mcp.tool()
-    async def pcb_add_layer(layer: str, above: str = "", below: str = "") -> dict[str, Any]:
+    async def pcb_add_layer(layer: str, above: str = "", below: str = "",
+                            legacy_stack_write: bool = False) -> dict[str, Any]:
         """Insert a copper layer into the PCB layer stack.
 
         Valid names include MidLayer1..MidLayer30 (signal layers) and
@@ -6088,10 +6161,15 @@ def register_pcb_tools(mcp):
             layer: Layer name, e.g. "MidLayer1", "InternalPlane1"
             above: Put it directly above this layer.
             below: Put it directly below this layer.
+            legacy_stack_write: required. The write goes through the
+                pre-AD19 stack interface, which corrupted the stack on
+                AD 25.8.1; without it the call is refused.
 
         Returns:
             ``layer`` and ``stack_order``, the copper layers top down.
         """
+        if not legacy_stack_write:
+            return _legacy_stack_refusal("pcb_add_layer")
         if above.strip() and below.strip():
             return {"ok": False, "reason": "give above or below, not both"}
         params: dict[str, Any] = {"layer": layer}
@@ -6099,10 +6177,14 @@ def register_pcb_tools(mcp):
             params["above"] = above.strip()
         if below.strip():
             params["below"] = below.strip()
-        return await get_bridge().send_command_async("pcb.add_layer", params)
+        result = await get_bridge().send_command_async("pcb.add_layer", params)
+        if isinstance(result, dict):
+            result.setdefault("verify", _VERIFY_NOTE)
+        return result
 
     @mcp.tool()
-    async def pcb_remove_layer(layer: str) -> dict[str, Any]:
+    async def pcb_remove_layer(layer: str,
+                               legacy_stack_write: bool = False) -> dict[str, Any]:
         """Remove a copper layer from the PCB layer stack.
 
         Calls IPCB_LayerStack.RemoveFromStack on the requested layer.
@@ -6110,14 +6192,19 @@ def register_pcb_tools(mcp):
 
         Args:
             layer: Layer name, e.g. "MidLayer1", "InternalPlane2"
+            legacy_stack_write: required, as for pcb_add_layer.
 
         Returns:
             Dictionary confirming the layer was removed.
         """
+        if not legacy_stack_write:
+            return _legacy_stack_refusal("pcb_remove_layer")
         bridge = get_bridge()
         result = await bridge.send_command_async(
             "pcb.remove_layer", {"layer": layer}
         )
+        if isinstance(result, dict):
+            result.setdefault("verify", _VERIFY_NOTE)
         return result
 
     @mcp.tool()
@@ -6129,6 +6216,7 @@ def register_pcb_tools(mcp):
         dielectric_height_mils: float = 0,
         dielectric_constant: float = 0.0,
         dielectric_material: str = "",
+        legacy_stack_write: bool = False,
     ) -> dict[str, Any]:
         """Tune properties on an existing copper layer.
 
@@ -6152,10 +6240,18 @@ def register_pcb_tools(mcp):
                 fractions are kept
             dielectric_constant: New Dk value (optional)
             dielectric_material: New dielectric material string (optional)
+            legacy_stack_write: required for any dielectric_* field. Those
+                go through the pre-AD19 "dielectric below" model, which on
+                AD 25.8.1 split and corrupted the real dielectric layers.
+                Name and copper thickness need no flag.
 
         Returns:
             Dictionary confirming the changes.
         """
+        touches_dielectric = bool(dielectric_type or dielectric_height_mils
+                                  or dielectric_constant or dielectric_material)
+        if touches_dielectric and not legacy_stack_write:
+            return _legacy_stack_refusal("pcb_modify_layer (dielectric fields)")
         bridge = get_bridge()
         params: dict[str, str] = {"layer": layer}
         if name:
@@ -6171,6 +6267,8 @@ def register_pcb_tools(mcp):
         if dielectric_material:
             params["dielectric_material"] = dielectric_material
         result = await bridge.send_command_async("pcb.modify_layer", params)
+        if touches_dielectric and isinstance(result, dict):
+            result.setdefault("verify", _VERIFY_NOTE)
         return result
 
     @mcp.tool()
@@ -6212,6 +6310,7 @@ def register_pcb_tools(mcp):
     @mcp.tool()
     async def pcb_apply_stackup_template(
         template: str, dry_run: bool = True,
+        legacy_stack_write: bool = False,
     ) -> dict[str, Any]:
         """Give the active board a fab stack-up's thicknesses and Dk.
 
@@ -6227,6 +6326,10 @@ def register_pcb_tools(mcp):
         Args:
             template: stack-up name, e.g. "JLC04161H-7628"
             dry_run: True to only plan (default)
+            legacy_stack_write: required with ``dry_run=False``. Every
+                call is a pcb_modify_layer dielectric write through the
+                pre-AD19 stack interface, which corrupted the stack on
+                AD 25.8.1; the read-back here uses the same old view.
 
         Returns:
             ``{"ok", "template", "calls", "dry_run"}``, plus per-layer
@@ -6240,6 +6343,10 @@ def register_pcb_tools(mcp):
         plan = fab_library.plan_apply(board, template)
         if not plan["ok"] or dry_run:
             return {**plan, "dry_run": dry_run}
+        if not legacy_stack_write:
+            return {**_legacy_stack_refusal("pcb_apply_stackup_template"),
+                    "template": plan["template"], "calls": plan["calls"],
+                    "dry_run": False}
         results, changed, not_changed = [], [], []
         for call in plan["calls"]:
             params = {k: (f"{v:g}" if isinstance(v, float) else str(v))
@@ -6254,7 +6361,8 @@ def register_pcb_tools(mcp):
             (changed if ok else not_changed).append(call["layer"])
         return {"ok": not not_changed, "template": plan["template"],
                 "dry_run": False, "calls": plan["calls"], "results": results,
-                "changed": changed, "not_changed": not_changed}
+                "changed": changed, "not_changed": not_changed,
+                "verify": _VERIFY_NOTE}
 
     @mcp.tool()
     async def pcb_set_plane_net(layer: str, net: str) -> dict[str, Any]:

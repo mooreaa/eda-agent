@@ -38,6 +38,11 @@ Done in 2026.10.27.102: mainline merge, 4 (refusal half), 5, 11, 22, 24, 25, 26.
 
 | # | Item | Size | Notes |
 |---|------|------|-------|
+| S1 | whole-stack write: build a planned stack (copper + dielectrics, any order) through MasterLayerStack, read back, undo on mismatch | L | needs `pcb_physical_stack` proven on 25.8 first |
+| S2 | the LSM showed a stack unlike the saved file (inverted, non-conductive copper): find out why | M | live, scratch board |
+| E1 | ECO "Footprint Not Found" for a footprint added to a project PcbLib this session; survives reopen, re-add, project reopen. Same lib also listed under an `M:` path. Need a lookup refresh or an ECO-free footprint swap from an explicit library | M | from the Rosen session, 10-27 |
+| P1 | `proj_close(save=True)` writes every member document (12 sheets, 10 unchanged): save only modified ones | S | from the Rosen session, 10-27 |
+| S3 | `.stackup` export/import for the Layer Stack Manager | M | optional |
 | 24b | `proj_print_all_variants` still sends `project.export_pdf` per variant (print dialog) | S | found 10-27 |
 | 4b | close a phantom copy itself (needs a live probe of how to reach it) | S | 4 now refuses only |
 | 17 | writable-property list per object type in `tool_guide` | M | seed from Rosen CLAUDE.md |
@@ -51,6 +56,20 @@ Done in 2026.10.27.102: mainline merge, 4 (refusal half), 5, 11, 22, 24, 25, 26.
 | 16 | harness entries | L | API may not allow |
 
 ## Releases
+
+### 2026.10.27.103 (not deployed; includes .102)
+
+From the Rosen session, 10-27: layer-stack writes on AD 25.8.1 and the Description key.
+Smoke tests: Appendix U.
+- New offline `pcb_stack_from_file`: the saved V9 stack plus the legacy chain, with disagreements
+  flagged. Run it on the Rosen board's commits f1e4aeb (broken) and afe927c (restored): it fails
+  the first and passes the second.
+- `pcb_add_layer` / `pcb_remove_layer` / `pcb_modify_layer` dielectric fields /
+  `pcb_apply_stackup_template` apply refuse without `legacy_stack_write=True`.
+- `sch_set_components_parameters` `Description` writes ComponentDescription (Pascal).
+- Open: whether upstream's `pcb_physical_stack` / `pcb_set_dielectric` (AD19+ MasterLayerStack)
+  work on AD 25.8.1. Read-only test on a scratch board first. If they do, a whole-stack write
+  (item S1) can be built on them.
 
 ### 2026.10.27.102 (not deployed)
 

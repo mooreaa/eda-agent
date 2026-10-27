@@ -73,6 +73,6 @@ def test_one_ounce_copper_reaches_the_script(monkeypatch):
     pcb_tools.register_pcb_tools(mcp)
     asyncio.run(mcp.tools["pcb_modify_layer"](
         layer="TopLayer", copper_thickness_mils=1.378,
-        dielectric_height_mils=4.33))
+        dielectric_height_mils=4.33, legacy_stack_write=True))
     assert sent[0]["copper_thickness_mils"] == "1.378"
     assert sent[0]["dielectric_height_mils"] == "4.33"

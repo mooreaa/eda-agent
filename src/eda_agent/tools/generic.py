@@ -1116,7 +1116,10 @@ def register_generic_tools(mcp):
             stamps: One dict per component: ``designator`` plus any
                 parameter key/values, e.g. ``{"designator": "R1",
                 "Value": "10k", "MPN": "..."}``. A parameter the part
-                lacks is created.
+                lacks is created. ``Description`` (or
+                ``ComponentDescription``) writes the part's own
+                description, not a parameter of that name, which Altium
+                drops on reload.
             sheet_path: Optional SchDoc path; default the focused one.
 
         Returns:

@@ -12623,6 +12623,15 @@ Begin
                                           with only the Comment written. }
                                         SetExistingCompParamText(Comp, 'Value', Val);
                                     End
+                                    Else If (Key = 'Description') Or
+                                            (Key = 'ComponentDescription') Then
+                                    Begin
+                                        { A parameter named Description is
+                                          dropped by Altium on reload, and the
+                                          part's own Description never changed
+                                          (Rosen top sheet P1-P5, 2026-10-27). }
+                                        Try Comp.ComponentDescription := Val; Except End;
+                                    End
                                     Else If Key = 'Footprint' Then
                                     Begin
                                         { Was skipped silently while the tool

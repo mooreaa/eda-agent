@@ -1078,7 +1078,8 @@ def test_stack_manager_tools_send_and_refuse(monkeypatch):
                 differential=False)
     assert s == [("pcb.impedance_profile", {"action": "create", "profile": "Z50",
                                             "target_ohms": "50.0", "differential": "false"})]
-    _, s = sent("pcb_add_layer", layer="MidLayer1", below="Top Layer")
+    _, s = sent("pcb_add_layer", layer="MidLayer1", below="Top Layer",
+                legacy_stack_write=True)
     assert s == [("pcb.add_layer", {"layer": "MidLayer1", "below": "Top Layer"})]
     for tool, kwargs in (("pcb_physical_stack", {"style": -1}),
                          ("pcb_set_dielectric", {"layer": "D"}),
@@ -1089,7 +1090,9 @@ def test_stack_manager_tools_send_and_refuse(monkeypatch):
                          ("pcb_impedance_profile_layer", {"profile": "Z", "layer": " "}),
                          ("pcb_impedance_profile_layer", {"profile": "Z", "layer": "L",
                                                           "min_width_mils": -1}),
-                         ("pcb_add_layer", {"layer": "MidLayer1", "above": "A", "below": "B"}),
+                         ("pcb_add_layer", {"layer": "MidLayer1", "above": "A", "below": "B",
+                                            "legacy_stack_write": True}),
+                         ("pcb_add_layer", {"layer": "MidLayer1", "below": "Top Layer"}),
                          ("pcb_via_structures", {"limit": 0})):
         result, s = sent(tool, **kwargs)
         assert s == [] and result["ok"] is False, (tool, kwargs)

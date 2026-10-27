@@ -1079,13 +1079,20 @@ _RECIPES: tuple[dict[str, Any], ...] = (
                  ("insert", "layer"), ("back", "drill"), ("via", "plugged")),
         "document_kind": "board",
         "backends": ("altium",),
-        "use": ["pcb_physical_stack", "pcb_set_dielectric", "pcb_add_layer",
+        "use": ["pcb_physical_stack", "pcb_set_dielectric", "pcb_stack_from_file",
+                "pcb_add_layer",
                 "pcb_impedance_profile", "pcb_impedance_profile_layer",
                 "pcb_get_impedance_profiles", "pcb_via_structures"],
-        "avoid": [("pcb_modify_layer", "edits a copper layer's own settings")],
+        "avoid": [("pcb_modify_layer", "edits a copper layer's own settings; "
+                   "its dielectric fields write the pre-AD19 view"),
+                  ("pcb_get_layer_stackup", "reads the pre-AD19 view, which "
+                   "can disagree with the real stack")],
         "note": ("pcb_physical_stack lists every layer with Z and thickness; "
                  "pcb_set_dielectric sets Dk, Df, thickness and stiffener on a "
-                 "dielectric or mask layer; pcb_add_layer takes above / below."),
+                 "dielectric or mask layer; pcb_add_layer takes above / below "
+                 "and legacy_stack_write=True, since it inserts through the "
+                 "pre-AD19 interface that corrupted a stack on AD 25.8.1. "
+                 "After any stack change, save and run pcb_stack_from_file."),
     },
     {
         "task": "Highlight nets in a colour on the board",
