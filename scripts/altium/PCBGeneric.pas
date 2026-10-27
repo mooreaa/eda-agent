@@ -970,7 +970,13 @@ Begin
     Try Comp.Comment.SetState_UnionIndex := UIndex; Except End;
     GIter := Comp.GroupIterator_Create;
     Try
-        GIter.AddFilter_ObjectSet(AllObjects);
+        { The kinds a component owns that carry a union index, never      }
+        { AllObjects: an unfiltered walk can hand back an object the       }
+        { scripting engine cannot cast, an access violation no Try        }
+        { catches (#44).                                                   }
+        GIter.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject,
+            ePadObject, eViaObject, eFillObject, eRegionObject,
+            eTextObject, eComponentBodyObject));
         GIter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
         Prim := GIter.FirstPCBObject;
         While Prim <> Nil Do
@@ -2336,6 +2342,15 @@ Begin
         PropName := Copy(Assignment, 1, EqPos - 1);
         PropValue := Copy(Assignment, EqPos + 1, Length(Assignment));
         SetPCBProperty(Obj, PropName, PropValue);
+        { A lone SolderMaskExpansion is for both sides (issue #61): it is  }
+        { the top value once the sides are separate, so on such a via or   }
+        { pad the old bottom would stay behind. As set_pad_properties does, }
+        { the bottom follows unless the same set string gives it a value.  }
+        If (PropName = 'SolderMaskExpansion') And IsFloatStr(PropValue)
+            And (Pos('SolderMaskBottomExpansion=', SetStr) = 0) Then
+        Begin
+            Try PCBSetMask(Obj, 'SolderMaskBottomExpansion', PropValue); Except End;
+        End;
     End;
 End;
 

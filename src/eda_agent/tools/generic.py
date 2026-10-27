@@ -13,6 +13,7 @@ from typing import Any, Optional
 from ..bridge.payload import payload_safe
 from ..bridge import get_bridge
 from ..safety import refuse_process, untrusted_text_note
+from .library import _mils
 from .pin_hints import pin_location_hint
 from ..scope import to_wire as scope_to_wire
 from .bulk_hints import BulkHintTracker
@@ -1390,7 +1391,7 @@ def register_generic_tools(mcp):
 
     @mcp.tool()
     async def sch_stub_pins(
-        stub_length_mils: int = 100,
+        stub_length_mils: float = 100,
         only_designators: Optional[list[str]] = None,
     ) -> dict[str, Any]:
         """Draw a short wire stub + net label on every unconnected schematic pin.
@@ -1432,7 +1433,7 @@ def register_generic_tools(mcp):
 
         result = await bridge.send_command_async(
             "generic.stub_pins",
-            {"pins": "|".join(records), "stub_length_mils": str(stub_length_mils)},
+            {"pins": "|".join(records), "stub_length_mils": _mils(stub_length_mils)},
             timeout=120.0,
         )
         if isinstance(result, dict):
@@ -3270,20 +3271,23 @@ def register_generic_tools(mcp):
         y: int,
         net_name: str = "",
         probe_method: str = "probed_nets_only",
+        name: str = "",
     ) -> dict[str, Any]:
-        """Place a probe/measurement marker on the active schematic.
+        """Place a simulation voltage probe on the active schematic.
 
-        Probes mark nodes for SPICE/simulation output. Attach one to a
-        wire to declare "capture voltage / current at this point" in
-        simulation runs.
+        The probe measures the voltage of the net under it, so place it
+        on a wire. It is the probe Altium's Place > Probes > Voltage
+        makes: a simulation run reports and plots it, and
+        sim_get_probes lists it with the node it resolved to.
 
         Args:
-            x, y: Probe location in mils.
-            net_name: Optional explicit net label text.
-            probe_method: "probed_nets_only" (default) or "all_nets".
+            x, y: Probe location in mils, on a wire.
+            net_name: Echoed back; the net comes from the wire.
+            probe_method: Echoed back.
+            name: A name shown instead of the net's (ProbeCustomName).
 
         Returns:
-            Dict with success, x, y, net_name.
+            Dict with success, x, y, net_name, name, measures.
         """
         bridge = get_bridge()
         return await bridge.send_command_async(
@@ -3292,6 +3296,7 @@ def register_generic_tools(mcp):
                 "x": str(x), "y": str(y),
                 "net_name": net_name,
                 "probe_method": probe_method,
+                "name": name,
             },
         )
 
@@ -3577,8 +3582,8 @@ def register_generic_tools(mcp):
             fields = [
                 f"library_path={payload_safe(p.get('library_path', ''))}",
                 f"lib_reference={payload_safe(lib_ref)}",
-                f"x={int(p.get('x', 0))}",
-                f"y={int(p.get('y', 0))}",
+                f"x={_mils(p.get('x', 0))}",
+                f"y={_mils(p.get('y', 0))}",
                 f"rotation={int(p.get('rotation', 0))}",
             ]
             if p.get("designator"):
@@ -3647,8 +3652,8 @@ def register_generic_tools(mcp):
                 continue
             fields = [
                 f"design_item_id={payload_safe(item_id)}",
-                f"x={int(p.get('x', 0))}",
-                f"y={int(p.get('y', 0))}",
+                f"x={_mils(p.get('x', 0))}",
+                f"y={_mils(p.get('y', 0))}",
                 f"rotation={int(p.get('rotation', 0))}",
             ]
             if p.get("designator"):

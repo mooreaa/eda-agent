@@ -4987,26 +4987,26 @@ End;
 
 Function Gen_MeasureDistance(Params : String; RequestId : String) : String;
 Var
-    X1, Y1, X2, Y2 : Integer;
-    DX, DY : Integer;
+    X1, Y1, X2, Y2 : Double;
+    DX, DY : Double;
     Distance : Double;
 Begin
-    X1 := StrToIntDef(ExtractJsonValue(Params, 'x1'), 0);
-    Y1 := StrToIntDef(ExtractJsonValue(Params, 'y1'), 0);
-    X2 := StrToIntDef(ExtractJsonValue(Params, 'x2'), 0);
-    Y2 := StrToIntDef(ExtractJsonValue(Params, 'y2'), 0);
+    X1 := StrToFloatDef(ExtractJsonValue(Params, 'x1'), 0);
+    Y1 := StrToFloatDef(ExtractJsonValue(Params, 'y1'), 0);
+    X2 := StrToFloatDef(ExtractJsonValue(Params, 'x2'), 0);
+    Y2 := StrToFloatDef(ExtractJsonValue(Params, 'y2'), 0);
 
     DX := X2 - X1;
     DY := Y2 - Y1;
     Distance := Sqrt(DX * DX + DY * DY);
 
     Result := BuildSuccessResponse(RequestId,
-        '{"x1":' + IntToStr(X1) +
-        ',"y1":' + IntToStr(Y1) +
-        ',"x2":' + IntToStr(X2) +
-        ',"y2":' + IntToStr(Y2) +
-        ',"dx":' + IntToStr(DX) +
-        ',"dy":' + IntToStr(DY) +
+        '{"x1":' + FloatToJsonStr(X1) +
+        ',"y1":' + FloatToJsonStr(Y1) +
+        ',"x2":' + FloatToJsonStr(X2) +
+        ',"y2":' + FloatToJsonStr(Y2) +
+        ',"dx":' + FloatToJsonStr(DX) +
+        ',"dy":' + FloatToJsonStr(DY) +
         ',"distance_mils":' + FloatToJsonStr(Distance) +
         ',"distance_mm":' + FloatToJsonStr(Distance * 0.0254) + '}');
 End;
@@ -6102,7 +6102,8 @@ Var
     Sym : ISch_SheetSymbol;
     Entry : ISch_SheetEntry;
     SheetNameStr, EntryName, IOStr, SideStr, ThisName : String;
-    WantSide, GotSide, GotX, GotY : Integer;
+    WantSide, GotSide : Integer;
+    GotX, GotY : Double;
     GotDist : Double;
     DistFromTop : Double;
     Found, Placed : Boolean;
@@ -6229,8 +6230,8 @@ Begin
     GotX := 0;
     GotY := 0;
     Try
-        GotX := CoordToMils(Entry.Location.X);
-        GotY := CoordToMils(Entry.Location.Y);
+        GotX := CoordToMilsF(Entry.Location.X);
+        GotY := CoordToMilsF(Entry.Location.Y);
     Except End;
 
     GotFont := 0;
@@ -6258,8 +6259,8 @@ Begin
             JsonInt('actual_side', GotSide) + ',' +
             JsonFloat('actual_distance_from_top', GotDist) + ',' +
             JsonInt('font_id', GotFont) + ',' +
-            JsonInt('x', GotX) + ',' +
-            JsonInt('y', GotY) + ',' +
+            JsonFloat('x', GotX) + ',' +
+            JsonFloat('y', GotY) + ',' +
             JsonStr('note', 'x and y are read back from the placed entry. '
                 + 'If positioned_as_asked is false the entry exists but sits '
                 + 'where Altium put it; obj_modify on eSheetEntry can set '
@@ -6894,7 +6895,8 @@ Var
     Param : ISch_BasicContainer;
     JsonItems, ChildJson, PName, PValue, DirName : String;
     First, FirstChild : Boolean;
-    Count, X, Y : Integer;
+    Count : Integer;
+    X, Y : Double;
 Begin
     SchDoc := SchServer.GetCurrentSchDocument;
     If SchDoc = Nil Then
@@ -6919,8 +6921,8 @@ Begin
             DirName := '';
             X := 0; Y := 0;
             Try DirName := ParamSet.Name; Except End;
-            Try X := CoordToMils(ParamSet.Location.X); Except End;
-            Try Y := CoordToMils(ParamSet.Location.Y); Except End;
+            Try X := CoordToMilsF(ParamSet.Location.X); Except End;
+            Try Y := CoordToMilsF(ParamSet.Location.Y); Except End;
 
             ChildJson := '';
             FirstChild := True;
@@ -6944,7 +6946,7 @@ Begin
             Except End;
 
             JsonItems := JsonItems + '{"name":"' + EscapeJsonString(DirName) + '",'
-                + '"x":' + IntToStr(X) + ',"y":' + IntToStr(Y) + ','
+                + '"x":' + FloatToJsonStr(X) + ',"y":' + FloatToJsonStr(Y) + ','
                 + '"parameters":[' + ChildJson + ']}';
             Inc(Count);
             ParamSet := OuterIter.NextSchObject;
@@ -7234,19 +7236,19 @@ Var
     Obj : ISch_GraphicalObject;
     Comp : ISch_Component;
     CompLoc : TLocation;
-    WantX, WantY : Integer;
+    WantX, WantY : Double;
     Narrow, Hit : Boolean;
 Begin
     Result := Nil;
     If SchDoc = Nil Then Exit;
 
-    Narrow := (LocX <> '') And (LocY <> '') And IsIntStr(LocX) And IsIntStr(LocY);
+    Narrow := (LocX <> '') And (LocY <> '') And IsFloatStr(LocX) And IsFloatStr(LocY);
     WantX := 0;
     WantY := 0;
     If Narrow Then
     Begin
-        WantX := StrToIntDef(LocX, 0);
-        WantY := StrToIntDef(LocY, 0);
+        WantX := StrToFloatDef(LocX, 0);
+        WantY := StrToFloatDef(LocY, 0);
     End;
 
     Iterator := SchDoc.SchIterator_Create;
@@ -7264,8 +7266,8 @@ Begin
                     { Read through a materialized local. This engine does not }
                     { accept a record field reached straight off a property.  }
                     CompLoc := Comp.Location;
-                    Hit := (CoordToMils(CompLoc.X) = WantX)
-                       And (CoordToMils(CompLoc.Y) = WantY);
+                    Hit := (Abs(CoordToMilsF(CompLoc.X) - WantX) < 0.0001)
+                       And (Abs(CoordToMilsF(CompLoc.Y) - WantY) < 0.0001);
                 End;
                 If Hit Then Result := Comp;
             End;
@@ -7349,9 +7351,10 @@ Var
     Data, PinList : String;
     First : Boolean;
     PinNum, PinName : String;
-    PinX, PinY : Integer;
-    PinOrient, PinLenMils : Integer;
-    CompX, CompY : Integer;
+    PinX, PinY, PinLenMils : Double;
+    PinXC, PinYC, PinLenC : TCoord;
+    PinOrient : Integer;
+    CompX, CompY : Double;
     CompLoc : TLocation;
     SymbolCount, OwnerPart : Integer;
 Begin
@@ -7423,8 +7426,8 @@ Begin
                 { slice; Pin.Location already reflects the placed orientation }
                 { because Altium updates it after RotateAroundXY / mirror.)   }
                 CompLoc := Comp.Location;
-                CompX := CoordToMils(CompLoc.X);
-                CompY := CoordToMils(CompLoc.Y);
+                CompX := CoordToMilsF(CompLoc.X);
+                CompY := CoordToMilsF(CompLoc.Y);
 
                 PinIter := Comp.SchIterator_Create;
                 Try
@@ -7436,14 +7439,14 @@ Begin
                         Begin
                         PinNum := '';
                         PinName := '';
-                        PinX := 0;
-                        PinY := 0;
+                        PinXC := 0;
+                        PinYC := 0;
                         PinOrient := 0;
-                        PinLenMils := 0;
+                        PinLenC := 0;
                         Try PinNum := Pin.Designator; Except End;
                         Try PinName := Pin.Name; Except End;
-                        Try PinX := CoordToMils(Pin.Location.X); Except End;
-                        Try PinY := CoordToMils(Pin.Location.Y); Except End;
+                        Try PinXC := Pin.Location.X; Except End;
+                        Try PinYC := Pin.Location.Y; Except End;
                         { Pin.Orientation is the TRotationBy90 enum:           }
                         { 0=right (eRotate0),   1=up (eRotate90),               }
                         { 2=left (eRotate180),  3=down (eRotate270).            }
@@ -7452,17 +7455,20 @@ Begin
                         { from Pin.Location must extend along this vector by   }
                         { Pin.PinLength to reach the electrical hot end.       }
                         Try PinOrient := Pin.Orientation; Except End;
-                        Try PinLenMils := CoordToMils(Pin.PinLength); Except End;
+                        Try PinLenC := Pin.PinLength; Except End;
+                        PinX := CoordToMilsF(PinXC);
+                        PinY := CoordToMilsF(PinYC);
+                        PinLenMils := CoordToMilsF(PinLenC);
 
                         If Not First Then PinList := PinList + ',';
                         First := False;
                         PinList := PinList +
                             '{"pin_number":"' + EscapeJsonString(PinNum) +
                             '","pin_name":"' + EscapeJsonString(PinName) +
-                            '","x_mils":' + IntToStr(PinX) +
-                            ',"y_mils":' + IntToStr(PinY) +
+                            '","x_mils":' + FloatToJsonStr(PinX) +
+                            ',"y_mils":' + FloatToJsonStr(PinY) +
                             ',"orientation":' + IntToStr(PinOrient) +
-                            ',"pin_length_mils":' + IntToStr(PinLenMils) +
+                            ',"pin_length_mils":' + FloatToJsonStr(PinLenMils) +
                             { x_mils and y_mils are Pin.Location, which is the
                               BODY-SIDE ROOT. These are the point a wire has
                               to sit on. Handed over rather than left to the
@@ -7470,12 +7476,12 @@ Begin
                               direction gets reversed and the result is silent
                               geometry that does not connect. }
                             ',"connection_x_mils":'
-                                + IntToStr(PinEndX(PinX, PinOrient, PinLenMils)) +
+                                + FloatToJsonStr(CoordToMilsF(PinEndX(PinXC, PinOrient, PinLenC))) +
                             ',"connection_y_mils":'
-                                + IntToStr(PinEndY(PinY, PinOrient, PinLenMils)) +
+                                + FloatToJsonStr(CoordToMilsF(PinEndY(PinYC, PinOrient, PinLenC))) +
                             ',"owner_part_id":' + IntToStr(OwnerPart) +
-                            ',"owner_x":' + IntToStr(CompX) +
-                            ',"owner_y":' + IntToStr(CompY) + '}';
+                            ',"owner_x":' + FloatToJsonStr(CompX) +
+                            ',"owner_y":' + FloatToJsonStr(CompY) + '}';
                         End;
 
                         Pin := PinIter.NextSchObject;
@@ -7514,7 +7520,8 @@ Var
     X, Y, WantWidth : Double;
     SchDoc : ISch_Document;
     SchPort : ISch_Port;
-    FontToUse, GotFont, GotWidth : Integer;
+    FontToUse, GotFont : Integer;
+    GotWidth : Double;
     GotAuto : Boolean;
 Begin
     Name := ExtractJsonValue(Params, 'name');
@@ -7587,7 +7594,7 @@ Begin
     GotWidth := 0;
     GotAuto := True;
     Try GotFont := SchPort.FontId; Except End;
-    Try GotWidth := CoordToMils(SchPort.Width); Except End;
+    Try GotWidth := CoordToMilsF(SchPort.Width); Except End;
     Try GotAuto := SchPort.AutoSize; Except End;
 
     { A WRITE THAT DOES NOT DIRTY THE DOCUMENT DID NOT HAPPEN, as far as
@@ -7601,7 +7608,7 @@ Begin
     Result := BuildSuccessResponse(RequestId,
         '{"success":true,"name":"' + EscapeJsonString(Name) +
         '","x":' + FloatToJsonStr(X) + ',"y":' + FloatToJsonStr(Y) +
-        ',' + JsonInt('font_id', GotFont) + ',' + JsonInt('width', GotWidth) +
+        ',' + JsonInt('font_id', GotFont) + ',' + JsonFloat('width', GotWidth) +
         ',' + JsonBool('auto_size', GotAuto) + '}');
 End;
 
@@ -10027,16 +10034,42 @@ Begin
 End;
 
 {..............................................................................}
-{ Gen_PlaceProbe - Place an ISch_Probe marker for SPICE / simulation            }
-{ measurement nodes. Probe sits at a wire and names the node to measure.       }
-{ Params: x, y, net_name, probe_method (all_nets | probed_nets_only, default    }
-{         probed_nets_only)                                                    }
+{ AddProbeParam - Add one named parameter to a probe, offset from its spot.     }
+{..............................................................................}
+
+Procedure AddProbeParam(Probe : ISch_GraphicalObject; PName, PText : String;
+    Hidden : Boolean; DX, DY : Double);
+Var
+    Param : ISch_Parameter;
+Begin
+    Param := SchServer.SchObjectFactory(eParameter, eCreate_Default);
+    If Param = Nil Then Exit;
+    Param.Name := PName;
+    Param.Text := PText;
+    Try Param.IsHidden := Hidden; Except End;
+    Try Param.Location := Point(Probe.Location.X + MilsToCoordF(DX),
+        Probe.Location.Y + MilsToCoordF(DY)); Except End;
+    Probe.AddSchObject(Param);
+    SchRegisterObject(Probe, Param);
+End;
+
+{..............................................................................}
+{ Gen_PlaceProbe - Place a simulation voltage probe on a wire.                  }
+{ Params: x, y, name (shown instead of the net name), net_name and            }
+{         probe_method (echoed back).                                         }
+{                                                                              }
+{ MEASURED on AD 26.11: Altium's own voltage probe (Sch:PlaceProbe with       }
+{ ProbeType=SimulationProbe|MeasurementType=Voltage) is a probe carrying the  }
+{ parameters SimulationProbe=V (shown), ProbeVoltage=True (hidden),           }
+{ ProbeName, ProbeCustomName (hidden) and ProbeValueDisplay. A bare probe got  }
+{ only ProbeValueDisplay, and the simulator, which finds probes by their      }
+{ SimulationProbe parameter, passed it over.                                  }
 {..............................................................................}
 
 Function Gen_PlaceProbe(Params : String; RequestId : String) : String;
 Var
     X, Y : Double;
-    NetName, MethodStr : String;
+    NetName, MethodStr, CustomName : String;
     SchDoc : ISch_Document;
     Probe : ISch_GraphicalObject;
 Begin
@@ -10044,6 +10077,7 @@ Begin
     Y := StrToFloatDef(ExtractJsonValue(Params, 'y'), 0);
     NetName := ExtractJsonValue(Params, 'net_name');
     MethodStr := LowerCase(ExtractJsonValue(Params, 'probe_method'));
+    CustomName := ExtractJsonValue(Params, 'name');
 
     SchDoc := SchServer.GetCurrentSchDocument;
     If SchDoc = Nil Then
@@ -10064,11 +10098,13 @@ Begin
     { ISch_Probe exposes essentially nothing settable from DelphiScript:
       ``Text``, ``NetName`` and ``ProbeMethod`` all raise "Undeclared
       identifier" at compile (Try/Except cannot catch). The probe
-      auto-picks up the net of the wire it lands on, and the default
-      probe method ("probed nets only") is what we want anyway.
-      ``net_name`` and ``probe_method`` from the request are accepted
-      for forward compatibility but currently echoed back in the
-      response without being applied. }
+      picks up the net of the wire it lands on. ``net_name`` and
+      ``probe_method`` are echoed back without being applied. What makes
+      it a simulation probe is its parameters, set as Altium sets them. }
+    AddProbeParam(Probe, 'SimulationProbe', 'V', False, 100, 100);
+    AddProbeParam(Probe, 'ProbeVoltage', 'True', True, 0, 200);
+    AddProbeParam(Probe, 'ProbeName', '', False, 0, 100);
+    AddProbeParam(Probe, 'ProbeCustomName', CustomName, True, 0, 100);
 
     SchDoc.RegisterSchObjectInContainer(Probe);
     SchRegisterObject(SchDoc, Probe);
@@ -10085,7 +10121,118 @@ Begin
     If SchDoc <> Nil Then MarkDocDirtyByPath(SchDoc.DocumentName);
     Result := BuildSuccessResponse(RequestId,
         '{"success":true,"x":' + FloatToJsonStr(X) + ',"y":' + FloatToJsonStr(Y)
-        + ',"net_name":"' + EscapeJsonString(NetName) + '"}');
+        + ',"net_name":"' + EscapeJsonString(NetName) + '",'
+        + '"name":"' + EscapeJsonString(CustomName) + '","measures":"voltage"}');
+End;
+
+{..............................................................................}
+{ ProbeJson - One probe: where it is and every parameter it carries.          }
+{..............................................................................}
+
+Function ProbeJson(Probe : ISch_GraphicalObject; SheetPath : String) : String;
+Var
+    Iter : ISch_Iterator;
+    Param : ISch_Parameter;
+    ParamsJson, Kind : String;
+    First : Boolean;
+Begin
+    ParamsJson := '';
+    Kind := '';
+    First := True;
+    Iter := Probe.SchIterator_Create;
+    Try
+        Iter.AddFilter_ObjectSet(MkSet(eParameter));
+        Param := Iter.FirstSchObject;
+        While Param <> Nil Do
+        Begin
+            If Not First Then ParamsJson := ParamsJson + ',';
+            First := False;
+            ParamsJson := ParamsJson + '"' + EscapeJsonString(Param.Name) + '":"'
+                + EscapeJsonString(Param.Text) + '"';
+            If SameText(Param.Name, 'SimulationProbe') Then Kind := Param.Text;
+            Param := Iter.NextSchObject;
+        End;
+    Finally
+        Probe.SchIterator_Destroy(Iter);
+    End;
+    Result := '{"sheet":"' + EscapeJsonString(SheetPath) + '",'
+        + '"x":' + FloatToJsonStr(CoordToMilsF(Probe.Location.X)) + ','
+        + '"y":' + FloatToJsonStr(CoordToMilsF(Probe.Location.Y)) + ','
+        + JsonBool('simulation', Kind <> '') + ','
+        + '"kind":"' + EscapeJsonString(Kind) + '",'
+        + '"parameters":{' + ParamsJson + '}}';
+End;
+
+{..............................................................................}
+{ Gen_GetProbes - Every probe on the focused project's sheets.                 }
+{ Params: none.                                                               }
+{                                                                              }
+{ Each probe with its location and parameters: SimulationProbe (V, I, P, VD+  }
+{ or VD-) marks one the simulator uses, ProbeName is the node Altium resolved }
+{ ("Empty Probe" off a wire), ProbeCustomName the name shown instead, and     }
+{ ProbeValueDisplay the value shown on the sheet. A sheet that is not open is }
+{ listed in not_loaded rather than read.                                      }
+{..............................................................................}
+
+Function Gen_GetProbes(Params : String; RequestId : String) : String;
+Var
+    Workspace : IWorkspace;
+    Project : IProject;
+    Doc : IDocument;
+    SchDoc : ISch_Document;
+    Iter : ISch_Iterator;
+    Probe : ISch_GraphicalObject;
+    I, Count : Integer;
+    Items, NotLoaded, SheetPath : String;
+Begin
+    Project := Nil;
+    Workspace := GetWorkspace;
+    If Workspace <> Nil Then Project := Workspace.DM_FocusedProject;
+    If Project = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PROJECT',
+            'No focused project. Activate one of the project''s schematic sheets first.');
+        Exit;
+    End;
+
+    Items := '';
+    NotLoaded := '';
+    Count := 0;
+    For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
+    Begin
+        Doc := Project.DM_LogicalDocuments(I);
+        If Doc = Nil Then Continue;
+        If Doc.DM_DocumentKind <> 'SCH' Then Continue;
+        SheetPath := Doc.DM_FullPath;
+        SchDoc := Nil;
+        Try SchDoc := SchServer.GetSchDocumentByPath(SheetPath); Except End;
+        If SchDoc = Nil Then
+        Begin
+            If NotLoaded <> '' Then NotLoaded := NotLoaded + ',';
+            NotLoaded := NotLoaded + '"' + EscapeJsonString(SheetPath) + '"';
+            Continue;
+        End;
+        Iter := SchDoc.SchIterator_Create;
+        Try
+            Iter.AddFilter_ObjectSet(MkSet(eProbe));
+            Probe := Iter.FirstSchObject;
+            While Probe <> Nil Do
+            Begin
+                If Count > 0 Then Items := Items + ',';
+                Items := Items + ProbeJson(Probe, SheetPath);
+                Inc(Count);
+                Probe := Iter.NextSchObject;
+            End;
+        Finally
+            SchDoc.SchIterator_Destroy(Iter);
+        End;
+    End;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"success":true,"project":"' + EscapeJsonString(Project.DM_ProjectFullPath) + '",'
+        + '"count":' + IntToStr(Count) + ','
+        + '"probes":[' + Items + '],'
+        + '"not_loaded":[' + NotLoaded + ']}');
 End;
 
 {..............................................................................}
@@ -11060,9 +11207,10 @@ End;
 {..............................................................................}
 { Gen_RunSimulation - Run the focused project's mixed-signal simulation and    }
 { report the results document it produced.                                   }
-{ Params: analysis (optional label, echoed back). The analyses come from the  }
-{         project's simulation setup; a project without one runs Altium's    }
-{         default, an operating point.                                       }
+{ Params: analysis (optional label, echoed back), sheet (the schematic whose  }
+{         settings to run; empty uses the sheet in front). The analyses come }
+{         from the project's simulation setup; a project without one runs    }
+{         Altium's default, an operating point.                              }
 {                                                                              }
 { MEASURED on AD 26.10.1.6: Sim:RunMixedSim, sent here before, is not a       }
 { process on this build. It ran nothing, wrote nothing, raised no message,   }
@@ -11070,6 +11218,15 @@ End;
 { is WorkspaceManager:GenerateReport with ObjectKind=Simulator, Index=1 and  }
 { Action=Run: the first simulator output of the project. A run opens its     }
 { results as a .sdf document and focuses it, so that is the proof it ran.    }
+{                                                                              }
+{ MEASURED on AD 26.11: that run did operating point, DC sweep, transient and }
+{ AC whatever the setup's on/off switches said. The Simulation Dashboard's   }
+{ run adds Kind=AdvSimNetlist and SimulationDashboardConfig=Document=<sheet>, }
+{ and with it only the analyses switched on ran (DC sweep alone, on the same }
+{ setup). Altium reads that selection at the first run after the project     }
+{ opens and keeps it until the project is reopened. So a run for a sheet    }
+{ uses the dashboard's form, and the first simulator output is used only    }
+{ when no sheet is given or in front.                                       }
 {..............................................................................}
 
 Function Gen_RunSimulation(Params : String; RequestId : String) : String;
@@ -11077,10 +11234,11 @@ Var
     Workspace : IWorkspace;
     Project : IProject;
     ServerDoc : IServerDocument;
-    AnalysisStr, Before, After, SavedStr : String;
+    AnalysisStr, Before, After, SavedStr, Sheet, RunMode : String;
     OldAge, NewAge : Integer;
 Begin
     AnalysisStr := ExtractJsonValue(Params, 'analysis');
+    Sheet := ExtractJsonValue(Params, 'sheet');
 
     Project := Nil;
     Workspace := GetWorkspace;
@@ -11094,10 +11252,26 @@ Begin
     SmartCompile(Project);
 
     Before := CurrentFocusedDocPath(0);
+    If (Sheet = '') And SameText(ExtractFileExt(Before), '.SchDoc') Then Sheet := Before;
     ResetParameters;
     AddStringParameter('ObjectKind', 'Simulator');
-    AddStringParameter('Index', '1');
-    AddStringParameter('Action', 'Run');
+    If Sheet <> '' Then
+    Begin
+        RunMode := 'sheet';
+        AddStringParameter('Kind', 'AdvSimNetlist');
+        AddStringParameter('DoEditProperties', 'False');
+        AddStringParameter('DoReportStatus', 'False');
+        AddStringParameter('Action', 'Run');
+        AddStringParameter('DefaultCaption', 'True');
+        AddStringParameter('ReturnGeneratedDocuments', 'False');
+        AddStringParameter('SimulationDashboardConfig', 'Document=' + Sheet);
+    End
+    Else
+    Begin
+        RunMode := 'project';
+        AddStringParameter('Index', '1');
+        AddStringParameter('Action', 'Run');
+    End;
     RunProcess('WorkspaceManager:GenerateReport');
     After := CurrentFocusedDocPath(0);
 
@@ -11137,6 +11311,7 @@ Begin
         '{"success":true,"ran":true,"analysis":"' + EscapeJsonString(AnalysisStr) + '",'
         + '"results_document":"' + EscapeJsonString(After) + '",'
         + '"results_saved":' + SavedStr + ','
+        + '"run_mode":"' + RunMode + '","sheet":"' + EscapeJsonString(Sheet) + '",'
         + '"note":"The analyses come from the project''s simulation setup."}');
 End;
 
@@ -11276,12 +11451,8 @@ Begin
     End
     Else
     Begin
-        If Not ServerDoc.SupportsReload Then
-        Begin
-            Result := BuildErrorResponse(RequestId, 'RELOAD_UNSUPPORTED',
-                'Altium does not reload this document: ' + FilePath);
-            Exit;
-        End;
+        { AD 26.11 reports SupportsReload False for a settings file, yet }
+        { the document loads its file again when asked.                 }
         Try Done := ServerDoc.DoFileLoad; Except Done := False; End;
         { Without this Altium still holds the old file date and asks to }
         { reload a second time.                                         }
@@ -11674,12 +11845,12 @@ End;
 { designator when one is given. Shared by the file and managed placements.    }
 {..............................................................................}
 Procedure PutLoadedComponent(SchDoc : ISch_Document; Comp : ISch_Component;
-    X : Integer; Y : Integer; Rotation : Integer; Desig : String);
+    X : Double; Y : Double; Rotation : Integer; Desig : String);
 Var
     Orientation : Integer;
 Begin
     Try SchDoc.AddSchObject(Comp); Except End;
-    Try Comp.MoveToXY(MilsToCoord(X), MilsToCoord(Y)); Except End;
+    Try Comp.MoveToXY(MilsToCoordF(X), MilsToCoordF(Y)); Except End;
     Orientation := 0;
     If Rotation = 90 Then Orientation := 1
     Else If Rotation = 180 Then Orientation := 2
@@ -11811,7 +11982,7 @@ Var
     LinkName, Tidied : String;
     FpChosen, FpChoice, DesigFont : Integer;
     TidyOn : Boolean;
-    X, Y : Integer;
+    X, Y : Double;
     SchDoc : ISch_Document;
     Comp : ISch_Component;
 Begin
@@ -11856,8 +12027,8 @@ Begin
             LibRef := GetBatchField(Op, 'lib_reference');
             Desig := GetBatchField(Op, 'designator');
             Footprint := GetBatchField(Op, 'footprint');
-            X := StrToIntDef(GetBatchField(Op, 'x'), 0);
-            Y := StrToIntDef(GetBatchField(Op, 'y'), 0);
+            X := StrToFloatDef(GetBatchField(Op, 'x'), 0);
+            Y := StrToFloatDef(GetBatchField(Op, 'y'), 0);
             Rotation := StrToIntDef(GetBatchField(Op, 'rotation'), 0);
             { Part 1 when not given: a symbol is placed as its first part   }
             { unless asked otherwise, and the part is written either way.  }
@@ -12138,8 +12309,8 @@ Begin
             Else
             Begin
                 PutLoadedComponent(SchDoc, Comp,
-                    StrToIntDef(GetBatchField(Op, 'x'), 0),
-                    StrToIntDef(GetBatchField(Op, 'y'), 0),
+                    StrToFloatDef(GetBatchField(Op, 'x'), 0),
+                    StrToFloatDef(GetBatchField(Op, 'y'), 0),
                     StrToIntDef(GetBatchField(Op, 'rotation'), 0), Desig);
                 Inc(Placed);
                 IsPlaced := True;
@@ -12423,7 +12594,8 @@ Var
     Iter, PinIter : ISch_Iterator;
     Comp : ISch_Component;
     Pin : ISch_Pin;
-    PinX, PinY, PinOrient, PinLenMils, PartId, Owner : Integer;
+    PinOrient, PartId, Owner : Integer;
+    PinX, PinY, PinLenMils : Double;
     First : Boolean;
     DataBlob : String;
 Begin
@@ -12476,10 +12648,10 @@ Begin
                         PinLenMils := 0;
                         Try PinNum := Pin.Designator; Except End;
                         Try PinName := Pin.Name; Except End;
-                        Try PinX := CoordToMils(Pin.Location.X); Except End;
-                        Try PinY := CoordToMils(Pin.Location.Y); Except End;
+                        Try PinX := CoordToMilsF(Pin.Location.X); Except End;
+                        Try PinY := CoordToMilsF(Pin.Location.Y); Except End;
                         Try PinOrient := Pin.Orientation; Except End;
-                        Try PinLenMils := CoordToMils(Pin.PinLength); Except End;
+                        Try PinLenMils := CoordToMilsF(Pin.PinLength); Except End;
 
                         If Not First Then PinList := PinList + ',';
                         First := False;
@@ -12487,10 +12659,10 @@ Begin
                             '{"refdes":"' + EscapeJsonString(RefDes) +
                             '","pin_number":"' + EscapeJsonString(PinNum) +
                             '","pin_name":"' + EscapeJsonString(PinName) +
-                            '","x_mils":' + IntToStr(PinX) +
-                            ',"y_mils":' + IntToStr(PinY) +
+                            '","x_mils":' + FloatToJsonStr(PinX) +
+                            ',"y_mils":' + FloatToJsonStr(PinY) +
                             ',"orientation":' + IntToStr(PinOrient) +
-                            ',"pin_length_mils":' + IntToStr(PinLenMils) +
+                            ',"pin_length_mils":' + FloatToJsonStr(PinLenMils) +
                             ',"part_id":' + IntToStr(PartId) + '}';
                         End;
 
@@ -15007,11 +15179,13 @@ Var
     SchDoc : ISch_Document;
     PinsStr, RecStr, Remaining, Token : String;
     Desig, PinNum, Lbl : String;
-    PipePos, CommaPos, FieldIdx, StubLen, Stubbed, Failed : Integer;
+    PipePos, CommaPos, FieldIdx, Stubbed, Failed : Integer;
+    StubLen : Double;
     Iter, PinIter : ISch_Iterator;
     Comp : ISch_Component;
     Pin : ISch_Pin;
-    PX, PY, EX, EY, Orient : Integer;
+    PX, PY, EX, EY : Double;
+    Orient : Integer;
     Found : Boolean;
     Wire : ISch_Wire;
     NetLabel : ISch_NetLabel;
@@ -15031,7 +15205,7 @@ Begin
         Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'pins parameter required');
         Exit;
     End;
-    StubLen := StrToIntDef(ExtractJsonValue(Params, 'stub_length_mils'), 100);
+    StubLen := StrToFloatDef(ExtractJsonValue(Params, 'stub_length_mils'), 100);
 
     Stubbed := 0;
     Failed := 0;
@@ -15082,8 +15256,8 @@ Begin
                             Begin
                                 If (Pin.Designator = PinNum) And PinShownOn(Comp, Pin) Then
                                 Begin
-                                    Try PX := CoordToMils(Pin.Location.X); Except End;
-                                    Try PY := CoordToMils(Pin.Location.Y); Except End;
+                                    Try PX := CoordToMilsF(Pin.Location.X); Except End;
+                                    Try PY := CoordToMilsF(Pin.Location.Y); Except End;
                                     Try Orient := Pin.Orientation; Except End;
                                     Found := True;
                                 End;
@@ -15110,11 +15284,11 @@ Begin
             Wire := SchServer.SchObjectFactory(eWire, eCreate_Default);
             If Wire <> Nil Then
             Begin
-                Wire.Location := Point(MilsToCoord(PX), MilsToCoord(PY));
+                Wire.Location := Point(MilsToCoordF(PX), MilsToCoordF(PY));
                 Wire.InsertVertex := 1;
-                Wire.SetState_Vertex(1, Point(MilsToCoord(PX), MilsToCoord(PY)));
+                Wire.SetState_Vertex(1, Point(MilsToCoordF(PX), MilsToCoordF(PY)));
                 Wire.InsertVertex := 2;
-                Wire.SetState_Vertex(2, Point(MilsToCoord(EX), MilsToCoord(EY)));
+                Wire.SetState_Vertex(2, Point(MilsToCoordF(EX), MilsToCoordF(EY)));
                 SchDoc.RegisterSchObjectInContainer(Wire);
                 SchRegisterObject(SchDoc, Wire);
             End;
@@ -15124,7 +15298,7 @@ Begin
             If NetLabel <> Nil Then
             Begin
                 NetLabel.Text := Lbl;
-                NetLabel.Location := Point(MilsToCoord(EX), MilsToCoord(EY));
+                NetLabel.Location := Point(MilsToCoordF(EX), MilsToCoordF(EY));
                 If StyleFound Then
                 Begin
                     Try NetLabel.FontId := InfFont; Except End;
@@ -15710,6 +15884,7 @@ Begin
         'set_component_unique_id':    Result := Gen_SetComponentUniqueId(Params, RequestId);
         'replicate_sch_component':    Result := Gen_ReplicateSchComponent(Params, RequestId);
         'place_probe':                Result := Gen_PlaceProbe(Params, RequestId);
+        'get_probes':                 Result := Gen_GetProbes(Params, RequestId);
         'add_datafile_link':          Result := Gen_AddDatafileLink(Params, RequestId);
         'get_simulation_readiness':   Result := Gen_GetSimulationReadiness(Params, RequestId);
         'attach_spice_primitive':     Result := Gen_AttachSpicePrimitive(Params, RequestId);

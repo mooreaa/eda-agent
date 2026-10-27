@@ -21,6 +21,8 @@ from __future__ import annotations
 import re
 from typing import Any, Optional
 
+from ..units import MILS_PER_MM
+
 #: Dielectric type numbers in the stack records.
 DIELECTRIC_TYPES = {"0": "none", "1": "core", "2": "prepreg",
                     "3": "surface_material", "4": "embedded"}
@@ -56,7 +58,7 @@ def to_mils(text: str) -> Optional[float]:
         return None
     value = float(m.group(1))
     unit = m.group(2) or "mil"
-    return {"mil": value, "mm": value / 0.0254, "um": value / 25.4,
+    return {"mil": value, "mm": value * MILS_PER_MM, "um": value * MILS_PER_MM / 1000.0,
             "in": value * 1000.0}[unit]
 
 

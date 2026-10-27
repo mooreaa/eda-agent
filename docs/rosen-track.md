@@ -49,7 +49,7 @@ Done in 2026.10.27.102: mainline merge, 4 (refusal half), 5, 11, 22, 24, 25, 26.
 | 8 | template engine uses the display mode in use | M | |
 | 12 | `sch_place_sheet_symbol` top edge, name/file-name position and font | M | labels may need file edit |
 | 7 | `sch_place_sheet_entry` reads back real coordinates | M | |
-| 18–20 | library: label formats, stale designator, polygon fill | M | |
+| 18-20 | library: label formats, stale designator, polygon fill | M | |
 | 14 | `lib_add_symbol_rectangle` / `lib_add_pins` honour `owner_part_id` | M | |
 | 6 | stale compile: a tool that saves, closes and reloads the sheets | M | |
 | 28 | schematic view zoom/mapping (`proposals/sch-view-mapping.md`) | L | needs live probing |
@@ -57,7 +57,12 @@ Done in 2026.10.27.102: mainline merge, 4 (refusal half), 5, 11, 22, 24, 25, 26.
 
 ## Releases
 
-### 2026.10.27.103 (not deployed; includes .102)
+### 2026.10.27.104
+
+Mainline merged again to f3bd57f (upstream script 2026.10.27.48: decimal mils in more handlers,
+filtered object walks, via deletion on any layer, simulation probes), on top of .103.
+
+### 2026.10.27.103 (includes .102)
 
 From the Rosen session, 10-27: layer-stack writes on AD 25.8.1 and the Description key.
 Smoke tests: Appendix U.
