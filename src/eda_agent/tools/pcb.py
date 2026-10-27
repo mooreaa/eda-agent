@@ -5985,7 +5985,7 @@ def register_pcb_tools(mcp):
                 f"{tool} writes the stack through the pre-AD19 LayerStack_V7 "
                 "interface. On AD 25.8.1 such writes left a different, "
                 "corrupt physical stack while pcb_get_layer_stackup read "
-                "back the intended one. Prefer the Layer Stack Manager, or "
+                "back the intended one. Use pcb_build_stack for a whole stack, or "
                 "pcb_set_dielectric for a dielectric layer's own values. "
                 "Pass legacy_stack_write=True to go ahead on a scratch copy, "
                 "then save and check the result with pcb_stack_from_file."),
@@ -6036,6 +6036,111 @@ def register_pcb_tools(mcp):
             out["mismatches"] = altium_pcb_stack.compare_expected(
                 out["layers"], expected)
             out["ok"] = out["ok"] and not out["mismatches"]
+        return out
+
+    @mcp.tool()
+    async def pcb_build_stack(
+        pcbdoc_path: str,
+        layers: list[dict[str, Any]],
+        dry_run: bool = True,
+    ) -> dict[str, Any]:
+        """Build a board's whole layer stack, copper and dielectrics, in one call.
+
+        THE WAY TO SET A STACK-UP. Goes through the AD19+ MasterLayerStack,
+        where each dielectric is a layer of its own, so a plane or signal
+        layer can sit anywhere. The top and bottom copper are kept
+        (renamed, re-thicknessed) and everything between them is replaced
+        by the plan. A layer between them that carries primitives stops the
+        build before anything changes. Solder mask, overlay and paste are
+        left alone.
+
+        The board must be open and SAVED: after the build the stack is read
+        back with pcb_physical_stack, and on any difference the board is
+        closed without saving and reopened, which is the undo. Save it
+        afterwards, then check the file with pcb_stack_from_file.
+
+        Args:
+            pcbdoc_path: the board, as app_list_documents reports it.
+            layers: copper and dielectric layers top to bottom, alternating
+                (two dielectrics in a row are fine). Copper:
+                ``{"kind": "copper", "name": "L2 GND", "thickness_mils":
+                1.378, "plane": false}``; ``plane`` true makes an internal
+                plane rather than a signal layer. Dielectric: ``{"kind":
+                "dielectric", "type": "prepreg"|"core", "thickness_mils":
+                4.33, "constant": 4.0, "material": "...", "name"?}``.
+            dry_run: True (default) returns the operations and changes
+                nothing.
+
+        Returns:
+            ``{"ok", "ops", "dry_run"}``, plus when applied ``applied``,
+            ``mismatches``, ``undone`` and the read-back ``stack``.
+        """
+        from ..design import stack_build
+
+        try:
+            plan = stack_build.normalise(layers)
+        except stack_build.StackPlanError as exc:
+            return {"ok": False, "reason": str(exc)}
+        bridge = get_bridge()
+        await bridge.send_command_async(
+            "application.set_active_document", {"file_path": pcbdoc_path})
+        docs = await bridge.send_command_async("application.get_open_documents") or []
+        if isinstance(docs, dict):
+            docs = docs.get("documents", [])
+        entry = next((d for d in docs if isinstance(d, dict)
+                      and str(d.get("file_path", "")).lower() == pcbdoc_path.lower()), None)
+        if entry is None:
+            return {"ok": False, "reason": f"{pcbdoc_path} is not open in Altium"}
+        current = await bridge.send_command_async("pcb.physical_stack", {})
+        try:
+            ops = stack_build.plan_ops((current or {}).get("layers", []), plan)
+        except stack_build.StackPlanError as exc:
+            return {"ok": False, "reason": str(exc)}
+        if dry_run:
+            return {"ok": True, "dry_run": True, "ops": ops,
+                    "current": stack_build.board_section(current.get("layers", []))}
+        if entry.get("modified"):
+            return {"ok": False, "reason": (
+                "the board has unsaved changes. Save it first: the undo for "
+                "a build that reads back wrong is closing it unsaved"),
+                "ops": ops}
+        applied: list[dict[str, Any]] = []
+        failure: dict[str, Any] | None = None
+        for op in ops:
+            try:
+                res = await bridge.send_command_async("pcb.stack_edit", op)
+            except Exception as exc:                        # noqa: BLE001
+                failure = {"op": op, "error": str(exc)}
+                break
+            applied.append({"op": op, "result": res})
+            if op["op"] == "remove" and isinstance(res, dict) and not res.get("removed"):
+                failure = {"op": op, "error": "the layer is still in the stack"}
+                break
+        readback = await bridge.send_command_async("pcb.physical_stack", {})
+        layers_back = (readback or {}).get("layers", [])
+        mismatches = stack_build.check(layers_back, plan)
+        out: dict[str, Any] = {"ok": failure is None and not mismatches,
+                               "dry_run": False, "ops": ops, "applied": len(applied),
+                               "mismatches": mismatches,
+                               "stack": stack_build.board_section(layers_back)}
+        if failure is not None:
+            out["failure"] = failure
+        if failure is not None or mismatches:
+            try:
+                await bridge.send_command_async(
+                    "application.close_document",
+                    {"file_path": pcbdoc_path, "discard": "true"}, timeout=120.0)
+                await get_bridge().send_command_async("application.run_process", {
+                    "process_name": "WorkspaceManager:OpenObject",
+                    "parameters": f"ObjectKind=Document|FileName={pcbdoc_path}"})
+                out["undone"] = True
+            except Exception as exc:                        # noqa: BLE001
+                out["undone"] = False
+                out["undo_error"] = (f"{exc}. The board is open with a partial "
+                                     "stack: close it without saving.")
+        else:
+            out["next"] = ("save the board, then run pcb_stack_from_file on it "
+                           "with this plan as expected")
         return out
 
     @mcp.tool()

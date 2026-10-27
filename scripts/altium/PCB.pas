@@ -5463,6 +5463,223 @@ Begin
         + JsonRaw('not_applied', '[' + Missed + ']')));
 End;
 
+{..............................................................................}
+{ PCB_StackEdit - one change to the AD19+ physical stack (MasterLayerStack),  }
+{ for pcb_build_stack. The old LayerStack_V7 writes left a different, corrupt }
+{ physical stack on AD 25.8.1 (Rosen controller, 2026-10-27); these go       }
+{ through IPCB_MasterLayerStack.CreateLayer / InsertAbove / InsertBelow /     }
+{ RemoveLayer, where a dielectric is a layer of its own.                      }
+{ Params: op = insert | remove | set_copper.                                  }
+{   insert: kind (signal | plane | dielectric), ref (a physical layer's name),}
+{     where (above | below), name, thickness_mils, and for a dielectric type  }
+{     (Altium's number), constant, material.                                  }
+{   remove: name. Top and bottom copper are refused, and so is a layer that   }
+{     carries primitives.                                                     }
+{   set_copper: name, new_name, thickness_mils.                               }
+{..............................................................................}
+
+{ A free layer id of the kind asked for, eNoLayer when every one is taken. }
+Function StackFreeLayerId(MLS : IPCB_MasterLayerStack; Kind : String) : TLayer;
+Var
+    I, Count : Integer;
+    Id : TLayer;
+    L : IPCB_LayerObject;
+    Taken : Boolean;
+Begin
+    Result := eNoLayer;
+    If Kind = 'plane' Then Count := 16
+    Else If Kind = 'dielectric' Then Count := 64
+    Else Count := 30;
+    For I := 1 To Count Do
+    Begin
+        If Kind = 'plane' Then Id := LayerUtils.InternalPlaneLayer(I)
+        Else If Kind = 'dielectric' Then Id := LayerUtils.DielectricLayer(I)
+        Else Id := LayerUtils.MidLayer(I);
+        Taken := False;
+        L := MLS.First(eLayerClass_Physical);
+        While L <> Nil Do
+        Begin
+            If L.LayerID = Id Then
+            Begin
+                Taken := True;
+                Break;
+            End;
+            L := MLS.Next(eLayerClass_Physical, L);
+        End;
+        If Not Taken Then
+        Begin
+            Result := Id;
+            Exit;
+        End;
+    End;
+End;
+
+Function PCB_StackEdit(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    MLS : IPCB_MasterLayerStack;
+    Ref, L, NewL : IPCB_LayerObject;
+    DL : IPCB_DielectricLayer;
+    EL : IPCB_ElectricalLayer;
+    Op, Kind, RefName, Where, Name, NewName, ThickS, TypeS, ConstS, MatS : String;
+    Id : TLayer;
+    Removed : Boolean;
+Begin
+    Op := LowerCase(ExtractJsonValue(Params, 'op'));
+    Kind := LowerCase(ExtractJsonValue(Params, 'kind'));
+    RefName := ExtractJsonValue(Params, 'ref');
+    Where := LowerCase(ExtractJsonValue(Params, 'where'));
+    Name := ExtractJsonValue(Params, 'name');
+    NewName := ExtractJsonValue(Params, 'new_name');
+    ThickS := ExtractJsonValue(Params, 'thickness_mils');
+    TypeS := ExtractJsonValue(Params, 'type');
+    ConstS := ExtractJsonValue(Params, 'constant');
+    MatS := ExtractJsonValue(Params, 'material');
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+    MLS := Board.MasterLayerStack;
+
+    If Op = 'insert' Then
+    Begin
+        If (Kind <> 'signal') And (Kind <> 'plane') And (Kind <> 'dielectric') Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'INVALID_PARAM',
+                'kind is signal, plane or dielectric');
+            Exit;
+        End;
+        If (Where <> 'above') And (Where <> 'below') Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'INVALID_PARAM', 'where is above or below');
+            Exit;
+        End;
+        Ref := StackFindPhysical(MLS, RefName);
+        If Ref = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'NOT_IN_STACK',
+                'No physical layer named ' + RefName + '; pcb_physical_stack lists them');
+            Exit;
+        End;
+        If (Name <> '') And (StackFindPhysical(MLS, Name) <> Nil) Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'NAME_TAKEN',
+                'A layer named ' + Name + ' is already in the stack');
+            Exit;
+        End;
+        Id := StackFreeLayerId(MLS, Kind);
+        If Id = eNoLayer Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'NO_FREE_LAYER',
+                'Every ' + Kind + ' layer id is already in the stack');
+            Exit;
+        End;
+        PCBServer.PreProcess;
+        Try
+            NewL := MLS.CreateLayer(Id);
+            If NewL <> Nil Then
+            Begin
+                If Where = 'above' Then MLS.InsertAbove(Ref, NewL)
+                Else MLS.InsertBelow(Ref, NewL);
+                If Name <> '' Then NewL.Name := Name;
+                If Kind = 'dielectric' Then
+                Begin
+                    DL := NewL;
+                    If TypeS <> '' Then DL.DielectricType := StrToInt(TypeS);
+                    If MatS <> '' Then DL.DielectricMaterial := MatS;
+                    If ConstS <> '' Then DL.DielectricConstant := StrToFloatDef(ConstS, 1);
+                    If ThickS <> '' Then DL.DielectricHeight := MilsToCoordF(StrToFloatDef(ThickS, 0));
+                End
+                Else If ThickS <> '' Then
+                Begin
+                    EL := NewL;
+                    EL.CopperThickness := MilsToCoordF(StrToFloatDef(ThickS, 0));
+                End;
+            End;
+            PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
+                PCBM_BoardRegisteration, c_NoEventData);
+        Finally
+            PCBServer.PostProcess;
+        End;
+        If NewL = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'NOT_CREATED',
+                'Altium did not create a ' + Kind + ' layer');
+            Exit;
+        End;
+        MarkDocDirtyByPath(Board.FileName);
+        Result := BuildSuccessResponse(RequestId, JsonObj(
+            JsonStr('op', Op) + ',' + JsonStr('kind', Kind) + ','
+            + JsonStr('name', NewL.Name) + ',' + JsonInt('layer_id', NewL.LayerID) + ','
+            + JsonStr('ref', Ref.Name) + ',' + JsonStr('where', Where)));
+        Exit;
+    End;
+
+    L := StackFindPhysical(MLS, Name);
+    If L = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_IN_STACK',
+            'No physical layer named ' + Name + '; pcb_physical_stack lists them');
+        Exit;
+    End;
+
+    If Op = 'remove' Then
+    Begin
+        If (UpperCase(L.Name) = UpperCase(MLS.First(eLayerClass_Electrical).Name))
+            Or (UpperCase(L.Name) = UpperCase(MLS.Last(eLayerClass_Electrical).Name)) Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'REFUSED',
+                'Top and bottom copper stay; rename them with set_copper');
+            Exit;
+        End;
+        If L.UsedByPrims Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'LAYER_IN_USE',
+                L.Name + ' carries primitives; move or delete them first');
+            Exit;
+        End;
+        Removed := False;
+        PCBServer.PreProcess;
+        Try
+            Removed := MLS.RemoveLayer(L);
+            PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
+                PCBM_BoardRegisteration, c_NoEventData);
+        Finally
+            PCBServer.PostProcess;
+        End;
+        MarkDocDirtyByPath(Board.FileName);
+        Result := BuildSuccessResponse(RequestId, JsonObj(
+            JsonStr('op', Op) + ',' + JsonStr('name', Name) + ','
+            + JsonBool('removed', Removed And (StackFindPhysical(MLS, Name) = Nil))));
+        Exit;
+    End;
+
+    If Op = 'set_copper' Then
+    Begin
+        EL := L;
+        PCBServer.PreProcess;
+        Try
+            If NewName <> '' Then L.Name := NewName;
+            If ThickS <> '' Then EL.CopperThickness := MilsToCoordF(StrToFloatDef(ThickS, 0));
+            PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
+                PCBM_BoardRegisteration, c_NoEventData);
+        Finally
+            PCBServer.PostProcess;
+        End;
+        MarkDocDirtyByPath(Board.FileName);
+        Result := BuildSuccessResponse(RequestId, JsonObj(
+            JsonStr('op', Op) + ',' + JsonStr('name', L.Name) + ','
+            + JsonInt('layer_id', L.LayerID) + ','
+            + JsonRaw('thickness_mils', FloatToJsonStr(CoordToMilsF(EL.CopperThickness)))));
+        Exit;
+    End;
+
+    Result := BuildErrorResponse(RequestId, 'INVALID_PARAM',
+        'op is insert, remove or set_copper');
+End;
+
 { The impedance profile named Name, Nil when there is none. }
 Function ImpFindProfile(Stack : IPCB_MasterLayerStack2; Name : String) : IPCB_ImpedanceProfile;
 Var
@@ -24129,6 +24346,7 @@ Begin
         'gloss':                   Result := PCB_Gloss(Params, RequestId);
         'physical_stack':          Result := PCB_PhysicalStack(Params, RequestId);
         'set_dielectric':          Result := PCB_SetDielectric(Params, RequestId);
+        'stack_edit':              Result := PCB_StackEdit(Params, RequestId);
         'impedance_profile':       Result := PCB_ImpedanceProfile(Params, RequestId);
         'impedance_profile_layer': Result := PCB_ImpedanceProfileLayer(Params, RequestId);
         'via_structures':          Result := PCB_ViaStructures(Params, RequestId);

@@ -1,4 +1,4 @@
-# Release verification: 2026.10.27.104
+# Release verification: 2026.10.27.105
 
 Unless a section records live verification explicitly, the Pascal below has
 been checked by FPC and the linter but **not executed by Altium's DelphiScript engine**. The two are not the
@@ -375,7 +375,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.10.27.104`, `version_match` =
+Expect `altium_script_version` = `2026.10.27.105`, `version_match` =
 `true`, and `mcp_server_version` = `0.7.1`.
 
 Those are two different versions and they fail differently.
@@ -3746,3 +3746,25 @@ Not yet run on AD 25.8.1: upstream's `pcb_physical_stack` and
 `pcb_set_dielectric` (AD19+ MasterLayerStack, verified upstream on AD 26.11
 only). Run `pcb_physical_stack` read-only on a scratch board first; an
 "Undeclared identifier" modal there means the AD 25.8 interface differs.
+
+---
+
+## Appendix V: Rosen branch, whole-stack writer
+
+`pcb_build_stack(pcbdoc_path, layers, dry_run=True)` sets a board's copper and
+dielectric layers, top to bottom, through the AD19+ MasterLayerStack: the new
+Pascal command `pcb.stack_edit` (`insert` via `CreateLayer` +
+`InsertAbove`/`InsertBelow` with `LayerUtils.MidLayer` / `InternalPlaneLayer` /
+`DielectricLayer` ids, `remove` via `RemoveLayer`, `set_copper`). The top and
+bottom copper are kept and renamed; everything between them is replaced; a
+layer carrying primitives stops the build. The board must be saved first:
+after the build the stack is read back with `pcb_physical_stack`, and on any
+difference the board is closed without saving and reopened.
+
+Live check, on a scratch copy of a 4-layer board only:
+1. `pcb_build_stack` with the plan, `dry_run=True`: the ops list, nothing changed.
+2. Apply: `ok` true and `stack` equal to the plan.
+3. Save the scratch board; `pcb_stack_from_file` with the plan as `expected`:
+   `ok` true, no `views_disagree` finding.
+4. Open the Layer Stack Manager on it and look: the copper conductive, the
+   dielectrics between them, the order top to bottom as planned.
