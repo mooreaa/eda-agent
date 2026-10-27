@@ -1,4 +1,4 @@
-# Release verification: 2026.10.26.10
+# Release verification: 2026.10.26.101
 
 Unless a section records live verification explicitly, the Pascal below has
 been checked by FPC and the linter but **not executed by Altium's DelphiScript engine**. The two are not the
@@ -318,7 +318,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.10.26.10`, `version_match` =
+Expect `altium_script_version` = `2026.10.26.101`, `version_match` =
 `true`, and `mcp_server_version` = `0.7.1`.
 
 Those are two different versions and they fail differently.
@@ -3097,3 +3097,30 @@ A choice that does not read back, and so the restore, did not occur; only
 the mirror covers it.
 
 ---
+
+## Appendix S: Rosen branch, placement cleanup (2026-10-26)
+
+Script 2026.10.26.101, on top of the mainline merge. Each item below was
+fixed by hand on the Rosen controller before it went into the tools.
+Results of the live run on AD 25.8.1 are filled in under each item.
+
+1. `sch_place_port`, `sch_place_power_port`, `sch_place_text_frame` and
+   `sch_place_sheet_entry` take `font_id`; left at 0 they take the font the
+   sheet already uses for that kind (`InferSheetFontFor`, falling back to
+   the net labels). The reply reads the font back.
+2. `sch_place_port` takes `width`; `AutoSize` is turned off first so it
+   holds. The reply reads back `width` and `auto_size`.
+3. `sch_place_text_frame` folds a newline or a typed backslash-n into CR LF.
+   Check: the saved file stores `~1`.
+4. `sch_place_components` (and `sch_draw_template`) tidy each placed part
+   unless `tidy=false`: library link (SourceLibraryName, LibReference,
+   DesignItemId, UseLibraryName), model parameters below the component's
+   first level hidden, designator in the sheet's designator font. The reply
+   lists `tidied`. `part_id` is now an accepted placement key.
+5. The `Value` key of `sch_set_components_parameters` also writes an
+   existing `Value` parameter; a parameter it creates is hidden, at the part.
+6. An `ePin` query or modify on a sheet skips the pins a placed part does
+   not show (other parts' copies, other display modes) unless the filter
+   names `OwnerPart...`.
+7. `AutoSize` and `ConnectedEnd` read and write on `ePort` only.
+8. New tool `sch_fix_port_crossrefs` (dry run by default).

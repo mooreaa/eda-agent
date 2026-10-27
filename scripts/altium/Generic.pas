@@ -428,6 +428,103 @@ Begin
     Result := (Obj.ObjectId = eSheetEntry) Or (Obj.ObjectId = eHarnessEntry);
 End;
 
+{ Count the fonts one kind of object uses on a sheet into Keys/Counts. A
+  sheet entry's font is TextFontID; any other kind without a FontId is
+  skipped rather than read (reading it stops the bridge). }
+Procedure VoteSheetFonts(SchDoc : ISch_Document; Kind : Integer;
+    Keys : TStringList; Counts : TStringList);
+Var
+    Iterator : ISch_Iterator;
+    Obj : ISch_GraphicalObject;
+    EntryObj : ISch_SheetEntry;
+    Key : String;
+    Idx, FId : Integer;
+Begin
+    Iterator := SchDoc.SchIterator_Create;
+    Try
+        Iterator.AddFilter_ObjectSet(MkSet(Kind));
+        Obj := Iterator.FirstSchObject;
+        While Obj <> Nil Do
+        Begin
+            FId := 0;
+            If Obj.ObjectId = eSheetEntry Then
+            Begin
+                EntryObj := Obj;
+                Try FId := EntryObj.TextFontID; Except End;
+            End
+            Else If SchObjectHasFontId(Obj) Then
+            Begin
+                Try FId := Obj.FontId; Except End;
+            End;
+            If FId > 0 Then
+            Begin
+                Key := IntToStr(FId);
+                Idx := Keys.IndexOf(Key);
+                If Idx < 0 Then
+                Begin
+                    Keys.Add(Key);
+                    Counts.Add('1');
+                End
+                Else
+                    Counts[Idx] := IntToStr(StrToIntDef(Counts[Idx], 0) + 1);
+            End;
+            Obj := Iterator.NextSchObject;
+        End;
+    Finally
+        SchDoc.SchIterator_Destroy(Iterator);
+    End;
+End;
+
+{ The font a sheet already uses for one kind of object: the most common one
+  among its objects of that kind, or among its net labels when it has none.
+  New ports, power ports, text frames and sheet entries otherwise come in as
+  font 1 (Times New Roman 10) whatever the sheet around them uses. }
+Function InferSheetFontFor(SchDoc : ISch_Document; Kind : Integer;
+    Var OutFontId : Integer) : Boolean;
+Var
+    Keys, Counts : TStringList;
+    I, N, BestN : Integer;
+Begin
+    Result := False;
+    OutFontId := 0;
+    If SchDoc = Nil Then Exit;
+
+    Keys := TStringList.Create;
+    Counts := TStringList.Create;
+    Try
+        VoteSheetFonts(SchDoc, Kind, Keys, Counts);
+        If (Keys.Count = 0) And (Kind <> eNetLabel) Then
+            VoteSheetFonts(SchDoc, eNetLabel, Keys, Counts);
+
+        BestN := 0;
+        For I := 0 To Keys.Count - 1 Do
+        Begin
+            N := StrToIntDef(Counts[I], 0);
+            If N > BestN Then
+            Begin
+                BestN := N;
+                OutFontId := StrToIntDef(Keys[I], 0);
+            End;
+        End;
+        Result := BestN > 0;
+    Finally
+        Keys.Free;
+        Counts.Free;
+    End;
+End;
+
+{ The font a new object should take: font_id when the caller gave one,
+  otherwise the sheet's own font for that kind. 0 = leave Altium's default. }
+Function PlacementFontId(SchDoc : ISch_Document; Kind : Integer; Params : String) : Integer;
+Var
+    Inferred : Integer;
+Begin
+    Result := StrToIntDef(ExtractJsonValue(Params, 'font_id'), 0);
+    If Result > 0 Then Exit;
+    If InferSheetFontFor(SchDoc, Kind, Inferred) Then
+        Result := Inferred;
+End;
+
 { Only these types answer to Name. Anything else (a free text, a note,
   a net label) faults with an undeclared-identifier modal that
   Try/Except cannot contain, which stops the bridge (issue #74). This is
@@ -472,6 +569,8 @@ Begin
                 Or ((PropName = 'TextColor') And (Not SchObjectHasTextColor(Obj)))
                 Or ((PropName = 'FontId') And (Not SchObjectHasFontId(Obj)))
                 Or ((PropName = 'TextFontId') And (Not SchObjectHasTextFontId(Obj)))
+                Or (((PropName = 'AutoSize') Or (PropName = 'ConnectedEnd'))
+                    And (Obj.ObjectId <> ePort))
                 Or (((PropName = 'DisplayMode') Or (PropName = 'FootprintPinMap'))
                     And (Obj.ObjectId <> eSchComponent))
                 Or (((PropName = 'SwapIdPart') Or (PropName = 'SwapIdPin')
@@ -1344,6 +1443,26 @@ Begin
                 Result := '';
             End;
         End
+        { A port's sizing and the end Altium treats as wired. ConnectedEnd
+          is 0 none, 1 origin (Location), 2 extremity (Location + Width),
+          3 both; the cross-reference is drawn at the other end. Only a
+          port has either, so any other type answers unreadable. }
+        Else If (PropName = 'AutoSize') Or (PropName = 'ConnectedEnd') Then
+        Begin
+            If Obj.ObjectId = ePort Then
+            Begin
+                PortObj := Obj;
+                If PropName = 'AutoSize' Then
+                    Result := BoolToJsonStr(PortObj.AutoSize)
+                Else
+                    Result := IntToStr(PortObj.ConnectedEnd);
+            End
+            Else
+            Begin
+                NotePropertyDiag('unreadable', PropName);
+                Result := '';
+            End;
+        End
         Else If PropName = 'LineWidth'   Then Result := IntToStr(Obj.LineWidth)
         Else If PropName = 'Style'       Then Result := IntToStr(Obj.Style)
         Else If PropName = 'IOType'      Then Result := IntToStr(Obj.IOType)
@@ -1799,6 +1918,25 @@ Begin
             Begin
                 HarnessEntryObj := Obj;
                 HarnessEntryObj.TextFontID := StrToIntDef(Value, 1);
+            End
+            Else
+                NotePropertyDiag('unknown', PropName);
+        End
+        Else If (PropName = 'AutoSize') Or (PropName = 'ConnectedEnd') Then
+        Begin
+            If Obj.ObjectId = ePort Then
+            Begin
+                PortObj := Obj;
+                If PropName = 'AutoSize' Then
+                Begin
+                    PortObj.AutoSize := (LowerCase(Value) = 'true') Or (Value = '1');
+                    WroteOK := PortObj.AutoSize = ((LowerCase(Value) = 'true') Or (Value = '1'));
+                End
+                Else
+                Begin
+                    PortObj.ConnectedEnd := StrToIntDef(Value, 0);
+                    WroteOK := PortObj.ConnectedEnd = StrToIntDef(Value, 0);
+                End;
             End
             Else
                 NotePropertyDiag('unknown', PropName);
@@ -2440,6 +2578,55 @@ Begin
     End;
 End;
 
+{ The addresses of the pins no placed part shows. A multi-part symbol on a
+  sheet is one component per part, and each carries every pin of the
+  symbol, the other parts' pins hidden at its own positions; a symbol with
+  display modes carries every mode's pins too. A pin is live when its part
+  is the component's (PinShownOn) and its mode is the one in use. Sorted,
+  for IndexOf. The caller frees it. }
+Function DeadPinAddresses(SchDoc : ISch_Document) : TStringList;
+Var
+    Iterator, PinIter : ISch_Iterator;
+    Comp : ISch_Component;
+    Pin : ISch_Pin;
+    Mode, PinMode, Addr : Integer;
+Begin
+    Result := TStringList.Create;
+    Result.Sorted := True;
+    Iterator := SchDoc.SchIterator_Create;
+    Try
+        Iterator.AddFilter_ObjectSet(MkSet(eSchComponent));
+        Comp := Iterator.FirstSchObject;
+        While Comp <> Nil Do
+        Begin
+            Mode := 0;
+            Try Mode := Comp.DisplayMode; Except End;
+            PinIter := Comp.SchIterator_Create;
+            Try
+                PinIter.AddFilter_ObjectSet(MkSet(ePin));
+                Pin := PinIter.FirstSchObject;
+                While Pin <> Nil Do
+                Begin
+                    PinMode := Mode;
+                    Try PinMode := Pin.OwnerPartDisplayMode; Except End;
+                    If (Not PinShownOn(Comp, Pin)) Or (PinMode <> Mode) Then
+                    Begin
+                        Addr := 0;
+                        Try Addr := Pin.I_ObjectAddress; Except End;
+                        If Addr <> 0 Then Result.Add(IntToStr(Addr));
+                    End;
+                    Pin := PinIter.NextSchObject;
+                End;
+            Finally
+                Comp.SchIterator_Destroy(PinIter);
+            End;
+            Comp := Iterator.NextSchObject;
+        End;
+    Finally
+        SchDoc.SchIterator_Destroy(Iterator);
+    End;
+End;
+
 Function ProcessSchDocObjects(SchDoc : ISch_Document; ObjTypeInt : Integer;
     FilterStr : String; PropsStr : String; SetStr : String;
     Mode : String; DocPath : String;
@@ -2454,6 +2641,8 @@ Var
     ObjJson, SymbolRef : String;
     First : Boolean;
     MaxIter, LastAddr, ThisAddr, SameTries : Integer;
+    DeadPins : TStringList;
+    Skip : Boolean;
 Begin
     Result := '';
     First := (TotalMatched = 0);
@@ -2621,12 +2810,29 @@ Begin
         Iterator := SchDoc.SchIterator_Create;
     Iterator.AddFilter_ObjectSet(MkSet(ObjTypeInt));
 
+    { Only the pins a placed part shows. A pin query on a sheet answered
+      three copies of one pin of a three-part symbol, two of them dead, and
+      a modify wrote all three. A filter that names OwnerPartId or
+      OwnerPartDisplayMode is asking about the hidden copies, so it gets
+      them all. }
+    DeadPins := Nil;
+    If (ObjTypeInt = ePin) And (Not IsLibDoc) And (Pos('OwnerPart', FilterStr) = 0) Then
+        DeadPins := DeadPinAddresses(SchDoc);
+
     Obj := Iterator.FirstSchObject;
     While Obj <> Nil Do
     Begin
         If (Limit > 0) And (TotalMatched >= Limit) Then Break;
 
-        If MatchesFilter(Obj, FilterStr) Then
+        Skip := False;
+        If DeadPins <> Nil Then
+        Begin
+            ThisAddr := 0;
+            Try ThisAddr := Obj.I_ObjectAddress; Except End;
+            Skip := DeadPins.IndexOf(IntToStr(ThisAddr)) >= 0;
+        End;
+
+        If (Not Skip) And MatchesFilter(Obj, FilterStr) Then
         Begin
             If Mode = 'query' Then
             Begin
@@ -2669,6 +2875,7 @@ Begin
         LibComp.SchIterator_Destroy(Iterator)
     Else
         SchDoc.SchIterator_Destroy(Iterator);
+    If DeadPins <> Nil Then DeadPins.Free;
 
     If Mode = 'modify' Then
         SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
@@ -5579,6 +5786,7 @@ Var
     GotDist : Double;
     DistFromTop : Double;
     Found, Placed : Boolean;
+    FontToUse, GotFont : Integer;
 Begin
     SheetNameStr := ExtractJsonValue(Params, 'sheet_name');
     EntryName := ExtractJsonValue(Params, 'entry_name');
@@ -5637,6 +5845,9 @@ Begin
         Exit;
     End;
 
+    { Read before the new entry exists, so it does not vote for Times. }
+    FontToUse := PlacementFontId(SchDoc, eSheetEntry, Params);
+
     Entry := SchServer.SchObjectFactory(eSheetEntry, eCreate_Default);
     If Entry = Nil Then
     Begin
@@ -5679,6 +5890,10 @@ Begin
 
     Try Entry.Side := WantSide; Except End;
     Try Entry.DistanceFromTop := MilsToCoordF(DistFromTop); Except End;
+    If FontToUse > 0 Then
+    Begin
+        Try Entry.TextFontID := FontToUse; Except End;
+    End;
 
     SchRegisterObject(Sym, Entry);
     SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
@@ -5697,6 +5912,9 @@ Begin
         GotX := CoordToMils(Entry.Location.X);
         GotY := CoordToMils(Entry.Location.Y);
     Except End;
+
+    GotFont := 0;
+    Try GotFont := Entry.TextFontID; Except End;
 
     Placed := (GotSide = WantSide) And (Abs(GotDist - DistFromTop) < 0.0001);
 
@@ -5719,6 +5937,7 @@ Begin
             JsonFloat('requested_distance_from_top', DistFromTop) + ',' +
             JsonInt('actual_side', GotSide) + ',' +
             JsonFloat('actual_distance_from_top', GotDist) + ',' +
+            JsonInt('font_id', GotFont) + ',' +
             JsonInt('x', GotX) + ',' +
             JsonInt('y', GotY) + ',' +
             JsonStr('note', 'x and y are read back from the placed entry. '
@@ -6972,15 +7191,18 @@ End;
 Function Gen_PlacePort(Params : String; RequestId : String) : String;
 Var
     Name, StyleStr, IOTypeStr : String;
-    X, Y : Double;
+    X, Y, WantWidth : Double;
     SchDoc : ISch_Document;
     SchPort : ISch_Port;
+    FontToUse, GotFont, GotWidth : Integer;
+    GotAuto : Boolean;
 Begin
     Name := ExtractJsonValue(Params, 'name');
     X := StrToFloatDef(ExtractJsonValue(Params, 'x'), 0);
     Y := StrToFloatDef(ExtractJsonValue(Params, 'y'), 0);
     StyleStr := ExtractJsonValue(Params, 'style');
     IOTypeStr := ExtractJsonValue(Params, 'io_type');
+    WantWidth := StrToFloatDef(ExtractJsonValue(Params, 'width'), 0);
 
     If Name = '' Then
     Begin
@@ -6994,6 +7216,9 @@ Begin
         Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC', 'No schematic document is active');
         Exit;
     End;
+
+    { Read before the new port exists, so it does not vote for Times. }
+    FontToUse := PlacementFontId(SchDoc, ePort, Params);
 
     SchPort := SchServer.SchObjectFactory(ePort, eCreate_Default);
     If SchPort = Nil Then
@@ -7017,11 +7242,33 @@ Begin
     Else If IOTypeStr = 'bidirectional' Then SchPort.IOType := ePortBidirectional
     Else SchPort.IOType := ePortUnspecified;
 
+    If FontToUse > 0 Then
+    Begin
+        Try SchPort.FontId := FontToUse; Except End;
+    End;
+
+    { An auto-sized port grows to fit its name (and regrows on every
+      redraw), so a width set while AutoSize is on does not hold: it ended
+      up wider than asked and ran onto a neighbouring wire. Turn AutoSize
+      off first, then set the width, after the font that sizes the text. }
+    If WantWidth > 0 Then
+    Begin
+        Try SchPort.AutoSize := False; Except End;
+        Try SchPort.Width := MilsToCoordF(WantWidth); Except End;
+    End;
+
     SchServer.ProcessControl.PreProcess(SchDoc, '');
     SchDoc.RegisterSchObjectInContainer(SchPort);
     SchRegisterObject(SchDoc, SchPort);
     SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     SchDoc.GraphicallyInvalidate;
+
+    GotFont := 0;
+    GotWidth := 0;
+    GotAuto := True;
+    Try GotFont := SchPort.FontId; Except End;
+    Try GotWidth := CoordToMils(SchPort.Width); Except End;
+    Try GotAuto := SchPort.AutoSize; Except End;
 
     { A WRITE THAT DOES NOT DIRTY THE DOCUMENT DID NOT HAPPEN, as far as
       the rest of Altium is concerned. SmartCompile skips its recompile
@@ -7033,7 +7280,9 @@ Begin
     If SchDoc <> Nil Then MarkDocDirtyByPath(SchDoc.DocumentName);
     Result := BuildSuccessResponse(RequestId,
         '{"success":true,"name":"' + EscapeJsonString(Name) +
-        '","x":' + FloatToJsonStr(X) + ',"y":' + FloatToJsonStr(Y) + '}');
+        '","x":' + FloatToJsonStr(X) + ',"y":' + FloatToJsonStr(Y) +
+        ',' + JsonInt('font_id', GotFont) + ',' + JsonInt('width', GotWidth) +
+        ',' + JsonBool('auto_size', GotAuto) + '}');
 End;
 
 {..............................................................................}
@@ -7050,6 +7299,7 @@ Var
     PowerObj : ISch_PowerObject;
     Loc : TLocation;
     SrvDoc : IServerDocument;
+    FontToUse, GotFont : Integer;
 Begin
     Text := ExtractJsonValue(Params, 'text');
     SheetPath := ExtractJsonValue(Params, 'sheet_path');
@@ -7095,6 +7345,9 @@ Begin
         End;
     End;
 
+    { Read before the new symbol exists, so it does not vote for Times. }
+    FontToUse := PlacementFontId(SchDoc, ePowerObject, Params);
+
     PowerObj := SchServer.SchObjectFactory(ePowerObject, eCreate_Default);
     If PowerObj = Nil Then
     Begin
@@ -7129,6 +7382,10 @@ Begin
             OrientationVal := 1;
     End;
     Try PowerObj.Orientation := OrientationVal; Except End;
+    If FontToUse > 0 Then
+    Begin
+        Try PowerObj.FontId := FontToUse; Except End;
+    End;
 
     SchServer.ProcessControl.PreProcess(SchDoc, '');
     SchDoc.RegisterSchObjectInContainer(PowerObj);
@@ -7141,9 +7398,12 @@ Begin
         If SrvDoc <> Nil Then SrvDoc.SetModified(True);
     Except End;
 
+    GotFont := 0;
+    Try GotFont := PowerObj.FontId; Except End;
     Result := BuildSuccessResponse(RequestId,
         '{"success":true,"text":"' + EscapeJsonString(Text) +
-        '","x":' + FloatToJsonStr(X) + ',"y":' + FloatToJsonStr(Y) + '}');
+        '","x":' + FloatToJsonStr(X) + ',"y":' + FloatToJsonStr(Y) +
+        ',' + JsonInt('font_id', GotFont) + '}');
 End;
 
 {..............................................................................}
@@ -9265,6 +9525,36 @@ End;
 
 { Set (or create) a component parameter. Returns True if created, False if     }
 { modified. Caller is responsible for PreProcess/PostProcess on the document. }
+{ Set a parameter the part already has; never create one. False when the
+  part has no parameter of that name. }
+Function SetExistingCompParamText(Comp : ISch_Component; ParamName, ParamValue : String) : Boolean;
+Var
+    Iter : ISch_Iterator;
+    Param : ISch_Parameter;
+Begin
+    Result := False;
+    Iter := Comp.SchIterator_Create;
+    Try
+        Iter.AddFilter_ObjectSet(MkSet(eParameter));
+        Iter.SetState_IterationDepth(eIterateFirstLevel);
+        Param := Iter.FirstSchObject;
+        While Param <> Nil Do
+        Begin
+            If UpperCase(Param.Name) = UpperCase(ParamName) Then
+            Begin
+                SchBeginModify(Param);
+                Try Param.Text := ParamValue; Except End;
+                SchEndModify(Param);
+                Result := True;
+                Break;
+            End;
+            Param := Iter.NextSchObject;
+        End;
+    Finally
+        Comp.SchIterator_Destroy(Iter);
+    End;
+End;
+
 Function SetCompParamText(Comp : ISch_Component; ParamName, ParamValue : String) : Boolean;
 Var
     Iter : ISch_Iterator;
@@ -9303,6 +9593,11 @@ Begin
         Begin
             NewParam.Name := ParamName;
             NewParam.Text := ParamValue;
+            { Created visible with no position, a new parameter drew at the
+              sheet origin, one pile of text per part stamped. Hidden, and
+              at the part, it is there to show if someone wants it. }
+            Try NewParam.IsHidden := True; Except End;
+            Try NewParam.Location := Comp.Location; Except End;
             Comp.AddSchObject(NewParam);
             SchRegisterObject(Comp, NewParam);
             Result := True;
@@ -10679,6 +10974,106 @@ Begin
     SchRegisterObject(SchDoc, Comp);
 End;
 
+{ What a freshly placed part needs to match the parts already on the sheet.
+  - Its library link. LoadComponentFromLibrary leaves SourceLibraryName as
+    '*', and Altium then will not let anyone change the Design Item ID in
+    the Properties panel. The writes are the ones relink makes for a
+    SchLib/IntLib part.
+  - Its model parameters hidden. A symbol's simulation model brings
+    parameters of its own (Kind, SubKind, Spice Prefix, ...) that arrive
+    visible, with no position, at the sheet origin. They are the parameters
+    found below the component's first level; its own are left alone.
+  - The sheet's designator font, when one was found (DesigFont > 0).
+  Returns the JSON fields describing what changed. }
+Function TidyPlacedComponent(Comp : ISch_Component; LibName : String;
+    LibRef : String; DesigFont : Integer) : String;
+Var
+    Iter : ISch_Iterator;
+    Obj : ISch_GraphicalObject;
+    Param : ISch_Parameter;
+    Own : TStringList;
+    Addr, Hidden, FontWas : Integer;
+    Linked, WasHidden : Boolean;
+Begin
+    Linked := False;
+    Hidden := 0;
+    FontWas := 0;
+    SchBeginModify(Comp);
+    Try
+        If LibName <> '' Then
+        Begin
+            Try Comp.SourceLibraryName := LibName; Except End;
+            Try Comp.LibReference := LibRef; Except End;
+            Try Comp.DatabaseTableName := ''; Except End;
+            Try Comp.UseDBTableName := False; Except End;
+            Try Comp.UseLibraryName := True; Except End;
+            Try Comp.DesignItemId := LibRef; Except End;
+            Try Linked := Comp.SourceLibraryName = LibName; Except End;
+        End;
+
+        Own := TStringList.Create;
+        Try
+            Iter := Comp.SchIterator_Create;
+            Try
+                Iter.AddFilter_ObjectSet(MkSet(eParameter));
+                Iter.SetState_IterationDepth(eIterateFirstLevel);
+                Obj := Iter.FirstSchObject;
+                While Obj <> Nil Do
+                Begin
+                    Addr := 0;
+                    Try Addr := Obj.I_ObjectAddress; Except End;
+                    Own.Add(IntToStr(Addr));
+                    Obj := Iter.NextSchObject;
+                End;
+            Finally
+                Comp.SchIterator_Destroy(Iter);
+            End;
+
+            Iter := Comp.SchIterator_Create;
+            Try
+                Iter.AddFilter_ObjectSet(MkSet(eParameter));
+                Obj := Iter.FirstSchObject;
+                While Obj <> Nil Do
+                Begin
+                    Addr := 0;
+                    Try Addr := Obj.I_ObjectAddress; Except End;
+                    If (Addr <> 0) And (Own.IndexOf(IntToStr(Addr)) < 0) Then
+                    Begin
+                        Param := Obj;
+                        WasHidden := True;
+                        Try WasHidden := Param.IsHidden; Except End;
+                        If Not WasHidden Then
+                        Begin
+                            Try Param.IsHidden := True; Except End;
+                            Inc(Hidden);
+                        End;
+                    End;
+                    Obj := Iter.NextSchObject;
+                End;
+            Finally
+                Comp.SchIterator_Destroy(Iter);
+            End;
+        Finally
+            Own.Free;
+        End;
+
+        If DesigFont > 0 Then
+        Begin
+            Try FontWas := Comp.Designator.FontId; Except End;
+            If FontWas <> DesigFont Then
+            Begin
+                Try Comp.Designator.FontId := DesigFont; Except End;
+            End;
+        End;
+    Finally
+        SchEndModify(Comp);
+    End;
+
+    Result := JsonBool('linked', Linked) + ',' + JsonInt('model_params_hidden', Hidden);
+    If (DesigFont > 0) And (FontWas <> DesigFont) Then
+        Result := Result + ',' + JsonInt('designator_font_id', DesigFont);
+End;
+
 {..............................................................................}
 { Gen_PlaceSchComponentsFromLibrary - Bulk BOM placement.                       }
 { Each op: library_path, lib_reference, x, y, designator, rotation, footprint, }
@@ -10695,7 +11090,9 @@ Var
     OpCount, Placed, Failed, Rotation, PartId, PartAfter : Integer;
     LibPath, LibRef, Desig, Footprint, AvailHint : String;
     ResolvedLib, LibReason, FpBefore, FpAfter, FpIssues : String;
-    FpChosen, FpChoice : Integer;
+    LinkName, Tidied : String;
+    FpChosen, FpChoice, DesigFont : Integer;
+    TidyOn : Boolean;
     X, Y : Integer;
     SchDoc : ISch_Document;
     Comp : ISch_Component;
@@ -10721,6 +11118,14 @@ Begin
     FailedRefdes := '';
     FpIssues := '';
     FpChosen := 0;
+    Tidied := '';
+
+    { The tidy step (TidyPlacedComponent) is on unless tidy is false. The
+      designator font is read once, before any new part can vote for Times. }
+    TidyOn := LowerCase(ExtractJsonValue(Params, 'tidy')) <> 'false';
+    DesigFont := 0;
+    If TidyOn Then
+        If Not InferSheetFontFor(SchDoc, eDesignator, DesigFont) Then DesigFont := 0;
 
     SchServer.ProcessControl.PreProcess(SchDoc, '');
     Try
@@ -10780,6 +11185,9 @@ Begin
             { and which stops the polling loop until a human clicks it. A    }
             { placed component reports its library AS an .IntLib, so callers }
             { copying source_library off the sheet hit this every time.      }
+            { The link names the library the caller named (an IntLib stays
+              an IntLib), not the SchLib it was loaded through. }
+            LinkName := ExtractFileName(LibPath);
             If LibPath <> '' Then
             Begin
                 ResolvedLib := ResolveSchLibForLoad(LibPath, LibReason);
@@ -10883,6 +11291,12 @@ Begin
                             + EscapeJsonString(FpBefore) + '"}';
                 End;
             End;
+            If TidyOn Then
+            Begin
+                If Tidied <> '' Then Tidied := Tidied + ',';
+                Tidied := Tidied + '{' + JsonStr('designator', Desig) + ','
+                    + TidyPlacedComponent(Comp, LinkName, LibRef, DesigFont) + '}';
+            End;
             Inc(Placed);
         End;
     Finally
@@ -10896,6 +11310,8 @@ Begin
         + ',"footprints_chosen":' + IntToStr(FpChosen);
     If FpIssues <> '' Then
         ResponseBody := ResponseBody + ',"footprint_issues":[' + FpIssues + ']';
+    If Tidied <> '' Then
+        ResponseBody := ResponseBody + ',"tidied":[' + Tidied + ']';
     If FailedRefdes <> '' Then
         ResponseBody := ResponseBody + ',"failed_refdes":"'
             + EscapeJsonString(FailedRefdes) + '"';
@@ -11484,6 +11900,10 @@ Begin
                                         SchBeginModify(Comp.Comment);
                                         Try Comp.Comment.Text := Val; Except End;
                                         SchEndModify(Comp.Comment);
+                                        { A symbol that shows its Value
+                                          parameter kept showing *K or ?uF
+                                          with only the Comment written. }
+                                        SetExistingCompParamText(Comp, 'Value', Val);
                                     End
                                     Else If Key = 'Footprint' Then
                                     Begin
@@ -13297,6 +13717,7 @@ Var
     SchDoc : ISch_Document;
     TF : ISch_TextFrame;
     TextStr, AlignStr : String;
+    FontToUse, GotFont : Integer;
 Begin
     X1 := StrToFloatDef(ExtractJsonValue(Params, 'x1'), 0);
     Y1 := StrToFloatDef(ExtractJsonValue(Params, 'y1'), 0);
@@ -13304,6 +13725,13 @@ Begin
     Y2 := StrToFloatDef(ExtractJsonValue(Params, 'y2'), 0);
     TextStr := ExtractJsonValue(Params, 'text');
     AlignStr := LowerCase(ExtractJsonValue(Params, 'align'));
+    { A line break typed as backslash-n reaches here as those two
+      characters, and Altium stored and printed them as text. Its own break
+      is CR LF (saved as ~1), so fold every spelling of one into that. }
+    TextStr := StringReplace(TextStr, '\' + 'n', #10, -1);
+    TextStr := StringReplace(TextStr, #13 + #10, #10, -1);
+    TextStr := StringReplace(TextStr, #13, #10, -1);
+    TextStr := StringReplace(TextStr, #10, #13 + #10, -1);
     If X1 > X2 Then Begin TmpI := X1; X1 := X2; X2 := TmpI; End;
     If Y1 > Y2 Then Begin TmpI := Y1; Y1 := Y2; Y2 := TmpI; End;
 
@@ -13313,6 +13741,9 @@ Begin
         Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC', 'No schematic document is active');
         Exit;
     End;
+
+    { Read before the new frame exists, so it does not vote for Times. }
+    FontToUse := PlacementFontId(SchDoc, eTextFrame, Params);
 
     TF := SchServer.SchObjectFactory(eTextFrame, eCreate_Default);
     If TF = Nil Then
@@ -13334,6 +13765,10 @@ Begin
     Begin Try TF.Alignment := eRightAlign; Except End; End
     Else
     Begin Try TF.Alignment := eLeftAlign; Except End; End;
+    If FontToUse > 0 Then
+    Begin
+        Try TF.FontId := FontToUse; Except End;
+    End;
 
     SchServer.ProcessControl.PreProcess(SchDoc, '');
     SchDoc.RegisterSchObjectInContainer(TF);
@@ -13349,9 +13784,12 @@ Begin
       the file and still listed as violations until the project was
       reopened. }
     If SchDoc <> Nil Then MarkDocDirtyByPath(SchDoc.DocumentName);
+    GotFont := 0;
+    Try GotFont := TF.FontId; Except End;
     Result := BuildSuccessResponse(RequestId,
         '{"placed":true,"x1":' + FloatToJsonStr(X1) + ',"y1":' + FloatToJsonStr(Y1) + ','
-        + '"x2":' + FloatToJsonStr(X2) + ',"y2":' + FloatToJsonStr(Y2) + '}');
+        + '"x2":' + FloatToJsonStr(X2) + ',"y2":' + FloatToJsonStr(Y2) + ','
+        + JsonInt('font_id', GotFont) + '}');
 End;
 
 {..............................................................................}

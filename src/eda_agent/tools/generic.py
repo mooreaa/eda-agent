@@ -41,6 +41,7 @@ PLACEMENT_KEYS = frozenset({
     "rotation",
     "designator",
     "footprint",
+    "part_id",
 })
 
 
@@ -1490,6 +1491,7 @@ def register_generic_tools(mcp):
         io_type: str = "unspecified",
         side: str = "left",
         distance_from_top: int = 100,
+        font_id: int = 0,
     ) -> dict[str, Any]:
         """Place a sheet entry port on an existing sheet symbol.
 
@@ -1503,9 +1505,15 @@ def register_generic_tools(mcp):
             io_type: "input" | "output" | "bidirectional" | "unspecified"
             side: "left" | "right" | "top" | "bottom"
             distance_from_top: Position along the chosen side in mils
+            font_id: Font for the entry label, an id in this sheet's font
+                table (``obj_get_font_id``). Left at 0, the entry label takes
+                the font the sheet already uses for sheet entries (the most common
+                one, or the net labels' font when there are none), so it
+                does not come in as Times New Roman 10.
 
         Returns:
-            Dictionary confirming sheet entry placement
+            Dictionary confirming sheet entry placement, with the entry's
+            label font (``font_id``) read back.
         """
         bridge = get_bridge()
         result = await bridge.send_command_async(
@@ -1516,6 +1524,7 @@ def register_generic_tools(mcp):
                 "io_type": io_type,
                 "side": side,
                 "distance_from_top": str(distance_from_top),
+                "font_id": str(int(font_id)),
             },
         )
         return result
@@ -1808,6 +1817,8 @@ def register_generic_tools(mcp):
         y: int,
         style: str = "right",
         io_type: str = "bidirectional",
+        width: int = 0,
+        font_id: int = 0,
     ) -> dict[str, Any]:
         """Place a port on the active schematic for inter-sheet connectivity.
 
@@ -1817,9 +1828,18 @@ def register_generic_tools(mcp):
             y: Y coordinate in mils
             style: Arrow style, "none", "left", "right", "left_right"
             io_type: I/O direction, "unspecified", "output", "input", "bidirectional"
+            width: Port length in mils. When given, AutoSize is turned off
+                so the width holds; an auto-sized port grows to fit its name
+                and can run onto a neighbouring wire. 0 leaves it auto-sized.
+            font_id: Font for the port, an id in this sheet's font
+                table (``obj_get_font_id``). Left at 0, the port takes
+                the font the sheet already uses for ports (the most common
+                one, or the net labels' font when there are none), so it
+                does not come in as Times New Roman 10.
 
         Returns:
-            Dictionary confirming placement
+            Dictionary confirming placement, with the port's ``font_id``,
+            ``width`` (mils) and ``auto_size`` read back.
         """
         bridge = get_bridge()
         result = await bridge.send_command_async(
@@ -1830,9 +1850,108 @@ def register_generic_tools(mcp):
                 "y": str(y),
                 "style": style,
                 "io_type": io_type,
+                "width": str(int(width)),
+                "font_id": str(int(font_id)),
             },
         )
         return result
+
+    @mcp.tool()
+    async def sch_fix_port_crossrefs(
+        sheet_path: str,
+        dry_run: bool = True,
+        set_connected_end: bool = True,
+    ) -> dict[str, Any]:
+        """Put each port's cross-reference at the end that is not wired.
+
+        With Port Cross References on, Altium draws a port's "Sheet[1B]"
+        text beside the end it treats as unwired. A port moved while it
+        had no wire keeps its old end, so after a block move the reference
+        can sit on the wire or run off the sheet, and a compile does not
+        put it back. This reads the sheet's ports, wires, live pins and
+        CrossRef parameters, finds the wired end of each horizontal port,
+        and moves the reference to the other end (20 mil out, text running
+        away from the port).
+
+        Args:
+            sheet_path: The .SchDoc, as app_list_documents reports it.
+            dry_run: True (default) only reports what it would move.
+            set_connected_end: Also write the port's ConnectedEnd, the
+                property that says which end is wired, so Altium keeps the
+                reference where it now is.
+
+        Returns:
+            ``moves`` (port, wired_end, from/to x and justification),
+            ``ok``, ``unresolved`` (neither or both ends wired, vertical,
+            or no reference), ``off_sheet`` (text estimated to run past
+            the zone border at Arial 7 widths) and, when applied,
+            ``applied`` / ``failed``. Nothing is saved.
+        """
+        from .port_crossrefs import border_for, plan_crossref_fixes
+
+        bridge = get_bridge()
+        refusal = await _focus_sheet(bridge, sheet_path)
+        if refusal is not None:
+            refusal.pop("placed", None)
+            return refusal
+        scope = f"doc:{sheet_path}"
+
+        async def query(object_type: str, properties: str, flt: str = ""):
+            res = await bridge.send_command_async("generic.query_objects", {
+                "scope": scope, "object_type": object_type,
+                "filter": flt, "properties": properties})
+            if isinstance(res, dict):
+                return res.get("objects") or []
+            return []
+
+        ports = await query("ePort", "Name,Location.X,Location.Y,Width,Style")
+        wires = await query("eWire", "Vertices")
+        refs = await query("eParameter", "Name,Text,Location.X,Location.Y,Justification",
+                           "Name=CrossRef")
+        pins = await query("ePin", "ConnectionX,ConnectionY")
+        info = await bridge.send_command_async("generic.get_document_info", {})
+        x_range = None
+        if isinstance(info, dict):
+            x_range = border_for(info.get("sheet_size", ""),
+                                 float(info.get("custom_width") or 0))
+
+        plan = plan_crossref_fixes(ports, wires, refs, pins, x_range)
+        plan.update({"sheet_path": sheet_path, "dry_run": dry_run,
+                     "ports": len(ports), "crossrefs": len(refs),
+                     "border_x": list(x_range) if x_range else None})
+        if not refs:
+            plan["note"] = ("No CrossRef parameters found: Port Cross References "
+                            "may be off, or the sheet was not compiled since "
+                            "they were turned on.")
+        if dry_run:
+            return plan
+
+        applied, failed = [], []
+        for m in plan["moves"]:
+            res = await bridge.send_command_async("generic.modify_objects", {
+                "scope": scope_to_wire(scope), "object_type": "eParameter",
+                "filter": (f"Name=CrossRef|Location.X={m['from_x']}"
+                           f"|Location.Y={m['from_y']}"),
+                "set": (f"Location.X={m['to_x']}"
+                        f"|Justification={m['to_justification']}")})
+            n = res.get("matched", res.get("modified", 0)) if isinstance(res, dict) else 0
+            (applied if n == 1 else failed).append(
+                {"port": m["port"], "result": res})
+        if set_connected_end:
+            for m in plan["moves"] + plan["ok"]:
+                res = await bridge.send_command_async("generic.modify_objects", {
+                    "scope": scope_to_wire(scope), "object_type": "ePort",
+                    "filter": (f"Name={m['port']}|Location.X={m['port_x']}"
+                               f"|Location.Y={m['port_y']}"),
+                    "set": f"ConnectedEnd={m['connected_end']}"})
+                n = res.get("matched", res.get("modified", 0)) if isinstance(res, dict) else 0
+                if n != 1:
+                    failed.append({"port": m["port"], "connected_end": res})
+        plan.update({"applied": applied, "failed": failed, "saved": False,
+                     "next_step": "Save the sheet, close and reload it "
+                                  "(app_close_document + proj_load_sheets), "
+                                  "then run this again with dry_run to confirm."})
+        return plan
 
     @mcp.tool()
     async def sch_place_power_port(
@@ -1841,6 +1960,7 @@ def register_generic_tools(mcp):
         y: int,
         style: str = "circle",
         orientation: int = -1,
+        font_id: int = 0,
     ) -> dict[str, Any]:
         """Place a power port symbol (VCC, GND, etc.) on the active schematic.
 
@@ -1861,9 +1981,14 @@ def register_generic_tools(mcp):
                 point: 0=right, 1=up, 2=left, 3=down. Leave at -1 to let
                 the bridge decide by style: the three ground glyphs point
                 down, the supply glyphs (circle, arrow, bar, wave) point up.
+            font_id: Font for the net name, an id in this sheet's font
+                table (``obj_get_font_id``). Left at 0, the net name takes
+                the font the sheet already uses for power ports (the most common
+                one, or the net labels' font when there are none), so it
+                does not come in as Times New Roman 10.
 
         Returns:
-            Dictionary confirming placement
+            Dictionary confirming placement, with ``font_id`` read back.
         """
         style = (style or "circle").strip().lower()
         if style not in POWER_PORT_STYLES:
@@ -1881,6 +2006,7 @@ def register_generic_tools(mcp):
                 "y": str(y),
                 "style": style,
                 "orientation": str(int(orientation)),
+                "font_id": str(int(font_id)),
             },
         )
         return result
@@ -2536,19 +2662,27 @@ def register_generic_tools(mcp):
         y2: int,
         text: str,
         align: str = "left",
+        font_id: int = 0,
     ) -> dict[str, Any]:
         """Place a multi-line text frame (note block) on the active sheet.
 
         A text frame is a bordered rectangle that word-wraps a block of
-        text. Use ``\\n`` in ``text`` for explicit line breaks.
+        text. A newline in ``text``, or a typed ``\\n``, becomes Altium's
+        own line break (stored as ``~1`` in the file); a typed ``\\n`` used
+        to be stored as those two characters and print as text.
 
         Args:
             x1, y1, x2, y2: The two rectangle corners in mils.
-            text: Frame contents (use \\n for line breaks).
+            text: Frame contents (newline or \\n for line breaks).
             align: Horizontal alignment "left", "center", or "right".
+            font_id: Font for the frame text, an id in this sheet's font
+                table (``obj_get_font_id``). Left at 0, the frame takes
+                the font the sheet already uses for text frames (the most
+                common one, or the net labels' font when there are none),
+                so it does not come in as Times New Roman 10.
 
         Returns:
-            Dict confirming placement and the frame corners.
+            Dict confirming placement, the frame corners and ``font_id``.
         """
         bridge = get_bridge()
         return await bridge.send_command_async(
@@ -2560,6 +2694,7 @@ def register_generic_tools(mcp):
                 "y2": str(y2),
                 "text": text,
                 "align": align,
+                "font_id": str(int(font_id)),
             },
         )
 
@@ -3096,6 +3231,7 @@ def register_generic_tools(mcp):
         placements: list[dict[str, Any]],
         document_path: Optional[str] = None,
         allow_manual_layout: bool = False,
+        tidy: bool = True,
     ) -> dict[str, Any]:
         """Place MANY schematic components from libraries in ONE call.
 
@@ -3108,18 +3244,28 @@ def register_generic_tools(mcp):
         Args:
             placements: [{lib_reference (required), x, y (mils),
                 library_path (empty: an open library), designator,
-                rotation (0/90/180/270), footprint}]. ``footprint`` names
-                one of the symbol's own PCB models (case aside), which
-                becomes its current model.
+                rotation (0/90/180/270), footprint, part_id}].
+                ``footprint`` names one of the symbol's own PCB models
+                (case aside), which becomes its current model. ``part_id``
+                places one part of a multi-part symbol (1 = A); without it
+                a symbol can land as a later part.
             document_path: .SchDoc to focus and place onto.
             allow_manual_layout: True places your own coordinates onto an
                 empty sheet anyway; say why.
+            tidy: After each part is placed: link it to the library it came
+                from (otherwise SourceLibraryName stays ``*`` and the Design
+                Item ID cannot be changed in the Properties panel), hide its
+                model parameters (simulation Kind, SubKind, Spice Prefix...
+                arrive visible at the sheet origin), and give its designator
+                the font the sheet's designators already use. False skips it.
 
         Returns:
             Dict with placed, failed, total counts and footprints_chosen;
             footprint_issues lists a part whose symbol has no model of
             that name (with the models it has) or whose choice did not
-            take. Such a part is placed on its library's model.
+            take. Such a part is placed on its library's model. ``tidied``
+            lists per part whether the link took, how many model
+            parameters were hidden, and the designator font when it changed.
         """
         refusal = _unknown_keys_refusal(
             placements, PLACEMENT_KEYS,
@@ -3143,6 +3289,8 @@ def register_generic_tools(mcp):
                 fields.append(f"designator={p['designator']}")
             if p.get("footprint"):
                 fields.append(f"footprint={payload_safe(p['footprint'])}")
+            if p.get("part_id"):
+                fields.append(f"part_id={int(p['part_id'])}")
             op_strs.append(";".join(fields))
 
         if not op_strs:
@@ -3157,7 +3305,8 @@ def register_generic_tools(mcp):
             return refusal
         return await bridge.send_command_async(
             "generic.place_sch_components_from_library",
-            {"placements": "~~".join(op_strs)},
+            {"placements": "~~".join(op_strs),
+             "tidy": "true" if tidy else "false"},
         )
 
     @mcp.tool()
