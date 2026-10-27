@@ -2573,21 +2573,44 @@ Begin
     End;
 End;
 
-{ The addresses of the pins no placed part shows. A multi-part symbol on a
-  sheet is one component per part, and each carries every pin of the
-  symbol, the other parts' pins hidden at its own positions; a symbol with
-  display modes carries every mode's pins too. A pin is live when its part
-  is the component's (PinShownOn) and its mode is the one in use. Sorted,
-  for IndexOf. The caller frees it. }
-Function DeadPinAddresses(SchDoc : ISch_Document) : TStringList;
+{ A pin's identity for DeadPinKeys: designator, part, display mode and
+  location. Two pins share one only if two placed parts overlap exactly. }
+Function PinKey(Pin : ISch_Pin) : String;
+Var
+    Desig : String;
+    Part, PinMode, X, Y : Integer;
+Begin
+    Desig := '';
+    Part := 0;
+    PinMode := 0;
+    X := 0;
+    Y := 0;
+    Try Desig := Pin.Designator; Except End;
+    Try Part := Pin.OwnerPartId; Except End;
+    Try PinMode := Pin.OwnerPartDisplayMode; Except End;
+    Try X := Pin.Location.X; Except End;
+    Try Y := Pin.Location.Y; Except End;
+    Result := Desig + '|' + IntToStr(Part) + '|' + IntToStr(PinMode) + '|'
+        + IntToStr(X) + '|' + IntToStr(Y);
+End;
+
+{ The pins no placed part shows, as PinKey strings added to Dead. A
+  multi-part symbol on a sheet is one component per part, and each carries
+  every pin of the symbol, the other parts' pins hidden at its own
+  positions; a symbol with display modes carries every mode's pins too. A
+  pin is live when its part is the component's (PinShownOn) and its mode is
+  the one in use.
+  Keys rather than object addresses, and a list the caller owns: the first
+  version (addresses, a returned TStringList tested against Nil) stopped
+  the loop with "Could not convert variant of type (Dispatch) into type
+  (Boolean)" on AD 25.8.1, 2026-10-26. }
+Procedure DeadPinKeys(SchDoc : ISch_Document; Dead : TStringList);
 Var
     Iterator, PinIter : ISch_Iterator;
     Comp : ISch_Component;
     Pin : ISch_Pin;
-    Mode, PinMode, Addr : Integer;
+    Mode, PinMode : Integer;
 Begin
-    Result := TStringList.Create;
-    Result.Sorted := True;
     Iterator := SchDoc.SchIterator_Create;
     Try
         Iterator.AddFilter_ObjectSet(MkSet(eSchComponent));
@@ -2604,12 +2627,12 @@ Begin
                 Begin
                     PinMode := Mode;
                     Try PinMode := Pin.OwnerPartDisplayMode; Except End;
-                    If (Not PinShownOn(Comp, Pin)) Or (PinMode <> Mode) Then
+                    If PinShownOn(Comp, Pin) Then
                     Begin
-                        Addr := 0;
-                        Try Addr := Pin.I_ObjectAddress; Except End;
-                        If Addr <> 0 Then Result.Add(IntToStr(Addr));
-                    End;
+                        If PinMode <> Mode Then Dead.Add(PinKey(Pin));
+                    End
+                    Else
+                        Dead.Add(PinKey(Pin));
                     Pin := PinIter.NextSchObject;
                 End;
             Finally
@@ -2637,7 +2660,8 @@ Var
     First : Boolean;
     MaxIter, LastAddr, ThisAddr, SameTries : Integer;
     DeadPins : TStringList;
-    Skip : Boolean;
+    PinObj : ISch_Pin;
+    Skip, LivePinsOnly : Boolean;
 Begin
     Result := '';
     First := (TotalMatched = 0);
@@ -2810,9 +2834,16 @@ Begin
       a modify wrote all three. A filter that names OwnerPartId or
       OwnerPartDisplayMode is asking about the hidden copies, so it gets
       them all. }
-    DeadPins := Nil;
-    If (ObjTypeInt = ePin) And (Not IsLibDoc) And (Pos('OwnerPart', FilterStr) = 0) Then
-        DeadPins := DeadPinAddresses(SchDoc);
+    LivePinsOnly := False;
+    If ObjTypeInt = ePin Then
+    Begin
+        If Not IsLibDoc Then
+        Begin
+            If Pos('OwnerPart', FilterStr) = 0 Then LivePinsOnly := True;
+        End;
+    End;
+    DeadPins := TStringList.Create;
+    If LivePinsOnly Then DeadPinKeys(SchDoc, DeadPins);
 
     Obj := Iterator.FirstSchObject;
     While Obj <> Nil Do
@@ -2820,11 +2851,10 @@ Begin
         If (Limit > 0) And (TotalMatched >= Limit) Then Break;
 
         Skip := False;
-        If DeadPins <> Nil Then
+        If LivePinsOnly Then
         Begin
-            ThisAddr := 0;
-            Try ThisAddr := Obj.I_ObjectAddress; Except End;
-            Skip := DeadPins.IndexOf(IntToStr(ThisAddr)) >= 0;
+            PinObj := Obj;
+            If DeadPins.IndexOf(PinKey(PinObj)) >= 0 Then Skip := True;
         End;
 
         If (Not Skip) And MatchesFilter(Obj, FilterStr) Then
@@ -2870,7 +2900,7 @@ Begin
         LibComp.SchIterator_Destroy(Iterator)
     Else
         SchDoc.SchIterator_Destroy(Iterator);
-    If DeadPins <> Nil Then DeadPins.Free;
+    DeadPins.Free;
 
     If Mode = 'modify' Then
         SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
@@ -10977,22 +11007,25 @@ End;
   - Its model parameters hidden. A symbol's simulation model brings
     parameters of its own (Kind, SubKind, Spice Prefix, ...) that arrive
     visible, with no position, at the sheet origin. They are the parameters
-    found below the component's first level; its own are left alone.
+    found below the component's first level, told apart by name; the
+    component's own are left alone.
   - The sheet's designator font, when one was found (DesigFont > 0).
-  Returns the JSON fields describing what changed. }
+  Returns the JSON fields describing what changed.
+  Written only in patterns shipped code already runs: the first version
+  stopped the loop with "Could not convert variant of type (Dispatch) into
+  type (Boolean)" (AD 25.8.1, 2026-10-26). }
 Function TidyPlacedComponent(Comp : ISch_Component; LibName : String;
     LibRef : String; DesigFont : Integer) : String;
 Var
-    Iter : ISch_Iterator;
-    Obj : ISch_GraphicalObject;
-    Param : ISch_Parameter;
+    ParamIter : ISch_Iterator;
+    ParamObj : ISch_Parameter;
     Own : TStringList;
-    Addr, Hidden, FontWas : Integer;
-    Linked, WasHidden : Boolean;
+    ParamName, GotLib : String;
+    Hidden, FontWas : Integer;
 Begin
-    Linked := False;
     Hidden := 0;
     FontWas := 0;
+    GotLib := '';
     SchBeginModify(Comp);
     Try
         If LibName <> '' Then
@@ -11003,50 +11036,47 @@ Begin
             Try Comp.UseDBTableName := False; Except End;
             Try Comp.UseLibraryName := True; Except End;
             Try Comp.DesignItemId := LibRef; Except End;
-            Try Linked := Comp.SourceLibraryName = LibName; Except End;
         End;
+        Try GotLib := Comp.SourceLibraryName; Except End;
 
         Own := TStringList.Create;
         Try
-            Iter := Comp.SchIterator_Create;
+            ParamIter := Comp.SchIterator_Create;
+            ParamIter.AddFilter_ObjectSet(MkSet(eParameter));
+            ParamIter.SetState_IterationDepth(eIterateFirstLevel);
             Try
-                Iter.AddFilter_ObjectSet(MkSet(eParameter));
-                Iter.SetState_IterationDepth(eIterateFirstLevel);
-                Obj := Iter.FirstSchObject;
-                While Obj <> Nil Do
+                ParamObj := ParamIter.FirstSchObject;
+                While ParamObj <> Nil Do
                 Begin
-                    Addr := 0;
-                    Try Addr := Obj.I_ObjectAddress; Except End;
-                    Own.Add(IntToStr(Addr));
-                    Obj := Iter.NextSchObject;
+                    ParamName := '';
+                    Try ParamName := ParamObj.Name; Except End;
+                    Own.Add(ParamName);
+                    ParamObj := ParamIter.NextSchObject;
                 End;
             Finally
-                Comp.SchIterator_Destroy(Iter);
+                Comp.SchIterator_Destroy(ParamIter);
             End;
 
-            Iter := Comp.SchIterator_Create;
+            ParamIter := Comp.SchIterator_Create;
+            ParamIter.AddFilter_ObjectSet(MkSet(eParameter));
             Try
-                Iter.AddFilter_ObjectSet(MkSet(eParameter));
-                Obj := Iter.FirstSchObject;
-                While Obj <> Nil Do
+                ParamObj := ParamIter.FirstSchObject;
+                While ParamObj <> Nil Do
                 Begin
-                    Addr := 0;
-                    Try Addr := Obj.I_ObjectAddress; Except End;
-                    If (Addr <> 0) And (Own.IndexOf(IntToStr(Addr)) < 0) Then
+                    ParamName := '';
+                    Try ParamName := ParamObj.Name; Except End;
+                    If Own.IndexOf(ParamName) < 0 Then
                     Begin
-                        Param := Obj;
-                        WasHidden := True;
-                        Try WasHidden := Param.IsHidden; Except End;
-                        If Not WasHidden Then
+                        If Not ParamObj.IsHidden Then
                         Begin
-                            Try Param.IsHidden := True; Except End;
+                            ParamObj.IsHidden := True;
                             Inc(Hidden);
                         End;
                     End;
-                    Obj := Iter.NextSchObject;
+                    ParamObj := ParamIter.NextSchObject;
                 End;
             Finally
-                Comp.SchIterator_Destroy(Iter);
+                Comp.SchIterator_Destroy(ParamIter);
             End;
         Finally
             Own.Free;
@@ -11064,7 +11094,7 @@ Begin
         SchEndModify(Comp);
     End;
 
-    Result := JsonBool('linked', Linked) + ',' + JsonInt('model_params_hidden', Hidden);
+    Result := JsonStr('source_library', GotLib) + ',' + JsonInt('model_params_hidden', Hidden);
     If (DesigFont > 0) And (FontWas <> DesigFont) Then
         Result := Result + ',' + JsonInt('designator_font_id', DesigFont);
 End;

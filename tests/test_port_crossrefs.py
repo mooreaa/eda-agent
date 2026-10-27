@@ -75,6 +75,14 @@ def test_a_reference_already_in_place_is_left_alone():
     assert [r["port"] for r in plan["ok"]] == ["PCI_PWR_nFAULT"]
 
 
+def test_a_reference_a_few_mil_off_is_at_the_right_end():
+    """PCI_PWR after its byte edit: 13800, Altium would say 13804.68."""
+    plan = plan_crossref_fixes(
+        [_port("PCI_PWR", 13300, 2800, 484.68, connected_end=CONNECTED_ORIGIN)],
+        [], [_ref(13800, 2800, JUST_RUNS_RIGHT)])
+    assert plan["moves"] == [] and len(plan["ok"]) == 1
+
+
 def test_a_wire_running_through_the_end_counts_as_wired():
     """The end sits mid-segment, not on a vertex."""
     plan = plan_crossref_fixes(

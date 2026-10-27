@@ -32,6 +32,10 @@ JUST_RUNS_LEFT = 5
 CONNECTED_NONE, CONNECTED_ORIGIN, CONNECTED_EXTREMITY, CONNECTED_BOTH = 0, 1, 2, 3
 #: Port styles whose body runs along X (none, left, right, left_right).
 HORIZONTAL_STYLES = {0, 1, 2, 3}
+#: How far a reference may sit from its exact place and still count as at
+#: the right end. Altium puts it exactly 20 mil out; one moved by hand onto
+#: the 10 mil grid is a few mil off, which nobody can see.
+PLACE_TOLERANCE = 10.0
 #: Average glyph advance of Arial 7 on a schematic, mils per character.
 #: Measured off the Rosen sheets; only used to warn, never to place.
 ARIAL7_CHAR_MILS = 31.0
@@ -205,7 +209,7 @@ def plan_crossref_fixes(
             elif want_j == JUST_RUNS_LEFT and want_x - length < lo:
                 off_sheet.append({**row, "runs_to_x": round(want_x - length), "border_x": lo})
 
-        if abs(have_x - want_x) <= 1 and have_j == want_j:
+        if abs(have_x - want_x) <= PLACE_TOLERANCE and have_j == want_j:
             ok.append(row)
         else:
             moves.append(row)

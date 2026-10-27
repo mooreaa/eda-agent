@@ -104,13 +104,27 @@ def test_tidy_runs_on_every_placed_part(funcs):
 def test_tidy_links_hides_and_sets_the_font(funcs):
     body = funcs["TidyPlacedComponent"]
     for write in ("Comp.SourceLibraryName := LibName", "Comp.UseLibraryName := True",
-                  "Comp.DesignItemId := LibRef", "Param.IsHidden := True",
+                  "Comp.DesignItemId := LibRef", "ParamObj.IsHidden := True",
                   "Comp.Designator.FontId := DesigFont"):
         assert write in body, write
-    # The component's own parameters are the first level; only the ones
-    # below it (the model's) are hidden.
+    # The component's own parameters are the first level, told apart by
+    # name; only the ones below it (the model's) are hidden.
     assert "SetState_IterationDepth(eIterateFirstLevel)" in body
-    assert "Own.IndexOf(IntToStr(Addr)) < 0" in body
+    assert "Own.IndexOf(ParamName) < 0" in body
+
+
+@pytest.mark.parametrize("routine", ["TidyPlacedComponent", "DeadPinKeys",
+                                     "PinKey", "ProcessSchDocObjects"])
+def test_new_code_avoids_what_stopped_the_loop(funcs, routine):
+    """The first versions stopped the polling loop on AD 25.8.1 with
+    "Could not convert variant of type (Dispatch) into type (Boolean)".
+    Both used object addresses and a TStringList tested against Nil;
+    the rewrite uses neither (obj_delete's own address use is mainline's
+    and is left alone)."""
+    body = funcs[routine]
+    if routine != "ProcessSchDocObjects":
+        assert "I_ObjectAddress" not in body
+    assert "DeadPins <> Nil" not in body
 
 
 def test_value_also_writes_the_value_parameter(funcs):
@@ -137,13 +151,18 @@ def test_setting_an_existing_parameter_never_creates_one(funcs):
 
 def test_a_sheet_pin_query_skips_hidden_copies(funcs):
     body = funcs["ProcessSchDocObjects"]
-    assert ("(ObjTypeInt = ePin) And (Not IsLibDoc) And "
-            "(Pos('OwnerPart', FilterStr) = 0)") in body
+    assert "If Pos('OwnerPart', FilterStr) = 0 Then LivePinsOnly := True" in body
+    assert "If LivePinsOnly Then DeadPinKeys(SchDoc, DeadPins)" in body
+    assert "DeadPins.IndexOf(PinKey(PinObj)) >= 0" in body
     assert "(Not Skip) And MatchesFilter(Obj, FilterStr)" in body
     assert "DeadPins.Free" in body
-    dead = funcs["DeadPinAddresses"]
+    dead = funcs["DeadPinKeys"]
     assert "PinShownOn(Comp, Pin)" in dead
     assert "OwnerPartDisplayMode" in dead
+    key = funcs["PinKey"]
+    for field in ("Pin.Designator", "Pin.OwnerPartId", "Pin.OwnerPartDisplayMode",
+                  "Pin.Location.X", "Pin.Location.Y"):
+        assert field in key
 
 
 def test_port_autosize_and_connected_end_read_on_ports_only(funcs):

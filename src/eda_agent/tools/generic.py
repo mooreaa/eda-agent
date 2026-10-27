@@ -3252,8 +3252,9 @@ def register_generic_tools(mcp):
             footprint_issues lists a part whose symbol has no model of
             that name (with the models it has) or whose choice did not
             take. Such a part is placed on its library's model. ``tidied``
-            lists per part whether the link took, how many model
-            parameters were hidden, and the designator font when it changed.
+            lists per part the ``source_library`` read back after the link,
+            how many model parameters were hidden, and the designator font
+            when it changed.
         """
         refusal = _unknown_keys_refusal(
             placements, PLACEMENT_KEYS,

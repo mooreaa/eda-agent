@@ -3101,27 +3101,50 @@ the mirror covers it.
 ## Appendix S: Rosen branch, placement cleanup (2026-10-26)
 
 Script 2026.10.26.101, on top of the mainline merge. Each item below was
-fixed by hand on the Rosen controller before it went into the tools.
-Results of the live run on AD 25.8.1 are filled in under each item.
+fixed by hand on the Rosen controller before it went into the tools. Run
+live on AD 25.8.1 the same evening, on a free scratch sheet (one net label
+set to Arial 7 first) and, read-only, on the project's sheets. The tool code
+was driven from this checkout through the bridge, since the session's MCP
+server still had the previous tool list.
 
 1. `sch_place_port`, `sch_place_power_port`, `sch_place_text_frame` and
    `sch_place_sheet_entry` take `font_id`; left at 0 they take the font the
    sheet already uses for that kind (`InferSheetFontFor`, falling back to
-   the net labels). The reply reads the font back.
+   the net labels). Passed: all four came in as font 3 (Arial 7) with no
+   `font_id`, the first of each kind through the net-label fallback, the
+   second port from the first. The saved file stores them as Arial 7 (the
+   table is renumbered on save: the API's 3 is the file's 2).
 2. `sch_place_port` takes `width`; `AutoSize` is turned off first so it
-   holds. The reply reads back `width` and `auto_size`.
+   holds. Passed: 600 asked, 600 read back after a redraw with `AutoSize`
+   false; an auto-sized neighbour grew from 500 to 882.
 3. `sch_place_text_frame` folds a newline or a typed backslash-n into CR LF.
-   Check: the saved file stores `~1`.
+   Passed: both stored as `~1` in the saved file. (`#13 + #10`, not the
+   `#13#10` literal, which no shipped unit uses.)
 4. `sch_place_components` (and `sch_draw_template`) tidy each placed part
    unless `tidy=false`: library link (SourceLibraryName, LibReference,
    DesignItemId, UseLibraryName), model parameters below the component's
-   first level hidden, designator in the sheet's designator font. The reply
-   lists `tidied`. `part_id` is now an accepted placement key.
+   first level hidden (told apart by name), designator in the sheet's
+   designator font. The reply lists `tidied` with `source_library` read
+   back. `part_id` is now an accepted placement key. Passed: a Passive.SchLib
+   resistor came in linked with its five simulation parameters (Kind,
+   SubKind, Spice Prefix, Excluded Parts, Netlist) hidden and its Value
+   left showing; a Mosfet.SchLib dual FET with `part_id` 1 came in as part 1,
+   linked. The FIRST version of this step stopped the polling loop with
+   "Could not convert variant of type (Dispatch) into type (Boolean)"; it
+   was rewritten in patterns shipped code already runs (typed parameter
+   from the iterator, `Not ParamObj.IsHidden`, no object addresses, no
+   Boolean result variable). `eda-agent relaunch` restarted the loop
+   without anyone at Altium.
 5. The `Value` key of `sch_set_components_parameters` also writes an
-   existing `Value` parameter; a parameter it creates is hidden, at the part.
+   existing `Value` parameter; a parameter it creates is hidden, at the
+   part. Passed: Value and Comment both 10k; the new parameter hidden at
+   the part's location.
 6. An `ePin` query or modify on a sheet skips the pins a placed part does
    not show (other parts' copies, other display modes) unless the filter
-   names `OwnerPart...`.
+   names `OwnerPart...`. Passed: 16 pin copies on the scratch sheet, 7 live
+   (two resistors, and G/D/S of the dual FET's part 1 in its mode 1). Its
+   first version hit the same modal as item 4 and was rewritten the same
+   way: pins keyed by designator, part, mode and location.
 7. `AutoSize` reads and writes on `ePort` only. `ConnectedEnd` (0 none, 1 origin,
    2 extremity, 3 both) reads on `ePort` and is never written: Altium derives it
    from the wiring. Live: a write read back once, and the next query had it at 0
@@ -3129,3 +3152,7 @@ Results of the live run on AD 25.8.1 are filled in under each item.
    wired at their origin and 2 on V_IN_ACBUS_28V, wired at its far end.
 8. New tool `sch_fix_port_crossrefs` (dry run by default). It takes the wired
    end from `ConnectedEnd`, and from the wire geometry when that reads 0 or 3.
+   Dry run on eight project sheets: 111 references at the right end, every
+   one decided by ConnectedEnd; four ports with no reference reported as
+   such. The apply path (two writes on the CrossRef parameter) has NOT run
+   live: no reference on the project was at the wrong end to try it on.
