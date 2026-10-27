@@ -11,9 +11,12 @@ and neither a compile nor a nudge puts it back. On the Rosen controller
 The reference is just a parameter: Location (end of the port, 20 mil out,
 at the port's Y) and Justification (3 = text runs right from the anchor,
 5 = text runs left). Both are writable, so the fix is two property writes
-per port once the wired end is known. The planning here is pure, so it can
-be tested without Altium; ``sch_fix_port_crossrefs`` reads the sheet and
-applies the plan.
+per port once the wired end is known. Altium's own answer to that is the
+port's ConnectedEnd (1 origin, 2 extremity), which it derives from the
+wiring and does not let a script set; the wire geometry here is the
+fallback when it reads 0 or 3, and a cross-check otherwise. The planning is
+pure, so it can be tested without Altium; ``sch_fix_port_crossrefs`` reads
+the sheet and applies the plan.
 """
 
 from __future__ import annotations
@@ -158,12 +161,23 @@ def plan_crossref_fixes(
         used.add(best)
         ref = refs[best]
 
-        left = _touched(x0, y, segs, points)
-        right = _touched(x1, y, segs, points)
-        if left == right:
+        # Altium's own answer first; the geometry when it has none.
+        wire_left = _touched(x0, y, segs, points)
+        wire_right = _touched(x1, y, segs, points)
+        altium = _num(port, "ConnectedEnd")
+        altium = int(altium) if altium is not None else None
+        if altium in (CONNECTED_ORIGIN, CONNECTED_EXTREMITY):
+            left = altium == CONNECTED_ORIGIN
+            source = "ConnectedEnd"
+        elif wire_left != wire_right:
+            left = wire_left
+            source = "wires"
+        else:
             unresolved.append({
                 "port": name,
-                "reason": "both ends wired" if left else "neither end wired",
+                "reason": ("both ends wired" if wire_left or altium == CONNECTED_BOTH
+                           else "neither end wired"),
+                "connected_end": altium,
                 "crossref_x": ref["Location.X"]})
             continue
 
@@ -176,6 +190,7 @@ def plan_crossref_fixes(
         row = {"port": name, "port_x": port["Location.X"],
                "port_y": port["Location.Y"], "width": width,
                "wired_end": "left" if left else "right",
+               "decided_by": source,
                "connected_end": end,
                "from_x": ref["Location.X"], "from_y": ref["Location.Y"],
                "from_justification": have_j,

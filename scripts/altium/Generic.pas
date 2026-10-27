@@ -569,8 +569,8 @@ Begin
                 Or ((PropName = 'TextColor') And (Not SchObjectHasTextColor(Obj)))
                 Or ((PropName = 'FontId') And (Not SchObjectHasFontId(Obj)))
                 Or ((PropName = 'TextFontId') And (Not SchObjectHasTextFontId(Obj)))
-                Or (((PropName = 'AutoSize') Or (PropName = 'ConnectedEnd'))
-                    And (Obj.ObjectId <> ePort))
+                Or ((PropName = 'AutoSize') And (Obj.ObjectId <> ePort))
+                Or (PropName = 'ConnectedEnd')
                 Or (((PropName = 'DisplayMode') Or (PropName = 'FootprintPinMap'))
                     And (Obj.ObjectId <> eSchComponent))
                 Or (((PropName = 'SwapIdPart') Or (PropName = 'SwapIdPin')
@@ -1922,21 +1922,16 @@ Begin
             Else
                 NotePropertyDiag('unknown', PropName);
         End
-        Else If (PropName = 'AutoSize') Or (PropName = 'ConnectedEnd') Then
+        { ConnectedEnd is not written: Altium derives it from the wiring.
+          MEASURED on AD 25.8.1: a write read back at once, and the next
+          query had it back at 0 on an unwired port. }
+        Else If PropName = 'AutoSize' Then
         Begin
             If Obj.ObjectId = ePort Then
             Begin
                 PortObj := Obj;
-                If PropName = 'AutoSize' Then
-                Begin
-                    PortObj.AutoSize := (LowerCase(Value) = 'true') Or (Value = '1');
-                    WroteOK := PortObj.AutoSize = ((LowerCase(Value) = 'true') Or (Value = '1'));
-                End
-                Else
-                Begin
-                    PortObj.ConnectedEnd := StrToIntDef(Value, 0);
-                    WroteOK := PortObj.ConnectedEnd = StrToIntDef(Value, 0);
-                End;
+                PortObj.AutoSize := (LowerCase(Value) = 'true') Or (Value = '1');
+                WroteOK := PortObj.AutoSize = ((LowerCase(Value) = 'true') Or (Value = '1'));
             End
             Else
                 NotePropertyDiag('unknown', PropName);

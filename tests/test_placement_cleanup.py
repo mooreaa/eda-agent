@@ -146,19 +146,25 @@ def test_a_sheet_pin_query_skips_hidden_copies(funcs):
     assert "OwnerPartDisplayMode" in dead
 
 
-@pytest.mark.parametrize("routine", ["GetSchProperty", "SetSchProperty"])
-def test_port_autosize_and_connected_end_are_port_only(funcs, routine):
-    body = funcs[routine]
+def test_port_autosize_and_connected_end_read_on_ports_only(funcs):
+    body = funcs["GetSchProperty"]
     at = body.find("(PropName = 'AutoSize') Or (PropName = 'ConnectedEnd')")
     assert at != -1
-    branch = body[at:at + 900]
+    branch = body[at:at + 600]
     assert "Obj.ObjectId = ePort" in branch
     assert "PortObj.AutoSize" in branch and "PortObj.ConnectedEnd" in branch
 
 
-def test_port_properties_are_refused_on_other_types(funcs):
-    body = funcs["UnsupportedSchProperty"]
-    assert "(PropName = 'AutoSize') Or (PropName = 'ConnectedEnd')" in body
+def test_autosize_writes_on_ports_and_connected_end_never(funcs):
+    """Altium derives ConnectedEnd from the wiring. A write read back once
+    and was 0 again on the next query (AD 25.8.1, 2026-10-26)."""
+    setter = funcs["SetSchProperty"]
+    at = setter.find("PropName = 'AutoSize' Then")
+    assert at != -1 and "Obj.ObjectId = ePort" in setter[at:at + 300]
+    assert "PortObj.ConnectedEnd :=" not in setter
+    gate = funcs["UnsupportedSchProperty"]
+    assert "((PropName = 'AutoSize') And (Obj.ObjectId <> ePort))" in gate
+    assert "(PropName = 'ConnectedEnd')" in gate
 
 
 # --------------------------------------------------------------------------

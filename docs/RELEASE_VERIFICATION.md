@@ -3122,5 +3122,10 @@ Results of the live run on AD 25.8.1 are filled in under each item.
 6. An `ePin` query or modify on a sheet skips the pins a placed part does
    not show (other parts' copies, other display modes) unless the filter
    names `OwnerPart...`.
-7. `AutoSize` and `ConnectedEnd` read and write on `ePort` only.
-8. New tool `sch_fix_port_crossrefs` (dry run by default).
+7. `AutoSize` reads and writes on `ePort` only. `ConnectedEnd` (0 none, 1 origin,
+   2 extremity, 3 both) reads on `ePort` and is never written: Altium derives it
+   from the wiring. Live: a write read back once, and the next query had it at 0
+   again on an unwired port; on Power Regulators it read 1 on the eleven ports
+   wired at their origin and 2 on V_IN_ACBUS_28V, wired at its far end.
+8. New tool `sch_fix_port_crossrefs` (dry run by default). It takes the wired
+   end from `ConnectedEnd`, and from the wire geometry when that reads 0 or 3.

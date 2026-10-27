@@ -1860,7 +1860,6 @@ def register_generic_tools(mcp):
     async def sch_fix_port_crossrefs(
         sheet_path: str,
         dry_run: bool = True,
-        set_connected_end: bool = True,
     ) -> dict[str, Any]:
         """Put each port's cross-reference at the end that is not wired.
 
@@ -1869,16 +1868,14 @@ def register_generic_tools(mcp):
         had no wire keeps its old end, so after a block move the reference
         can sit on the wire or run off the sheet, and a compile does not
         put it back. This reads the sheet's ports, wires, live pins and
-        CrossRef parameters, finds the wired end of each horizontal port,
-        and moves the reference to the other end (20 mil out, text running
-        away from the port).
+        CrossRef parameters, takes each horizontal port's wired end from
+        Altium's ConnectedEnd (the wire geometry when that reads none or
+        both), and moves the reference to the other end (20 mil out, text
+        running away from the port).
 
         Args:
             sheet_path: The .SchDoc, as app_list_documents reports it.
             dry_run: True (default) only reports what it would move.
-            set_connected_end: Also write the port's ConnectedEnd, the
-                property that says which end is wired, so Altium keeps the
-                reference where it now is.
 
         Returns:
             ``moves`` (port, wired_end, from/to x and justification),
@@ -1904,7 +1901,8 @@ def register_generic_tools(mcp):
                 return res.get("objects") or []
             return []
 
-        ports = await query("ePort", "Name,Location.X,Location.Y,Width,Style")
+        ports = await query("ePort",
+                            "Name,Location.X,Location.Y,Width,Style,ConnectedEnd")
         wires = await query("eWire", "Vertices")
         refs = await query("eParameter", "Name,Text,Location.X,Location.Y,Justification",
                            "Name=CrossRef")
@@ -1937,16 +1935,6 @@ def register_generic_tools(mcp):
             n = res.get("matched", res.get("modified", 0)) if isinstance(res, dict) else 0
             (applied if n == 1 else failed).append(
                 {"port": m["port"], "result": res})
-        if set_connected_end:
-            for m in plan["moves"] + plan["ok"]:
-                res = await bridge.send_command_async("generic.modify_objects", {
-                    "scope": scope_to_wire(scope), "object_type": "ePort",
-                    "filter": (f"Name={m['port']}|Location.X={m['port_x']}"
-                               f"|Location.Y={m['port_y']}"),
-                    "set": f"ConnectedEnd={m['connected_end']}"})
-                n = res.get("matched", res.get("modified", 0)) if isinstance(res, dict) else 0
-                if n != 1:
-                    failed.append({"port": m["port"], "connected_end": res})
         plan.update({"applied": applied, "failed": failed, "saved": False,
                      "next_step": "Save the sheet, close and reload it "
                                   "(app_close_document + proj_load_sheets), "

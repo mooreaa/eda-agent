@@ -21,9 +21,12 @@ from eda_agent.tools.port_crossrefs import (
 )
 
 
-def _port(name, x, y, width, style=2):
-    return {"Name": name, "Location.X": x, "Location.Y": y,
-            "Width": width, "Style": style}
+def _port(name, x, y, width, style=2, connected_end=None):
+    row = {"Name": name, "Location.X": x, "Location.Y": y,
+           "Width": width, "Style": style}
+    if connected_end is not None:
+        row["ConnectedEnd"] = connected_end
+    return row
 
 
 def _ref(x, y, j, text="Rosen EShade Controller[1B]"):
@@ -87,6 +90,25 @@ def test_a_port_on_a_pin_counts_as_wired():
         [_ref(1420, 500, JUST_RUNS_RIGHT)],
         pins=[{"ConnectionX": 1400, "ConnectionY": 500}])
     assert plan["moves"][0]["wired_end"] == "right"
+
+
+def test_altiums_connected_end_wins_over_the_geometry():
+    """A port wired through something the geometry does not see (here
+    nothing at all) still gets its reference moved, by ConnectedEnd."""
+    plan = plan_crossref_fixes(
+        [_port("V_IN_ACBUS_28V", 1400, 8250, 700, style=0,
+               connected_end=CONNECTED_EXTREMITY)],
+        [], [_ref(2120, 8250, JUST_RUNS_RIGHT)])
+    m = plan["moves"][0]
+    assert m["wired_end"] == "right" and m["decided_by"] == "ConnectedEnd"
+    assert m["to_justification"] == JUST_RUNS_LEFT
+
+
+def test_the_geometry_decides_when_altium_says_none():
+    plan = plan_crossref_fixes(
+        [_port("A", 1000, 500, 400, connected_end=0)],
+        [_wire((900, 500), (1000, 500))], [_ref(980, 500, JUST_RUNS_LEFT)])
+    assert plan["moves"][0]["decided_by"] == "wires"
 
 
 @pytest.mark.parametrize("wires,reason", [
@@ -180,7 +202,7 @@ def _tool(monkeypatch, bridge):
 
 
 _ROWS = {
-    "ePort": [_port("PCI_PWR", 13300, 2800, 484.68)],
+    "ePort": [_port("PCI_PWR", 13300, 2800, 484.68, connected_end=CONNECTED_ORIGIN)],
     "eWire": [_wire((13200, 2800), (13300, 2800))],
     "eParameter": [_ref(13280, 2800, JUST_RUNS_LEFT)],
     "ePin": [],
@@ -202,28 +224,21 @@ async def test_dry_run_writes_nothing(monkeypatch):
                      and p["object_type"] == "eParameter")
     assert ref_query["filter"] == "Name=CrossRef"
     assert ref_query["scope"] == f"doc:{_SHEET}"
+    port_query = next(p for c, p in bridge.calls if c == "generic.query_objects"
+                      and p["object_type"] == "ePort")
+    assert "ConnectedEnd" in port_query["properties"]
 
 
 @pytest.mark.asyncio
-async def test_apply_moves_the_reference_and_sets_the_wired_end(monkeypatch):
+async def test_apply_moves_only_the_reference(monkeypatch):
+    """ConnectedEnd is Altium's, derived from the wiring: never written."""
     bridge = _SheetBridge(_ROWS)
     out = await (_tool(monkeypatch, bridge))(sheet_path=_SHEET, dry_run=False)
     writes = [p for c, p in bridge.calls if c == "generic.modify_objects"]
-    ref_write = next(p for p in writes if p["object_type"] == "eParameter")
+    assert [p["object_type"] for p in writes] == ["eParameter"]
+    ref_write = writes[0]
     assert ref_write["filter"] == "Name=CrossRef|Location.X=13280|Location.Y=2800"
     assert ref_write["set"].startswith("Location.X=13804.68")
     assert ref_write["set"].endswith(f"|Justification={JUST_RUNS_RIGHT}")
-    port_write = next(p for p in writes if p["object_type"] == "ePort")
-    assert port_write["filter"] == "Name=PCI_PWR|Location.X=13300|Location.Y=2800"
-    assert port_write["set"] == f"ConnectedEnd={CONNECTED_ORIGIN}"
     assert out["failed"] == [] and len(out["applied"]) == 1
     assert out["saved"] is False
-
-
-@pytest.mark.asyncio
-async def test_connected_end_can_be_left_alone(monkeypatch):
-    bridge = _SheetBridge(_ROWS)
-    await (_tool(monkeypatch, bridge))(sheet_path=_SHEET, dry_run=False,
-                                      set_connected_end=False)
-    writes = [p for c, p in bridge.calls if c == "generic.modify_objects"]
-    assert [p["object_type"] for p in writes] == ["eParameter"]
