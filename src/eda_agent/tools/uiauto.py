@@ -1216,9 +1216,12 @@ def register_uiauto_tools(mcp):
             dialog_title: capture that dialog rather than the main
                 window.
 
+        The PNG is the window's own pixels, not upscaled, so pixels per
+        mil can be measured from it.
+
         Returns:
-            ``{"ok": true, "path": ..., "hwnd": ...}``. Read the file to
-            look at it.
+            ``{"ok": true, "path": ..., "hwnd": ..., "width": ...,
+            "height": ...}``. Read the file to look at it.
         """
         import os
         import time as _time
@@ -1256,7 +1259,14 @@ def register_uiauto_tools(mcp):
         os.makedirs(folder, exist_ok=True)
         if not ocr.capture_png(target, path):
             return {"ok": False, "reason": "capture failed", "path": path}
-        return {"ok": True, "path": path, "hwnd": target,
+        size: dict[str, Any] = {}
+        try:
+            from PIL import Image
+            with Image.open(path) as img:
+                size = {"width": img.width, "height": img.height}
+        except Exception:                           # noqa: BLE001
+            pass
+        return {"ok": True, "path": path, "hwnd": target, **size,
                 "created_folder": created_folder,
                 "note": "read the file to look at it"}
 

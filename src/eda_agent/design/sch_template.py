@@ -401,8 +401,11 @@ def build(template: dict, pins: dict[str, list[PinEnd]], *,
                     continue
                 orient = item.get("orientation")
                 entry["style"] = style
+                # Down for any ground net, whatever its style: a "bar"
+                # GND pointing up read as a supply on the Rosen sheets.
                 entry["orientation"] = int(orient) if orient is not None else (
-                    3 if style in GROUND_STYLES else 1)
+                    3 if (style in GROUND_STYLES
+                          or "GND" in entry["net"].upper()) else 1)
                 d.ports.append(entry)
             else:
                 entry["orientation"] = int(item.get("orientation", 0))

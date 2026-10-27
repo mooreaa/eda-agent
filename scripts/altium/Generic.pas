@@ -4034,13 +4034,16 @@ End;
   ClearSelection"). Use the Sch:DeSelectAll process -- iterating objects and
   setting .Selection := False faults on sub-objects (parameters, pin labels)
   that don't expose Selection, and that "Undeclared identifier" modal bypasses
-  Try/Except. The process is what Edit|Deselect All runs (see Application.pas). }
+  Try/Except. Sch:DeSelectAll left the selection standing on AD 25.8.1
+  (Rosen, 2026-10-25: handles and the Properties panel stayed through
+  refreshes); Sch:DeSelect with Action=All cleared it. }
 Procedure SchDeselectAllObjects(SchDoc : ISch_Document);
 Begin
     If SchDoc = Nil Then Exit;
     Try
         ResetParameters;
-        RunProcess('Sch:DeSelectAll');
+        AddStringParameter('Action', 'All');
+        RunProcess('Sch:DeSelect');
     Except End;
 End;
 
@@ -4107,10 +4110,17 @@ Begin
 
     If ZoomProcess <> '' Then
     Begin
-        If (Action <> 'fit') And (Action <> 'selection') And (Action <> 'board') Then
+        If (Action <> 'fit') And (Action <> 'selection') And (Action <> 'board')
+            And (Action <> 'document') Then
         Begin
             Result := BuildErrorResponse(RequestId, 'BAD_PARAMS',
-                'action must be "fit", "board" or "selection", got "' + Action + '"');
+                'action must be "fit", "board", "document" or "selection", got "' + Action + '"');
+            Exit;
+        End;
+        If (Action = 'document') And (ZoomProcess <> 'Sch:Zoom') Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'BAD_PARAMS',
+                'action "document" is for a schematic; a board takes "board" or "fit"');
             Exit;
         End;
         ResetParameters;
@@ -4122,6 +4132,10 @@ Begin
             AddStringParameter('Action', 'Document');
             AddStringParameter('Target', 'Board');
         End
+        { "document" is View > Fit Document: the whole sheet with its border. }
+        { "fit" is Fit All Objects, which zooms past the border of a sheet   }
+        { whose parts sit inside the frame.                                  }
+        Else If Action = 'document' Then AddStringParameter('Action', 'Document')
         Else If (Action = 'fit') Or (Action = 'board') Then AddStringParameter('Action', 'All')
         Else AddStringParameter('Action', 'Selected');
         RunProcess(ZoomProcess);

@@ -1004,8 +1004,23 @@ def register_project_tools(mcp):
             )
         return result
 
+    def _print_dialog_refusal(tool: str) -> dict[str, Any]:
+        return {
+            "success": False,
+            "error": "PRINT_DIALOG_NOT_SILENT",
+            "details": (
+                f"{tool} opens Altium's Preview SCH print dialog on AD "
+                "25.8 and blocks the bridge until someone presses Print "
+                "or Cancel; no file is written unattended. For a silent "
+                "PDF run an OutJob whose Publish container is PDF "
+                "(proj_list_outjob_containers, then proj_run_outjob). "
+                "Pass open_print_dialog=True only with a person at "
+                "Altium to finish it."),
+        }
+
     @mcp.tool()
-    async def proj_export_pdf(output_path: str) -> dict[str, Any]:
+    async def proj_export_pdf(output_path: str,
+                              open_print_dialog: bool = False) -> dict[str, Any]:
         """Open Altium's PRINT dialog for the active document, for a PDF.
 
         NOT UNATTENDED. This opens the print preview / print setup dialog
@@ -1016,12 +1031,20 @@ def register_project_tools(mcp):
         container whose medium is PDF (proj_list_outjob_containers, then
         proj_run_outjob).
 
+        Refuses with ``PRINT_DIALOG_NOT_SILENT`` unless
+        ``open_print_dialog`` is set, so an unattended agent does not
+        block the bridge on a dialog nobody will answer.
+
         Args:
             output_path: Full path for the output PDF file
+            open_print_dialog: open the dialog anyway, for a person to
+                finish.
 
         Returns:
             Dictionary confirming export
         """
+        if not open_print_dialog:
+            return _print_dialog_refusal("proj_export_pdf")
         bridge = get_bridge()
         result = await bridge.send_command_async(
             "project.export_pdf", {"output_path": output_path}
@@ -1562,11 +1585,16 @@ def register_project_tools(mcp):
         format: str = "pdf",
         width: int = 1920,
         height: int = 1080,
+        open_print_dialog: bool = False,
     ) -> dict[str, Any]:
-        """Export the active schematic / PCB document, silent (no dialog).
+        """Export the active schematic / PCB document to a PDF.
 
-        Only PDF is silent; it prints the focused document, as
-        ``proj_export_pdf`` does, so make the wanted tab active first.
+        NOT SILENT on AD 25.8: the PDF path opens the Preview SCH print
+        dialog and blocks the bridge until it is answered, as
+        ``proj_export_pdf`` does. It refuses with
+        ``PRINT_DIALOG_NOT_SILENT`` unless ``open_print_dialog`` is set;
+        the silent route is an OutJob run by ``proj_run_outjob``. It
+        prints the focused document, so make the wanted tab active first.
         png/jpg/bmp return ``IMAGE_FORMAT_UNSUPPORTED``: they need an
         OutJob with an image container, run by ``proj_run_outjob``.
         An old file at ``output_path`` is deleted first, and a run that
@@ -1580,6 +1608,8 @@ def register_project_tools(mcp):
                 explicit ``IMAGE_FORMAT_UNSUPPORTED`` error.
             width: Kept for API compatibility. Unused by the PDF path.
             height: Kept for API compatibility. Unused by the PDF path.
+            open_print_dialog: run the PDF path anyway, for a person at
+                Altium to finish the dialog.
 
         Returns:
             Dictionary confirming the export with the resolved path,
@@ -1588,6 +1618,8 @@ def register_project_tools(mcp):
         """
         import os
 
+        if str(format).lower() == "pdf" and not open_print_dialog:
+            return _print_dialog_refusal("proj_export_image")
         bridge = get_bridge()
         result = await bridge.send_command_async(
             "project.export_image",

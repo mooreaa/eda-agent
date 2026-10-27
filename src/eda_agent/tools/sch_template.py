@@ -245,7 +245,7 @@ def register_sch_template_tools(mcp):
         "vh" for vertical first). Altium adds the junction dots itself
         where a wire ends on another; do not plan any. Ports default to
         style "bar" pointing up, or "gnd_power" pointing down for a net
-        containing GND. ``nets`` is the netlist the sheet must produce,
+        containing GND; a GND net drawn as "bar" points down too. ``nets`` is the netlist the sheet must produce,
         checked pin by pin.
 
         REDRAWING a sheet whose parts are on a board: give each part its

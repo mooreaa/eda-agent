@@ -851,6 +851,11 @@ def register_generic_tools(mcp):
     async def obj_deselect_all() -> dict[str, Any]:
         """Clear all object selection on the active document.
 
+        On a schematic this runs Sch:DeSelect with Action=All, which is
+        what cleared the handles on AD 25.8.1 (Sch:DeSelectAll reported
+        success and left them). obj_select is additive, so call this
+        before selecting a new set.
+
         Returns:
             Dictionary confirming deselection
         """
@@ -871,10 +876,13 @@ def register_generic_tools(mcp):
         library; the focused tab decides which editor zooms.
 
         Args:
-            action: "fit" (zoom to show all), "board" (the board alone,
-                not parts parked beside it; a schematic fits as "fit"),
-                "selection" (zoom to selected objects) or "point" (zoom
-                to x, y)
+            action: "fit" (Fit All Objects: the objects' extent, which
+                on a schematic clips the sheet border), "document"
+                (schematic only, Fit Document: the whole sheet with its
+                border), "board" (the board alone, not parts parked
+                beside it; a schematic fits as "fit"), "selection" (zoom
+                to selected objects; did nothing on AD 25.8.1
+                schematics) or "point" (zoom to x, y)
             x, y: the point for "point", in mils (a footprint's frame in
                 a PCB library)
             radius: half the width of the view round the point on a board

@@ -32,7 +32,7 @@ def _export(monkeypatch, path):
     monkeypatch.setattr(project_tools, "get_bridge", lambda: _Bridge())
     mcp = _Mcp()
     project_tools.register_project_tools(mcp)
-    return asyncio.run(mcp.tools["proj_export_image"](str(path)))
+    return asyncio.run(mcp.tools["proj_export_image"](str(path), open_print_dialog=True))
 
 
 def test_a_real_pdf_passes(monkeypatch, tmp_path):

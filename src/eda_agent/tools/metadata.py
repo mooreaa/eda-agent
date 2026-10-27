@@ -209,6 +209,7 @@ INTERACTION_OVERRIDES = {
     # so it is silent; allow_modal=True still takes the dialog route.
     "pcb_run_drc": SILENT,
     "proj_export_pdf": MODAL,         # Preview PCB / print preview
+    "proj_export_image": MODAL,       # PDF path: the same print preview
     "proj_run_output": MODAL,         # Altium's exporter dialogs
     # These three raise "Unsaved Changes" whenever the target is dirty, and
     # that one is a WPF dialog whose buttons expose no window handles, so

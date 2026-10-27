@@ -295,6 +295,17 @@ End;
 { and looks it up again afterwards to say whether it is really gone.        }
 { With discard, the modified flag is cleared first, unread, which is what   }
 { keeps the save prompt away; the edits are lost.                           }
+{ GetDocumentByPath resolves a phantom copy's name ("/Hardware/x.SchLib",  }
+{ opened from a forward-slash path) to the REAL document on the current    }
+{ drive, so a close aimed at the phantom closed the real one. The answer is }
+{ compared with the path asked for, slashes and case aside, and a document }
+{ under another name is refused rather than closed.                        }
+Function SameDocPath(A : String; B : String) : Boolean;
+Begin
+    Result := LowerCase(StringReplace(A, '/', '\', -1))
+        = LowerCase(StringReplace(B, '/', '\', -1));
+End;
+
 Function App_CloseDocument(Params : String; RequestId : String) : String;
 Var
     FilePath : String;
@@ -312,6 +323,14 @@ Begin
     If ServerDoc = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NOT_LOADED', 'Document not loaded: ' + FilePath);
+        Exit;
+    End;
+    If Not SameDocPath(ServerDoc.FileName, FilePath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'PATH_MISMATCH',
+            'Altium resolved ' + FilePath + ' to a different document, '
+            + ServerDoc.FileName + ', so nothing was closed. A copy opened under '
+            + 'a forward-slash path is one; close it from Altium''s tab.');
         Exit;
     End;
     WasModified := False;

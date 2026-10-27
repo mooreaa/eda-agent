@@ -686,6 +686,24 @@ def register_application_tools(mcp):
             }
         return project_dir, (info or {}).get("project_name", ""), None
 
+    async def _open_project_paths() -> list[str]:
+        """Paths of the real projects open in Altium, [] if unknown.
+
+        Free Documents and other entries without a project file are left
+        out. A failed listing counts as unknown, not as ambiguous.
+        """
+        try:
+            listing = await get_bridge().send_command_async(
+                "project.get_open_projects", {})
+        except Exception:                           # noqa: BLE001
+            return []
+        projects = (listing or {}).get("projects", []) if isinstance(
+            listing, dict) else []
+        return [str(p.get("project_path", "")) for p in projects
+                if isinstance(p, dict)
+                and str(p.get("project_path", "")).lower().endswith(
+                    (".prjpcb", ".prjscr", ".prjfpg", ".prjemb", ".prjmbd"))]
+
     def _checkpoint_store():
         from ..config import get_config
         from ..checkpoint import CheckpointStore
@@ -723,8 +741,14 @@ def register_application_tools(mcp):
             "application.close_document", params, timeout=120.0)
 
     @mcp.tool()
-    async def app_checkpoint(label: str = "", save_first: bool = True) -> dict[str, Any]:
-        """Snapshot the focused project so the session is revertible.
+    async def app_checkpoint(label: str = "", save_first: bool = True,
+                             project_path: str = "") -> dict[str, Any]:
+        """Snapshot one project so the session is revertible.
+
+        Name the project with ``project_path``. Without it the focused
+        project is taken, and the call refuses when several projects are
+        open: with three open on the Rosen controller it silently backed
+        up a different one.
 
         Copies the project's design files into a content-addressed store under
         the workspace (unchanged files are deduplicated, so repeat checkpoints
@@ -736,6 +760,8 @@ def register_application_tools(mcp):
             label: optional human note ("before routing pass").
             save_first: flush dirty Altium docs to disk before snapshotting
                 so the checkpoint reflects in-editor changes (default True).
+            project_path: the project file (.PrjPcb) to snapshot, as
+                proj_list_open reports it.
 
         Returns:
             The checkpoint manifest summary (id, created, file_count, ...).
@@ -745,11 +771,26 @@ def register_application_tools(mcp):
             after a failed save holds the on-disk state only, which is
             missing precisely the in-editor work you were protecting.
         """
+        import os
         saved: Optional[bool] = None
         save_error = ""
-        project_dir, project_file, err = await _resolve_project_dir()
-        if err:
-            return err
+        if project_path:
+            project_dir = os.path.dirname(project_path)
+            project_file = os.path.basename(project_path)
+            if not os.path.isfile(project_path):
+                return {"error": f"project file not found: {project_path}",
+                        "checkpoint": None}
+        else:
+            ambiguous = await _open_project_paths()
+            if len(ambiguous) > 1:
+                return {"error": (
+                    f"{len(ambiguous)} projects are open, so the focused "
+                    "one may not be the one being edited. Pass "
+                    "project_path."),
+                    "open_projects": ambiguous, "checkpoint": None}
+            project_dir, project_file, err = await _resolve_project_dir()
+            if err:
+                return err
         if save_first:
             # THE PROJECT BEING CHECKPOINTED, not the workspace. save_all
             # wrote every open document, other projects' included, to
@@ -757,7 +798,9 @@ def register_application_tools(mcp):
             # Both this and the path lookup above take the focused project.
             try:
                 await get_bridge().send_command_async(
-                    "project.save", {}, timeout=60.0
+                    "project.save",
+                    {"project_path": project_path} if project_path else {},
+                    timeout=60.0,
                 )
                 saved = True
             except Exception as exc:  # noqa: BLE001 - reported, not raised

@@ -1,4 +1,4 @@
-# Release verification: 2026.10.27.101
+# Release verification: 2026.10.27.102
 
 Unless a section records live verification explicitly, the Pascal below has
 been checked by FPC and the linter but **not executed by Altium's DelphiScript engine**. The two are not the
@@ -371,7 +371,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.10.27.101`, `version_match` =
+Expect `altium_script_version` = `2026.10.27.102`, `version_match` =
 `true`, and `mcp_server_version` = `0.7.1`.
 
 Those are two different versions and they fail differently.
@@ -3586,3 +3586,32 @@ server still had the previous tool list.
    one decided by ConnectedEnd; four ports with no reference reported as
    such. The apply path (two writes on the CrossRef parameter) has NOT run
    live: no reference on the project was at the wrong end to try it on.
+
+---
+
+## Appendix T: Rosen branch, small fixes after the 10-27 mainline merge
+
+Seven defects worked around by hand on the Rosen controller (AD 25.8.1). The
+Pascal for 4, 22 and 25 has been linted, not yet run by Altium. Smoke tests,
+on a scratch sheet or read-only:
+
+1. `obj_deselect_all` (Rosen #22) runs `Sch:DeSelect` with `Action=All`.
+   Select two parts with `obj_select`, call it, take `app_screenshot`: no
+   handles left. Every internal caller of `SchDeselectAllObjects` changes too.
+2. `obj_zoom(action="document")` (Rosen #25) is Fit Document: the whole sheet
+   with its border. On a board or footprint it is refused with `BAD_PARAMS`.
+3. `app_close_document` (Rosen #4) refuses with `PATH_MISMATCH` when Altium
+   resolves the path to a document under another name (a phantom copy's
+   "/Hardware/..." name resolves to the real one). A close by the exact path
+   `app_list_documents` reports must still work; one by the `M:` alias of an
+   `R:` document is now refused rather than closed.
+4. `app_checkpoint(project_path=...)` (Rosen #5) saves and snapshots the named
+   project. Without it, with two or more projects open, it refuses and lists
+   them (Free Documents does not count).
+5. `proj_export_pdf` and `proj_export_image(format="pdf")` (Rosen #24) refuse
+   with `PRINT_DIALOG_NOT_SILENT` unless `open_print_dialog=True`; no bridge
+   call is made. `proj_export_image` is now classed MODAL.
+6. `app_screenshot` (Rosen #26) writes the window's native pixels and reports
+   `width` and `height`; the OCR path still upscales its own copy 2x.
+7. Template ports (Rosen #11): a net containing GND points down (orientation 3)
+   whatever its style, unless the template gives an orientation.

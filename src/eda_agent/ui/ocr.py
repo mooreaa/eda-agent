@@ -91,7 +91,7 @@ def available() -> bool:
     return os.name == "nt"
 
 
-def capture_png(hwnd: int, path: str) -> bool:
+def capture_png(hwnd: int, path: str, scale: int = 1) -> bool:
     """Render a window to a PNG. True when it worked.
 
     PrintWindow asks the window to draw ITSELF, so the capture is
@@ -130,8 +130,12 @@ def capture_png(hwnd: int, path: str) -> bool:
             "RGB", (info["bmWidth"], info["bmHeight"]),
             bitmap.GetBitmapBits(True), "raw", "BGRX", 0, 1)
         # Upscaling helps the recogniser on small UI type, which is
-        # usually 8 or 9 point and sits near its resolution limit.
-        image = image.resize((width * 2, height * 2), Image.LANCZOS)
+        # usually 8 or 9 point and sits near its resolution limit. Only
+        # the OCR path asks for it: a screenshot upscaled 2x carried no
+        # extra detail and misled anyone measuring pixels from it.
+        if scale != 1:
+            image = image.resize((width * scale, height * scale),
+                                 Image.LANCZOS)
         image.save(path)
         return True
     finally:
@@ -153,7 +157,7 @@ def read_window_text(hwnd: int, timeout: float = 30.0) -> list:
     png = os.path.join(tmp, "dialog.png")
     script = os.path.join(tmp, "ocr.ps1")
     try:
-        if not capture_png(hwnd, png):
+        if not capture_png(hwnd, png, scale=2):
             return []
         with open(script, "w", encoding="utf-8") as handle:
             handle.write(_OCR_PS1)
