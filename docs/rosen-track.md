@@ -42,6 +42,7 @@ Done in 2026.10.27.102: mainline merge, 4 (refusal half), 5, 11, 22, 24, 25, 26.
 | S2 | the LSM showed a stack unlike the saved file (inverted, non-conductive copper): find out why | M | live, scratch board |
 | E1 | ECO "Footprint Not Found" for a footprint added to a project PcbLib this session; survives reopen, re-add, project reopen. Same lib also listed under an `M:` path. Need a lookup refresh or an ECO-free footprint swap from an explicit library | M | from the Rosen session, 10-27 |
 | P1 | `proj_close(save=True)` writes every member document (12 sheets, 10 unchanged): save only modified ones | S | from the Rosen session, 10-27 |
+| D1 | `pcb_get_mech_layer_names(count_primitives=True)` marks the board modified though it only reads | S | from the Rosen session, 10-27 |
 | S3 | `.stackup` export/import for the Layer Stack Manager | M | optional |
 | 24b | `proj_print_all_variants` still sends `project.export_pdf` per variant (print dialog) | S | found 10-27 |
 | 4b | close a phantom copy itself (needs a live probe of how to reach it) | S | 4 now refuses only |
@@ -56,6 +57,14 @@ Done in 2026.10.27.102: mainline merge, 4 (refusal half), 5, 11, 22, 24, 25, 26.
 | 16 | harness entries | L | API may not allow |
 
 ## Releases
+
+### 2026.10.27.110 (deployed and tested on a scratch board; not pushed)
+
+`pcb_adjust_designators`: the AdjustDesignators.pas convention inside the bridge, with tall parts at
+90 degrees on top and 270 on the bottom (Aaron), the script's short-side fallback kept and listed,
+read-back per part, `off_centre` reported separately. On a scratch copy of the Rosen board (322
+parts): all took, a rerun gave the identical plan. `pcb_render_svg` overlay labels off by default,
+magenta italic. Appendix W.
 
 ### 2026.10.27.109 (deployed, live-tested on a scratch board, pushed to the fork)
 

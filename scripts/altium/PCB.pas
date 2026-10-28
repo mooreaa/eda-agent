@@ -5758,6 +5758,263 @@ Begin
         'op is inspect, insert, remove, set_copper or set_dielectric');
 End;
 
+{..............................................................................}
+{ PCB_Designators - the house designator convention (AdjustDesignators.pas,  }
+{ Mattias Ericson), split so pcb_adjust_designators can plan in Python.      }
+{ Params: op = outlines | apply; board_path (refused when the board found is }
+{ another one); designators (comma list, empty for all).                     }
+{   outlines: outline_layers (comma list of layer names). Per part: side,    }
+{     designator text, the box of its tracks on those layers (or            }
+{     BoundingRectangleNoNameComment when there are none), and the          }
+{     designator's current layer, size, width, rotation, mirror and         }
+{     autoposition.                                                         }
+{   apply: items, 'd=DES;l=layer;s=size_mils;w=width_mils;r=rotation;m=0|1' }
+{     per part, joined by '~~', and comment (leave | hide). Each part gets  }
+{     NameOn, a stroke font (Default, bold), the values given and a centred }
+{     autoposition, and is read back.                                       }
+{..............................................................................}
+
+{ The designator's state as JSON members (no braces). }
+Function DesigStateJson(Comp : IPCB_Component) : String;
+Var
+    Desig : IPCB_Text;
+    R : TCoordRect;
+Begin
+    Desig := Comp.Name;
+    R := Desig.BoundingRectangle;
+    Result := JsonStr('layer', GetLayerString(Desig.Layer)) + ','
+        + JsonRaw('size_mils', FloatToJsonStr(CoordToMilsF(Desig.Size))) + ','
+        + JsonRaw('width_mils', FloatToJsonStr(CoordToMilsF(Desig.Width))) + ','
+        + JsonRaw('rotation', FloatToJsonStr(Desig.Rotation)) + ','
+        + JsonBool('mirror', Desig.MirrorFlag) + ','
+        + JsonBool('tt_font', Desig.UseTTFonts) + ','
+        + JsonBool('name_on', Comp.NameOn) + ','
+        + JsonBool('comment_on', Comp.CommentOn) + ','
+        + JsonInt('autoposition', Comp.NameAutoPosition) + ','
+        + JsonRaw('text_cx', FloatToJsonStr(CoordToMilsF((R.Left + R.Right) / 2))) + ','
+        + JsonRaw('text_cy', FloatToJsonStr(CoordToMilsF((R.Bottom + R.Top) / 2)));
+End;
+
+Function DesigOutlineJson(Comp : IPCB_Component; LayerSetStr : String; Board : IPCB_Board) : String;
+Var
+    GrpIter : IPCB_GroupIterator;
+    Track : IPCB_Track;
+    MinX, MinY, MaxX, MaxY, Count : Integer;
+    R : TCoordRect;
+    Desig : IPCB_Text;
+    Side, Source, LayerName : String;
+Begin
+    Count := 0;
+    MinX := 0; MinY := 0; MaxX := 0; MaxY := 0;
+    GrpIter := Comp.GroupIterator_Create;
+    Try
+        GrpIter.AddFilter_ObjectSet(MkSet(eTrackObject));
+        Track := GrpIter.FirstPCBObject;
+        While Track <> Nil Do
+        Begin
+            LayerName := '|' + UpperCase(GetLayerString(Track.Layer)) + '|';
+            If Pos(LayerName, LayerSetStr) > 0 Then
+            Begin
+                If Count = 0 Then
+                Begin
+                    MinX := Track.X1; MaxX := Track.X1;
+                    MinY := Track.Y1; MaxY := Track.Y1;
+                End;
+                Inc(Count);
+                If Track.X1 < MinX Then MinX := Track.X1;
+                If Track.X1 > MaxX Then MaxX := Track.X1;
+                If Track.X2 < MinX Then MinX := Track.X2;
+                If Track.X2 > MaxX Then MaxX := Track.X2;
+                If Track.Y1 < MinY Then MinY := Track.Y1;
+                If Track.Y1 > MaxY Then MaxY := Track.Y1;
+                If Track.Y2 < MinY Then MinY := Track.Y2;
+                If Track.Y2 > MaxY Then MaxY := Track.Y2;
+            End;
+            Track := GrpIter.NextPCBObject;
+        End;
+    Finally
+        Comp.GroupIterator_Destroy(GrpIter);
+    End;
+    Source := 'tracks';
+    If Count = 0 Then
+    Begin
+        Source := 'bounding_rectangle';
+        R := Comp.BoundingRectangleNoNameComment;
+        MinX := R.Left; MaxX := R.Right; MinY := R.Bottom; MaxY := R.Top;
+    End;
+    If Comp.Layer = eTopLayer Then Side := 'top'
+    Else If Comp.Layer = eBottomLayer Then Side := 'bottom'
+    Else Side := 'other';
+    Desig := Comp.Name;
+    Result := JsonObj(JsonStr('designator', Desig.Text) + ','
+        + JsonStr('side', Side) + ','
+        + JsonStr('source', Source) + ','
+        + JsonInt('tracks', Count) + ','
+        + JsonRaw('x1', FloatToJsonStr(CoordToMilsF(MinX))) + ','
+        + JsonRaw('y1', FloatToJsonStr(CoordToMilsF(MinY))) + ','
+        + JsonRaw('x2', FloatToJsonStr(CoordToMilsF(MaxX))) + ','
+        + JsonRaw('y2', FloatToJsonStr(CoordToMilsF(MaxY))) + ','
+        + DesigStateJson(Comp));
+End;
+
+Function PCB_Designators(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Iter : IPCB_BoardIterator;
+    Obj : IPCB_Primitive;
+    Comp : IPCB_Component;
+    Desig : IPCB_Text;
+    Op, BoardPath, Wanted, LayerSetStr, ItemsStr, CommentMode, Item, Name, Items : String;
+    Keys, Ops : TStringList;
+    Idx, Done : Integer;
+    Lyr : TLayer;
+    WasOnline : Boolean;
+Begin
+    Op := LowerCase(ExtractJsonValue(Params, 'op'));
+    BoardPath := ExtractJsonValue(Params, 'board_path');
+    Wanted := ExtractJsonValue(Params, 'designators');
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+    If (BoardPath <> '') And (UpperCase(Board.FileName) <> UpperCase(BoardPath)) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'WRONG_BOARD',
+            'The board in front is ' + Board.FileName + ', not ' + BoardPath);
+        Exit;
+    End;
+    If Wanted <> '' Then Wanted := ',' + UpperCase(Wanted) + ',';
+
+    If Op = 'outlines' Then
+    Begin
+        LayerSetStr := '|' + UpperCase(StringReplace(ExtractJsonValue(Params, 'outline_layers'),
+            ',', '|', -1)) + '|';
+        Items := '';
+        Iter := Board.BoardIterator_Create;
+        Try
+            Iter.AddFilter_ObjectSet(MkSet(eComponentObject));
+            Iter.AddFilter_LayerSet(AllLayers);
+            Iter.AddFilter_Method(eProcessAll);
+            Obj := Iter.FirstPCBObject;
+            While Obj <> Nil Do
+            Begin
+                Comp := Obj;
+                Name := '';
+                Try Name := Comp.Name.Text; Except End;
+                If (Wanted = '') Or (Pos(',' + UpperCase(Name) + ',', Wanted) > 0) Then
+                Begin
+                    If Items <> '' Then Items := Items + ',';
+                    Items := Items + DesigOutlineJson(Comp, LayerSetStr, Board);
+                End;
+                Obj := Iter.NextPCBObject;
+            End;
+        Finally
+            Board.BoardIterator_Destroy(Iter);
+        End;
+        Result := BuildSuccessResponse(RequestId, JsonObj(
+            JsonStr('board', Board.FileName) + ',' + JsonRaw('parts', '[' + Items + ']')));
+        Exit;
+    End;
+
+    If Op <> 'apply' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'INVALID_PARAM', 'op is outlines or apply');
+        Exit;
+    End;
+
+    ItemsStr := ExtractJsonValue(Params, 'items');
+    CommentMode := LowerCase(ExtractJsonValue(Params, 'comment'));
+    Keys := TStringList.Create;
+    Ops := TStringList.Create;
+    Try
+        While ItemsStr <> '' Do
+        Begin
+            Idx := Pos('~~', ItemsStr);
+            If Idx = 0 Then
+            Begin
+                Item := ItemsStr;
+                ItemsStr := '';
+            End
+            Else
+            Begin
+                Item := Copy(ItemsStr, 1, Idx - 1);
+                ItemsStr := Copy(ItemsStr, Idx + 2, Length(ItemsStr));
+            End;
+            If Item <> '' Then
+            Begin
+                Keys.Add(UpperCase(GetBatchField(Item, 'd')));
+                Ops.Add(Item);
+            End;
+        End;
+
+        Items := '';
+        Done := 0;
+        WasOnline := True;
+        Try WasOnline := PCBServer.SystemOptions.DoOnlineDRC; Except End;
+        Try PCBServer.SystemOptions.DoOnlineDRC := False; Except End;
+        PCBServer.PreProcess;
+        Try
+            Iter := Board.BoardIterator_Create;
+            Try
+                Iter.AddFilter_ObjectSet(MkSet(eComponentObject));
+                Iter.AddFilter_LayerSet(AllLayers);
+                Iter.AddFilter_Method(eProcessAll);
+                Obj := Iter.FirstPCBObject;
+                While Obj <> Nil Do
+                Begin
+                    Comp := Obj;
+                    Name := '';
+                    Try Name := Comp.Name.Text; Except End;
+                    Idx := Keys.IndexOf(UpperCase(Name));
+                    If Idx >= 0 Then
+                    Begin
+                        Item := Ops[Idx];
+                        Lyr := ResolveLayerId(Board, GetBatchField(Item, 'l'));
+                        Desig := Comp.Name;
+                        Comp.BeginModify;
+                        Comp.NameOn := True;
+                        If CommentMode = 'hide' Then Comp.CommentOn := False;
+                        Desig.BeginModify;
+                        If Lyr <> eNoLayer Then Desig.Layer := Lyr;
+                        Desig.UseTTFonts := False;
+                        Desig.FontName := 'Default';
+                        Desig.Italic := False;
+                        Desig.Bold := True;
+                        Desig.Inverted := False;
+                        Desig.Size := MilsToCoordF(StrToFloatDef(GetBatchField(Item, 's'), 39.37));
+                        Desig.Width := MilsToCoordF(StrToFloatDef(GetBatchField(Item, 'w'), 10));
+                        Desig.Rotation := StrToFloatDef(GetBatchField(Item, 'r'), 0);
+                        Desig.MirrorFlag := (GetBatchField(Item, 'm') = '1');
+                        Desig.EndModify;
+                        Comp.ChangeNameAutoposition(eAutoPos_CenterCenter);
+                        Comp.EndModify;
+                        Inc(Done);
+                        If Items <> '' Then Items := Items + ',';
+                        Items := Items + JsonObj(JsonStr('designator', Name) + ','
+                            + DesigStateJson(Comp));
+                    End;
+                    Obj := Iter.NextPCBObject;
+                End;
+            Finally
+                Board.BoardIterator_Destroy(Iter);
+            End;
+        Finally
+            PCBServer.PostProcess;
+            Try PCBServer.SystemOptions.DoOnlineDRC := WasOnline; Except End;
+        End;
+    Finally
+        Keys.Free;
+        Ops.Free;
+    End;
+    MarkDocDirtyByPath(Board.FileName);
+    Try Board.ViewManager_FullUpdate; Except End;
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonStr('board', Board.FileName) + ',' + JsonInt('applied', Done) + ','
+        + JsonRaw('parts', '[' + Items + ']')));
+End;
+
 { The impedance profile named Name, Nil when there is none. }
 Function ImpFindProfile(Stack : IPCB_MasterLayerStack2; Name : String) : IPCB_ImpedanceProfile;
 Var
@@ -24408,6 +24665,7 @@ Begin
         'create_xsignals':         Result := PCB_CreateXSignals(Params, RequestId);
         'find_same_package':       Result := PCB_FindSamePackage(Params, RequestId);
         'auto_position_text':      Result := PCB_AutoPositionText(Params, RequestId);
+        'designators':             Result := PCB_Designators(Params, RequestId);
         'delete_xsignals':         Result := PCB_DeleteXSignals(Params, RequestId);
         'add_drill_pair':          Result := PCB_AddDrillPair(Params, RequestId);
         'net_display':             Result := PCB_NetDisplay(Params, RequestId);

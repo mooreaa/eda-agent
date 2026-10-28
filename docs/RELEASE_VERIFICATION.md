@@ -1,4 +1,4 @@
-# Release verification: 2026.10.27.109
+# Release verification: 2026.10.27.110
 
 Unless a section records live verification explicitly, the Pascal below has
 been checked by FPC and the linter but **not executed by Altium's DelphiScript engine**. The two are not the
@@ -375,7 +375,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.10.27.109`, `version_match` =
+Expect `altium_script_version` = `2026.10.27.110`, `version_match` =
 `true`, and `mcp_server_version` = `0.7.1`.
 
 Those are two different versions and they fail differently.
@@ -3776,7 +3776,7 @@ gap keeps as many of Altium's dielectrics as the plan has, removes the extras
 and sets the rest. The board must be saved first; on a failure or a read-back
 difference it is closed without saving and reopened.
 
-Verified live on AD 25.8.1 (script 2026.10.27.109), on a scratch copy of the
+Verified live on AD 25.8.1 (the release before this one), on a scratch copy of the
 Rosen controller's restored 4-layer board, with the six-layer plan of its
 stack-up notes (L1 Top / L2 GND plane / L3 Signal / L4 Power / L5 GND plane /
 L6 Bottom; 4.33, 3.94, 37.4, 3.94, 4.33 mil):
@@ -3793,3 +3793,29 @@ Electronics Stackup" tab, in which copper rows are listed bottom up, one shows
 "Non-Conductive" and no dielectric rows appear, while `pcb_physical_stack`
 reads style 0 and the correct stack. Aaron's screenshot of the broken Rosen
 board looked like that view.
+
+---
+
+## Appendix W: Rosen branch, pcb_adjust_designators
+
+The house AdjustDesignators.pas convention (Mattias Ericson's script, REVO's
+copy in `Templates\AdjustDesignators`), run inside the bridge. New Pascal
+command `pcb.designators`: `outlines` (per part: side, designator text, the box
+of its tracks on the outline layers or `BoundingRectangleNoNameComment`, and
+the designator's current layer, size, width, rotation, mirror, autoposition and
+text centre) and `apply` (per part: NameOn, stroke font Default bold, the
+layer, height, stroke, rotation and mirror given, autoposition centre; online
+DRC off during the run; read back). The sizing is in Python
+(`design/designators.py`), as the script does it, except that a part taller
+than wide gets 90 degrees on top and 270 on the bottom (Aaron, 2026-10-27; the
+script turned every tall part to 270). The script's short-side fallback is the
+default (`fit="script"`) and every part that hits it is listed.
+
+`pcb_render_svg`'s `show_designators` is now off by default and draws magenta
+italic labels: they sit at each part's origin and are not the board's own
+designator text, which is drawn from its real layer with the other texts.
+
+Live check, on a scratch copy of a board only:
+1. Dry run: totals, `turned`, `short_side_fallback`, `bounding_rectangle`.
+2. Apply: `not_taken` empty; designators on Mechanical 10, centred.
+3. Run again: the same plan, nothing changes.

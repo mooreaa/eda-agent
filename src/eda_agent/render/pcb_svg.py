@@ -167,7 +167,11 @@ class PcbRenderOptions:
     fade_others_opacity: float = 0.35      # unknown / mech layers when faded
     show_drills: bool = True
     show_texts: bool = True
-    show_designators: bool = True          # render per-component designator labels
+    # Extra labels at each part's origin, NOT the board's own designator
+    # text (that is drawn from its real layer with the other texts). Off by
+    # default: on a board that prints its designators, every part showed
+    # twice and the real one could not be told apart (Rosen, 2026-10-27).
+    show_designators: bool = False
     show_hidden_text: bool = False         # honour Text.IsHidden / Comp.NameOn
     pad_label_min_mils: float = 30.0       # below this size pad numbers are hidden
     interactive_legend: bool = True        # embed a click-to-toggle layer legend
@@ -698,8 +702,10 @@ def _render_designators(components: Iterable[dict[str, Any]],
     text so a reviewer can locate every part by name without zooming
     into the overlay.
     """
-    out: list[str] = ['<g class="layer designators" data-layer="Designators">']
-    color = _color_for("TopOverlay", opt)
+    out: list[str] = ['<g class="layer designators" data-layer="Designator labels (overlay)">']
+    # Magenta and italic: no Altium layer is drawn that way, so a label
+    # cannot be mistaken for the board's own text.
+    color = "#ff00ff"
     for c in components:
         des = c.get("des", "") or ""
         if not des:
@@ -722,7 +728,7 @@ def _render_designators(components: Iterable[dict[str, Any]],
             f'class="designator" font-size="40" '
             f'text-anchor="middle" dominant-baseline="middle" '
             f'fill="{color}" font-family="JetBrains Mono, monospace" '
-            f'font-weight="700" pointer-events="none"'
+            f'font-weight="700" font-style="italic" pointer-events="none"'
         )
         # Keep the label readable: fold the component rotation into
         # (-90, 90] so a part placed at 180 deg doesn't render its
