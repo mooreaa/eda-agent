@@ -107,6 +107,8 @@ _SIMULATOR_TOOLS = frozenset({
     "app_checkpoint", "app_context", "app_detach", "app_get_active_document",
     "app_get_version",
     "app_list_documents", "app_set_active_document",
+    # Asks the bridge only whether the board is open, then edits the file.
+    "pcb_reset_stack_manager_model",
     "audit_find_missing_decoupling",
     "audit_find_pin_net_name_mismatches",
     "audit_find_unconnected_ic_pins", "design_lint_report",

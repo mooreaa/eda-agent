@@ -18,7 +18,9 @@ the two views is how such a write is caught.
 """
 from __future__ import annotations
 
+import base64
 import re
+import zlib
 from typing import Any, Optional
 
 from ..units import MILS_PER_MM
@@ -99,7 +101,8 @@ def physical_stack(keys: dict[str, str]) -> list[dict[str, Any]]:
             layer_id = 0
         kind = layer_kind(layer_id)
         entry: dict[str, Any] = {"order": len(layers), "name": get("NAME"),
-                                 "kind": kind, "layer_id": layer_id}
+                                 "kind": kind, "layer_id": layer_id,
+                                 "id": get("ID").strip("{}").lower()}
         if kind == "copper":
             entry["thickness_mils"] = to_mils(get("COPTHICK"))
             # Absent on ordinary copper. A printed-electronics additive
@@ -202,6 +205,98 @@ def check(layers: list[dict[str, Any]], chain: list[dict[str, Any]]) -> list[dic
     return sorted(findings, key=lambda f: order[f["severity"]])
 
 
+#: The Layer Stack Manager's own copy of the stack: base64 of zlib of an XML
+#: StackupDocument, per layer GUID (thickness, material, Dk, Df, weight).
+MANAGER_MODEL_KEY = "V9_STACKCUSTOMDATA"
+
+
+def manager_model(keys: dict[str, str]) -> list[dict[str, Any]] | None:
+    """The Layer Stack Manager's layers from the file, None when it has none.
+
+    Script writes to the stack (pcb_build_stack, AD 25.8.1) update the V9,
+    V8 and legacy records but not this XML, so the manager went on showing
+    the old values for every layer the build kept (Rosen, 2026-10-27).
+    """
+    blob = keys.get(MANAGER_MODEL_KEY)
+    if not blob:
+        return None
+    try:
+        xml = zlib.decompress(base64.b64decode(blob)).decode("utf-8", "replace")
+    except Exception:                                   # noqa: BLE001
+        return None
+    out = []
+    for m in re.finditer(r'<Layer Id="([^"]+)" TypeId="[^"]+" Name="([^"]*)"(.*?)</Layer>',
+                         xml, re.S):
+        body = m.group(3)
+
+        def prop(name):
+            p = re.search(rf'Name="{name}"[^>]*>([^<]*)<', body)
+            return p.group(1) if p else None
+
+        dk = prop("DielectricConstant")
+        out.append({"id": m.group(1).lower(), "name": m.group(2),
+                    "thickness_mils": to_mils(prop("Thickness") or ""),
+                    "material": (prop("Material") or "").split(":")[-1] or None,
+                    "dielectric_constant": float(dk) if dk else None})
+    return out
+
+
+def check_manager_model(layers: list[dict[str, Any]],
+                        model: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Where the Layer Stack Manager's copy disagrees with the real stack."""
+    if not model:
+        return []
+    by_id = {m["id"]: m for m in model}
+    stale = []
+    for layer in layers:
+        if layer["kind"] not in ("copper", "dielectric"):
+            continue
+        m = by_id.get(layer.get("id", ""))
+        if m is None:
+            continue
+        t, mt = layer.get("thickness_mils"), m.get("thickness_mils")
+        if t is not None and mt is not None and abs(t - mt) > _TOL_MILS:
+            stale.append(f"{layer['name']}: {mt:g} mil in the manager, {t:g} mil in the stack")
+    if not stale:
+        return []
+    return [{"severity": "warning", "check": "stack_manager_model_stale",
+             "detail": ("the Layer Stack Manager's own model (" + MANAGER_MODEL_KEY
+                        + ") disagrees with the stack: " + "; ".join(stale)
+                        + ". Close the board in Altium and run "
+                          "pcb_reset_stack_manager_model, then reopen and save"),
+             "layers": stale}]
+
+
+def reset_manager_model(path: str, dry_run: bool = True) -> dict[str, Any]:
+    """Make Altium rebuild the Layer Stack Manager's model from the stack.
+
+    Renames the key to X9_STACKCUSTOMDATA in place, the same length, so the
+    stream keeps its size. On the next load Altium ignores it and builds
+    the manager's model from the V9 records; the next save drops it. Done
+    on the Rosen board on 2026-10-27 after a scratch test. The board must
+    be closed in Altium, or Altium writes its own copy back over this.
+    """
+    import olefile
+
+    old = ("|" + MANAGER_MODEL_KEY + "=").encode("latin-1")
+    new = ("|X" + MANAGER_MODEL_KEY[1:] + "=").encode("latin-1")
+    with olefile.OleFileIO(path) as ole:
+        data = ole.openstream("Board6/Data").read()
+    count = data.count(old)
+    out = {"path": path, "found": count, "dry_run": dry_run}
+    if count == 0:
+        out["note"] = "no Layer Stack Manager model in the file; nothing to do"
+        return out
+    if dry_run:
+        return out
+    with olefile.OleFileIO(path, write_mode=True) as ole:
+        ole.write_stream("Board6/Data", data.replace(old, new))
+    with olefile.OleFileIO(path) as ole:
+        out["renamed"] = ole.openstream("Board6/Data").read().count(new)
+    out["next"] = "open the board in Altium and save it"
+    return out
+
+
 def summarize(layers: list[dict[str, Any]]) -> dict[str, Any]:
     copper = [layer for layer in layers if layer["kind"] == "copper"]
     dielectric = [layer for layer in layers if layer["kind"] == "dielectric"]
@@ -221,7 +316,7 @@ def read_stack(path: str) -> dict[str, Any]:
     keys = board_keys(read_board_data(path))
     layers = physical_stack(keys)
     chain = legacy_chain(keys)
-    findings = check(layers, chain)
+    findings = check(layers, chain) + check_manager_model(layers, manager_model(keys))
     return {"path": path, "layers": layers, "legacy_chain": chain,
             "summary": summarize(layers), "findings": findings,
             "ok": not any(f["severity"] == "error" for f in findings)}

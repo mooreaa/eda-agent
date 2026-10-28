@@ -5560,7 +5560,7 @@ Var
     DL : IPCB_DielectricLayer;
     EL : IPCB_ElectricalLayer;
     Op, Kind, RefName, Where, Name, NewName, ThickS, TypeS, ConstS, MatS, Items : String;
-    Extra, CopperNames : String;
+    Extra, CopperNames, LossS : String;
     Ordinary : Boolean;
     Id : TLayer;
     Removed : Boolean;
@@ -5577,6 +5577,7 @@ Begin
     TypeS := ExtractJsonValue(Params, 'type');
     ConstS := ExtractJsonValue(Params, 'constant');
     MatS := ExtractJsonValue(Params, 'material');
+    LossS := ExtractJsonValue(Params, 'loss_tangent');
     Board := GetPCBBoardAnywhere(0);
     If Board = Nil Then
     Begin
@@ -5762,6 +5763,7 @@ Begin
             If TypeS <> '' Then DL.DielectricType := StrToInt(TypeS);
             If MatS <> '' Then DL.DielectricMaterial := MatS;
             If ConstS <> '' Then DL.DielectricConstant := StrToFloatDef(ConstS, 1);
+            If LossS <> '' Then DL.DielectricLossTangent := StrToFloatDef(LossS, 0);
             If ThickS <> '' Then DL.DielectricHeight := MilsToCoordF(StrToFloatDef(ThickS, 0));
             PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
                 PCBM_BoardRegisteration, c_NoEventData);

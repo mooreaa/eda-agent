@@ -6127,6 +6127,64 @@ def register_pcb_tools(mcp):
                     "old view")
 
     @mcp.tool()
+    async def pcb_reset_stack_manager_model(pcbdoc_path: str,
+                                            dry_run: bool = True) -> dict[str, Any]:
+        """Make Altium rebuild the Layer Stack Manager's model from the real stack.
+
+        The Layer Stack Manager keeps its own copy of the stack in the file
+        (V9_STACKCUSTOMDATA). pcb_build_stack, and any script, changes the
+        real stack but cannot reach that copy, so the manager goes on
+        showing the old values for every layer that was kept;
+        pcb_stack_from_file reports this as stack_manager_model_stale. This
+        renames the key in the saved file, the same length, so Altium
+        rebuilds the manager's model from the stack on the next load and
+        drops the old one on the next save (Rosen board, 2026-10-27).
+
+        The board must be CLOSED in Altium: it is refused while Altium has
+        it open. Afterwards open it and save it.
+
+        Args:
+            pcbdoc_path: the saved .PcbDoc.
+            dry_run: True (default) only says whether there is a model.
+
+        Returns:
+            ``found`` (models in the file), and when applied ``renamed``.
+        """
+        import os
+
+        from ..fileio import altium_pcb_stack
+
+        if not os.path.isfile(pcbdoc_path):
+            return {"ok": False, "reason": f"no such file: {pcbdoc_path}"}
+        if not dry_run:
+            try:
+                docs = await get_bridge().send_command_async(
+                    "application.get_open_documents") or []
+            except Exception:                           # noqa: BLE001
+                docs = []
+            if isinstance(docs, dict):
+                docs = docs.get("documents", [])
+            target = os.path.normcase(os.path.abspath(pcbdoc_path))
+            for d in docs:
+                path = str((d or {}).get("file_path", ""))
+                same = os.path.normcase(os.path.abspath(path)) == target
+                if not same and path and os.path.exists(path):
+                    try:
+                        same = os.path.samefile(path, pcbdoc_path)
+                    except OSError:
+                        same = False
+                if same and d.get("loaded", True):
+                    return {"ok": False, "reason": (
+                        "the board is open in Altium; close it first, or "
+                        "Altium writes its own model back over the change"),
+                        "open_as": path}
+        try:
+            out = altium_pcb_stack.reset_manager_model(pcbdoc_path, dry_run=dry_run)
+        except Exception as exc:                        # noqa: BLE001
+            return {"ok": False, "reason": f"could not edit the file: {exc}"}
+        return {"ok": True, **out}
+
+    @mcp.tool()
     async def pcb_stack_from_file(
         pcbdoc_path: str,
         expected: Optional[list[dict[str, Any]]] = None,
@@ -6199,7 +6257,8 @@ def register_pcb_tools(mcp):
                 1.378, "plane": false}``; ``plane`` true makes an internal
                 plane rather than a signal layer. Dielectric: ``{"kind":
                 "dielectric", "type": "prepreg"|"core", "thickness_mils":
-                4.33, "constant": 4.0, "material": "...", "name"?}``.
+                4.33, "constant": 4.0, "loss_tangent": 0.02, "material":
+                "...", "name"?}``.
             dry_run: True (default) returns the operations and changes
                 nothing.
 
@@ -6297,8 +6356,11 @@ def register_pcb_tools(mcp):
                 out["undo_error"] = (f"{exc}. The board is open with a partial "
                                      "stack: close it without saving.")
         else:
-            out["next"] = ("save the board, then run pcb_stack_from_file on it "
-                           "with this plan as expected")
+            out["next"] = (
+                "save the board. The Layer Stack Manager's own model still has "
+                "the old values for every layer kept here: close the board, run "
+                "pcb_reset_stack_manager_model on it, reopen and save, then run "
+                "pcb_stack_from_file with this plan as expected")
         return out
 
     @mcp.tool()

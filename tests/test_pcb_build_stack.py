@@ -359,3 +359,12 @@ def test_the_script_makes_inserted_copper_ordinary():
     assert "EL.ElectricalResistivity := TopEL.ElectricalResistivity" in body
     edit = src[src.index("Function PCB_StackEdit("):]
     assert edit.count("StackMakeOrdinaryCopper(MLS,") == 2
+
+
+def test_loss_tangent_reaches_the_dielectric_edit():
+    plan = stack_build.normalise([_cu("A"), dict(_d(4.33), loss_tangent=0.02), _cu("B")])
+    back = [{"name": "A", "kind": "copper"}, {"name": "D", "kind": "dielectric"},
+            {"name": "B", "kind": "copper"}]
+    final = [o for o in stack_build.dielectric_ops(back, plan)
+             if o["op"] == "set_dielectric" and o["name"].startswith("__")]
+    assert final[0]["loss_tangent"] == "0.02"

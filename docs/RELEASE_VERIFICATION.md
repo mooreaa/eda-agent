@@ -1,4 +1,4 @@
-# Release verification: 2026.10.27.113
+# Release verification: 2026.10.27.114
 
 Unless a section records live verification explicitly, the Pascal below has
 been checked by FPC and the linter but **not executed by Altium's DelphiScript engine**. The two are not the
@@ -375,7 +375,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.10.27.113`, `version_match` =
+Expect `altium_script_version` = `2026.10.27.114`, `version_match` =
 `true`, and `mcp_server_version` = `0.7.1`.
 
 Those are two different versions and they fail differently.
@@ -3857,3 +3857,28 @@ reload, and on a copy Altium had never loaded. `MasterLayerStack.CustomData`
 is an undeclared identifier to scripts on AD 25.8.1, so a script cannot
 rewrite it. Which consumers read the XML rather than the V9 records
 (impedance, fab stack-up outputs) is not established.
+
+---
+
+## Appendix Y: Rosen branch, the Layer Stack Manager's own model
+
+The stale model of Appendix X has a verified fix, done by hand on the Rosen
+board by the Altium session (2026-10-27, after a scratch test): with the board
+closed, rename `V9_STACKCUSTOMDATA` to `X9_STACKCUSTOMDATA` (same length) in
+Board6/Data, then open and save. Altium ignores the renamed key, builds the
+manager's model from the V9 records, and drops the old key on save; the
+manager then showed the six-layer plan on its ordinary Stackup tab.
+
+- `pcb_stack_from_file` decodes the manager's model and raises a
+  `stack_manager_model_stale` warning, listing each layer whose thickness
+  differs, matched by layer GUID.
+- New offline tool `pcb_reset_stack_manager_model(pcbdoc_path, dry_run=True)`
+  makes that rename in the saved file; it refuses while Altium has the board
+  open. Run on a copy of the scratch build: `found` 1, `renamed` 1, and the
+  file then reads with no findings.
+- `pcb_build_stack` says to run it after a successful build, and takes a
+  per-dielectric `loss_tangent` (the build had left Df at 0 on a dielectric
+  Altium created).
+
+Not yet run live: `loss_tangent` (Pascal); the reset tool end to end (rename,
+open, save) through the tool rather than by hand.

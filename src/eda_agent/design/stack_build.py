@@ -81,6 +81,8 @@ def normalise(plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
             entry["type"] = _dielectric_type(raw.get("type", "prepreg"))
             if "constant" in raw:
                 entry["constant"] = float(raw["constant"])
+            if "loss_tangent" in raw:
+                entry["loss_tangent"] = float(raw["loss_tangent"])
             if raw.get("material"):
                 entry["material"] = str(raw["material"])
         if name.upper() in names:
@@ -212,6 +214,8 @@ def dielectric_ops(readback: list[dict[str, Any]], plan: list[dict[str, Any]]) -
                   "type": str(w["type"]), "thickness_mils": f"{w['thickness_mils']:g}"}
             if "constant" in w:
                 op["constant"] = f"{w['constant']:g}"
+            if "loss_tangent" in w:
+                op["loss_tangent"] = f"{w['loss_tangent']:g}"
             if "material" in w:
                 op["material"] = w["material"]
             finals.append(op)

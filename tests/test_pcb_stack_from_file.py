@@ -249,3 +249,53 @@ def test_additive_or_non_conductive_copper_is_an_error(monkeypatch):
     assert mid["additive"] is True and mid["resistivity"] > 1e9
     top = next(layer for layer in out["layers"] if layer["name"] == "Top")
     assert top["additive"] is False and top["resistivity"] is None
+
+
+def _model(layers):
+    import base64
+    import zlib
+
+    body = "".join(
+        f'<Layer Id="{lid}" TypeId="t" Name="{name}"><Properties>'
+        f'<Property Name="Thickness" Type="LengthValue">{thick}</Property>'
+        f'</Properties></Layer>' for lid, name, thick in layers)
+    xml = f'<StackupDocument><Layers>{body}</Layers></StackupDocument>'
+    return base64.b64encode(zlib.compress(xml.encode())).decode()
+
+
+def test_a_stale_layer_stack_manager_model_is_a_warning(monkeypatch):
+    """pcb_build_stack updated the stack but not the manager's own XML, which
+    went on showing the old 4-layer values (Rosen, 2026-10-27)."""
+    v9 = [dict(_cu("Top", _TOP), ID="{AAA}"), dict(_diel("D1", 1, "4.33mil"), ID="{BBB}"),
+          dict(_cu("Bottom", _BOT), ID="{CCC}")]
+    model = _model([("aaa", "Top Layer", "0.01778mm"), ("bbb", "Dielectric 1", "0.11mm"),
+                    ("ccc", "Bottom Layer", "0.035mm")])
+    data = _data(_v9(v9) + [f"V9_STACKCUSTOMDATA={model}"],
+                 _legacy([(1, "Top", "1.378mil", 2, "4.33mil"), (32, "Bottom", "1.378mil", 0, "0mil")]))
+    out = _read(monkeypatch, data)
+    assert out["ok"] is True                       # a warning, not an error
+    (warn,) = [f for f in out["findings"] if f["check"] == "stack_manager_model_stale"]
+    assert len(warn["layers"]) == 1 and warn["layers"][0].startswith("Top:")
+    assert "pcb_reset_stack_manager_model" in warn["detail"]
+
+
+def test_the_reset_is_refused_while_altium_has_the_board_open(monkeypatch, tmp_path):
+    board = tmp_path / "b.PcbDoc"
+    board.write_bytes(b"x")
+
+    class _Open(_Bridge):
+        async def send_command_async(self, command, params=None, timeout=None):
+            self.sent.append(command)
+            return [{"file_path": str(board), "loaded": True}]
+
+    bridge = _Open()
+    monkeypatch.setattr(pcb_tools, "get_bridge", lambda: bridge)
+    called = []
+    monkeypatch.setattr(stack, "reset_manager_model",
+                        lambda path, dry_run=True: called.append(path) or {"found": 1})
+    mcp = _Mcp()
+    pcb_tools.register_pcb_tools(mcp)
+    out = asyncio.run(mcp.tools["pcb_reset_stack_manager_model"](str(board), dry_run=False))
+    assert out["ok"] is False and "close it first" in out["reason"] and called == []
+    dry = asyncio.run(mcp.tools["pcb_reset_stack_manager_model"](str(board)))
+    assert dry["ok"] is True and called == [str(board)]
