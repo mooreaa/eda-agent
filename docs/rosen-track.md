@@ -43,6 +43,8 @@ Done in 2026.10.27.102: mainline merge, 4 (refusal half), 5, 11, 22, 24, 25, 26.
 | E1 | ECO "Footprint Not Found" for a footprint added to a project PcbLib this session; survives reopen, re-add, project reopen. Same lib also listed under an `M:` path. Need a lookup refresh or an ECO-free footprint swap from an explicit library | M | from the Rosen session, 10-27 |
 | P1 | `proj_close(save=True)` writes every member document (12 sheets, 10 unchanged): save only modified ones | S | from the Rosen session, 10-27 |
 | D1 | `pcb_get_mech_layer_names(count_primitives=True)` marks the board modified though it only reads | S | from the Rosen session, 10-27 |
+| V1 | after `pcb_build_stack` (or any layer-set change) the open board keeps its old layer tabs until reopened; reopen it, or warn | S | from the Rosen session, 10-27 |
+| V2 | `pcb_set_layer_visibility` says visible:true for a layer missing from the view's tab set | S | from the Rosen session, 10-27 |
 | S3 | `.stackup` export/import for the Layer Stack Manager | M | optional |
 | 24b | `proj_print_all_variants` still sends `project.export_pdf` per variant (print dialog) | S | found 10-27 |
 | 4b | close a phantom copy itself (needs a live probe of how to reach it) | S | 4 now refuses only |
