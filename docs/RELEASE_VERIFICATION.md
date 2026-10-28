@@ -3880,5 +3880,8 @@ manager then showed the six-layer plan on its ordinary Stackup tab.
   per-dielectric `loss_tangent` (the build had left Df at 0 on a dielectric
   Altium created).
 
-Not yet run live: `loss_tangent` (Pascal); the reset tool end to end (rename,
-open, save) through the tool rather than by hand.
+Verified live on AD 25.8.1 (2026-10-28), on a scratch copy of the restored
+4-layer board: `loss_tangent` 0.02 saved as Df 0.020 on all five dielectrics;
+the reset tool refused while the board was open, renamed the key once it was
+closed, and after reopening and saving the file had no `STACKCUSTOMDATA` key
+and read with no findings.

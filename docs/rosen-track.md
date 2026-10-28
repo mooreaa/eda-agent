@@ -45,6 +45,8 @@ Done in 2026.10.27.102: mainline merge, 4 (refusal half), 5, 11, 22, 24, 25, 26.
 | D1 | `pcb_get_mech_layer_names(count_primitives=True)` marks the board modified though it only reads | S | from the Rosen session, 10-27 |
 | V1 | after `pcb_build_stack` (or any layer-set change) the open board keeps its old layer tabs until reopened; reopen it, or warn | S | from the Rosen session, 10-27 |
 | V2 | `pcb_set_layer_visibility` says visible:true for a layer missing from the view's tab set | S | from the Rosen session, 10-27 |
+| C1 | `proj_get_compile_freshness` raises "Undeclared identifier: DM_ExistingViolationCount" on AD 25.8 (modal, stops the loop) | S | from the Rosen session, 10-28; mainline code |
+| U1 | ECO dialog's change grid (TdxTreeList) shows no row text to UIA and ignores scrolling; only screenshots read past page one | M | from the Rosen session, 10-28 |
 | S3 | `.stackup` export/import for the Layer Stack Manager | M | optional |
 | 24b | `proj_print_all_variants` still sends `project.export_pdf` per variant (print dialog) | S | found 10-27 |
 | 4b | close a phantom copy itself (needs a live probe of how to reach it) | S | 4 now refuses only |
@@ -59,6 +61,14 @@ Done in 2026.10.27.102: mainline merge, 4 (refusal half), 5, 11, 22, 24, 25, 26.
 | 16 | harness entries | L | API may not allow |
 
 ## Releases
+
+### 2026.10.27.114 (deployed 10-28, tested on a scratch board, pushed to the fork)
+
+Includes .113 (inserted copper made ordinary; additive and resistivity in both readers). Tested
+live on a scratch copy: a build with `loss_tangent` 0.02 saved Df 0.020 on all five dielectrics;
+`pcb_stack_from_file` warned `stack_manager_model_stale`; `pcb_reset_stack_manager_model` refused
+while the board was open, renamed the key once closed, and after reopen and save the file had no
+`STACKCUSTOMDATA` key and no findings (62.2 mil).
 
 ### 2026.10.27.110 (deployed, tested on a scratch board, pushed to the fork)
 
