@@ -38,6 +38,9 @@ _LEGACY_COPPER = list(range(1, 33)) + list(range(39, 55))
 
 _TOL_MILS = 0.05
 
+#: Resistivity Altium stores for a non-conductive layer (MaxInt).
+NON_CONDUCTIVE = 1e9
+
 
 def layer_kind(layer_id: int) -> str:
     """Kind of a V9 stack entry from its layer id."""
@@ -99,6 +102,15 @@ def physical_stack(keys: dict[str, str]) -> list[dict[str, Any]]:
                                  "kind": kind, "layer_id": layer_id}
         if kind == "copper":
             entry["thickness_mils"] = to_mils(get("COPTHICK"))
+            # Absent on ordinary copper. A printed-electronics additive
+            # layer carries ISADDITIVELAYER=TRUE, and a non-conductive one
+            # ELECTRICALRESISTIVITY=2147483647 (Rosen, 2026-10-27).
+            entry["additive"] = get("ISADDITIVELAYER").upper() == "TRUE"
+            try:
+                entry["resistivity"] = float(get("ELECTRICALRESISTIVITY")) if get(
+                    "ELECTRICALRESISTIVITY") else None
+            except ValueError:
+                entry["resistivity"] = None
         elif kind in ("dielectric", "solder_mask"):
             entry["thickness_mils"] = to_mils(get("DIELHEIGHT"))
             entry["dielectric_type"] = DIELECTRIC_TYPES.get(get("DIELTYPE"), get("DIELTYPE"))
@@ -143,6 +155,20 @@ def check(layers: list[dict[str, Any]], chain: list[dict[str, Any]]) -> list[dic
             findings.append({"severity": "error", "check": "thickness",
                              "layer": layer["name"],
                              "detail": f"{layer['kind']} thickness is {t} mil"})
+    for layer in board:
+        if layer["kind"] != "copper":
+            continue
+        if layer.get("additive"):
+            findings.append({"severity": "error", "check": "additive",
+                             "layer": layer["name"],
+                             "detail": f"{layer['name']} is a printed-electronics additive "
+                                       "layer: Altium then draws the board paper-thin in 3D "
+                                       "with no drilled holes"})
+        if (layer.get("resistivity") or 0) >= NON_CONDUCTIVE:
+            findings.append({"severity": "error", "check": "non_conductive",
+                             "layer": layer["name"],
+                             "detail": f"{layer['name']} has resistivity "
+                                       f"{layer['resistivity']:g}, i.e. non-conductive"})
     for upper, lower in zip(board, board[1:]):
         if upper["kind"] == "copper" and lower["kind"] == "copper":
             findings.append({"severity": "error", "check": "no_dielectric",

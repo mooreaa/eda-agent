@@ -1,4 +1,4 @@
-# Release verification: 2026.10.27.110
+# Release verification: 2026.10.27.113
 
 Unless a section records live verification explicitly, the Pascal below has
 been checked by FPC and the linter but **not executed by Altium's DelphiScript engine**. The two are not the
@@ -375,7 +375,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.10.27.110`, `version_match` =
+Expect `altium_script_version` = `2026.10.27.113`, `version_match` =
 `true`, and `mcp_server_version` = `0.7.1`.
 
 Those are two different versions and they fail differently.
@@ -3788,11 +3788,9 @@ L6 Bottom; 4.33, 3.94, 37.4, 3.94, 4.33 mil):
 4. Earlier attempts on the way there failed and undid themselves as designed
    (closed unsaved, reopened, file unchanged).
 
-The Layer Stack Manager opened on that board shows only its "Printed
-Electronics Stackup" tab, in which copper rows are listed bottom up, one shows
-"Non-Conductive" and no dielectric rows appear, while `pcb_physical_stack`
-reads style 0 and the correct stack. Aaron's screenshot of the broken Rosen
-board looked like that view.
+The Layer Stack Manager opened on that board on its "Printed Electronics
+Stackup" view. That was not a quirk of the view: the copper this release
+inserted was printed-electronics additive, see Appendix X.
 
 ---
 
@@ -3819,3 +3817,43 @@ Live check, on a scratch copy of a board only:
 1. Dry run: totals, `turned`, `short_side_fallback`, `bounding_rectangle`.
 2. Apply: `not_taken` empty; designators on Mechanical 10, centred.
 3. Run again: the same plan, nothing changes.
+
+---
+
+## Appendix X: Rosen branch, inserted copper made ordinary
+
+Found by the Rosen session after the six-layer build (2026-10-27): the two
+copper layers `pcb_build_stack` inserted were printed-electronics additive
+layers (`ISADDITIVELAYER=TRUE`, one also `ELECTRICALRESISTIVITY=2147483647`,
+non-conductive). Thicknesses were right, so neither reader flagged them, but
+Altium drew the board paper-thin in 3D with no drilled holes and opened the
+Layer Stack Manager on its Printed Electronics view. Copper inserted through
+the V7 stack's `InsertInStackBelow` comes out that way; the first broken Rosen
+stack (f1e4aeb, `pcb_add_layer`) had the same flag on all four inserted
+layers.
+
+- `stack_edit` `insert` and `set_copper` now set `IsAdditiveLayer` False and
+  copy the top copper's `ElectricalResistivity`, and answer
+  `ordinary_copper`; `inspect` reports `additive` and `resistivity` per copper
+  layer. `pcb_build_stack` fails (and undoes) when an insert is not ordinary
+  or the read-back finds additive or non-conductive copper.
+- `pcb_stack_from_file` reports `additive` and `resistivity` per copper layer
+  and raises `additive` / `non_conductive` errors; `pcb_physical_stack`
+  reports both on copper.
+
+Verified live (AD 25.8.1) on a scratch copy of the restored 4-layer board:
+the build ran clean, the saved file has no `ISADDITIVELAYER` key on any stack
+layer and no findings, and the Layer Stack Manager opens on its ordinary
+Stackup view (Stackup / Impedance / Via Types).
+
+**Still wrong, not fixed here:** the Layer Stack Manager keeps its own model
+of the stack in the file, `V9_STACKCUSTOMDATA` (base64 of zlib of an XML
+`StackupDocument`, per layer GUID: thickness, material, Dk, Df, copper
+weight). Script property writes update the V9, V8 and legacy records but not
+this XML, so the manager shows the XML's old values for every layer the build
+kept and re-set (outer copper, kept planes, kept dielectrics) and the right
+values only for layers the build created. This holds after a save and a full
+reload, and on a copy Altium had never loaded. `MasterLayerStack.CustomData`
+is an undeclared identifier to scripts on AD 25.8.1, so a script cannot
+rewrite it. Which consumers read the XML rather than the V9 records
+(impedance, fab stack-up outputs) is not established.

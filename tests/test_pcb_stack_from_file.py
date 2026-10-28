@@ -226,3 +226,26 @@ def test_description_key_writes_the_component_description():
     branch = body.index("(Key = 'Description')")
     assert body.index("Comp.ComponentDescription := Val", branch) < body.index(
         "SetCompParamText(Comp, Key, Val)", branch)
+
+
+ADDITIVE = _data(
+    _v9([_cu("Top", _TOP), _diel("D1", 1, "4mil"),
+         dict(_cu("Mid", _TOP + 1), ISADDITIVELAYER="TRUE",
+              ELECTRICALRESISTIVITY="2147483647.000000"),
+         _diel("D2", 2, "4mil"), _cu("Bottom", _BOT)]),
+    _legacy([(1, "Top", "1.378mil", 1, "4mil"), (2, "Mid", "1.378mil", 1, "4mil"),
+             (32, "Bottom", "1.378mil", 0, "0mil")]))
+
+
+def test_additive_or_non_conductive_copper_is_an_error(monkeypatch):
+    """The Rosen board after the first pcb_build_stack: thicknesses right,
+    two inner layers printed-electronics additive, one non-conductive. Altium
+    drew it paper-thin in 3D with no holes (2026-10-27)."""
+    out = _read(monkeypatch, ADDITIVE)
+    assert out["ok"] is False
+    checks = [f["check"] for f in out["findings"] if f["severity"] == "error"]
+    assert checks == ["additive", "non_conductive"]
+    mid = next(layer for layer in out["layers"] if layer["name"] == "Mid")
+    assert mid["additive"] is True and mid["resistivity"] > 1e9
+    top = next(layer for layer in out["layers"] if layer["name"] == "Top")
+    assert top["additive"] is False and top["resistivity"] is None

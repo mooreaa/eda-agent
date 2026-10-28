@@ -218,6 +218,26 @@ def dielectric_ops(readback: list[dict[str, Any]], plan: list[dict[str, Any]]) -
     return removes + temps + finals
 
 
+def check_copper_flags(inspected: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Copper that is printed-electronics additive or non-conductive.
+
+    Copper inserted through the V7 stack came out that way on AD 25.8.1
+    (Rosen, 2026-10-27): right thickness, but the board drew paper-thin in
+    3D with no holes. stack_edit now makes it ordinary; this checks it.
+    """
+    out = []
+    for layer in inspected:
+        if "additive" not in layer:
+            continue
+        if layer.get("additive"):
+            out.append({"check": "additive", "layer": layer.get("name"),
+                        "got": True, "expected": False})
+        if float(layer.get("resistivity") or 0) >= 1e9:
+            out.append({"check": "non_conductive", "layer": layer.get("name"),
+                        "got": layer.get("resistivity"), "expected": "copper"})
+    return out
+
+
 def check(readback: list[dict[str, Any]], plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Where the stack read back from Altium differs from the plan."""
     got = board_section(readback)

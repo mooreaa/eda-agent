@@ -326,3 +326,36 @@ def test_the_script_never_writes_the_v7_dielectric_fields():
         assert call in body, call
     assert ".Dielectric.Dielectric" not in body
     assert "'stack_edit':" in src
+
+
+def test_copper_left_additive_is_a_mismatch():
+    flags = [{"name": "L1 Top", "additive": False, "resistivity": 0},
+             {"name": "L3 Signal", "additive": True, "resistivity": 2147483647.0},
+             {"name": "Dielectric 1"}]
+    out = stack_build.check_copper_flags(flags)
+    assert [(m["check"], m["layer"]) for m in out] == [
+        ("additive", "L3 Signal"), ("non_conductive", "L3 Signal")]
+
+
+def test_an_insert_that_stays_additive_fails_and_undoes(monkeypatch):
+    class _Additive(_FakeAltium):
+        async def send_command_async(self, command, params=None, timeout=None):
+            out = await super().send_command_async(command, params, timeout)
+            if command == "pcb.stack_edit" and (params or {}).get("op") == "insert":
+                out["ordinary_copper"] = False
+            return out
+
+    fake = _Additive(FOUR_LAYER)
+    out = _build(monkeypatch, fake, dry_run=False)
+    assert out["ok"] is False and "additive" in out["failure"]["error"]
+    assert out["undone"] is True
+
+
+def test_the_script_makes_inserted_copper_ordinary():
+    src = (REPO / "scripts" / "altium" / "PCB.pas").read_text(encoding="utf-8", errors="replace")
+    start = src.index("Function StackMakeOrdinaryCopper(")
+    body = src[start:src.index("\nEnd;", start)]
+    assert "EL.IsAdditiveLayer := False" in body
+    assert "EL.ElectricalResistivity := TopEL.ElectricalResistivity" in body
+    edit = src[src.index("Function PCB_StackEdit("):]
+    assert edit.count("StackMakeOrdinaryCopper(MLS,") == 2

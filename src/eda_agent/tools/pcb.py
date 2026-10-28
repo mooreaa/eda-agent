@@ -6256,6 +6256,11 @@ def register_pcb_tools(mcp):
                 if op["op"] == "remove" and isinstance(res, dict) and not res.get("removed"):
                     failure = {"op": op, "error": "the layer is still in the stack"}
                     return
+                if (isinstance(res, dict) and res.get("ordinary_copper") is False):
+                    failure = {"op": op, "error": (
+                        "the layer stayed a printed-electronics additive or "
+                        "non-conductive layer")}
+                    return
 
         await run(ops)
         if failure is None:
@@ -6270,6 +6275,8 @@ def register_pcb_tools(mcp):
         readback = await bridge.send_command_async("pcb.physical_stack", {})
         layers_back = (readback or {}).get("layers", [])
         mismatches = stack_build.check(layers_back, plan)
+        flags = await bridge.send_command_async("pcb.stack_edit", {"op": "inspect"})
+        mismatches += stack_build.check_copper_flags((flags or {}).get("layers", []))
         out: dict[str, Any] = {"ok": failure is None and not mismatches,
                                "dry_run": False, "ops": ops, "applied": len(applied),
                                "mismatches": mismatches,
