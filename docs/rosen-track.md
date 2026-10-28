@@ -58,7 +58,7 @@ Done in 2026.10.27.102: mainline merge, 4 (refusal half), 5, 11, 22, 24, 25, 26.
 
 ## Releases
 
-### 2026.10.27.110 (deployed and tested on a scratch board; not pushed)
+### 2026.10.27.110 (deployed, tested on a scratch board, pushed to the fork)
 
 `pcb_adjust_designators`: the AdjustDesignators.pas convention inside the bridge, with tall parts at
 90 degrees on top and 270 on the bottom (Aaron), the script's short-side fallback kept and listed,
