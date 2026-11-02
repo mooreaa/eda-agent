@@ -62,7 +62,14 @@ Done in 2026.10.27.102: mainline merge, 4 (refusal half), 5, 11, 22, 24, 25, 26.
 
 ## Releases
 
-### 2026.11.02.101 (merged, not deployed)
+### 2026.11.02.101 (deployed 11-02, tested on scratch boards)
+
+Deployed 11-02 with no live session on the bridge (the loop was not running; `relaunch --restart`
+started it). `app_ping`: 2026.11.02.101, `version_match` true. With the `PcbBeginEdit` form, on
+scratch copies of the Rosen board: `pcb_build_stack` turned afe927c's four layers into the six-layer
+plan (6 copper, 5 dielectrics, 62.2 mil, no mismatches; only `stack_manager_model_stale`, as
+expected); `pcb_adjust_designators` dry run, apply and rerun on HEAD's board gave the same plan for
+all 306 parts, none `not_taken`. Both boards closed unsaved.
 
 Mainline merged to 51d3899 (v0.8.0+, upstream script 2026.11.02.6, MCP server 0.8.1): 65 commits,
 including a tool fold (575 advertised tools; the rest through `tool_invoke`) and routing work.
