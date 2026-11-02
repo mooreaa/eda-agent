@@ -62,6 +62,33 @@ Done in 2026.10.27.102: mainline merge, 4 (refusal half), 5, 11, 22, 24, 25, 26.
 
 ## Releases
 
+### 2026.11.02.101 (merged, not deployed)
+
+Mainline merged to 51d3899 (v0.8.0+, upstream script 2026.11.02.6, MCP server 0.8.1): 65 commits,
+including a tool fold (575 advertised tools; the rest through `tool_invoke`) and routing work.
+Upstream had taken up most of the Rosen fork's earlier fixes in its own form, so those conflicts
+went to upstream's version:
+- close by a phantom's path refuses as `OTHER_DOCUMENT` (ours was `PATH_MISMATCH`);
+- `app_checkpoint` with several projects open names the snapshot and lists `other_open_projects`
+  instead of refusing;
+- `capture_png(enlarge=)` (ours was `scale=`), native-size screenshots;
+- new-object fonts (`NewObjectFontId`), unshown pins (`UnshownPins`), own-parameter writes
+  (`SetOwnCompParamText`), Fit Document zoom, the deselect fix, the Description key;
+- `sch_tidy_port_references` replaces the fork's own port cross-reference fixer (module and test removed).
+
+Kept from the fork, not in upstream: the PDF export refusal (`open_print_dialog`), the layer-stack
+work (`pcb_build_stack`, `pcb_stack_from_file`, `pcb_reset_stack_manager_model`, legacy-write
+guards), `pcb_adjust_designators`, the template GND rule (upstream has the same). Our tests that
+asserted the fork's old names were removed or rewritten to upstream's.
+
+Changed to pass upstream's new rules: `PCB_StackEdit` and `PCB_Designators` now open and close
+their edits with upstream's `PcbBeginEdit(0)` / `PcbEndEdit(0)` (one undo step per call) instead
+of raw `PCBServer.PreProcess` / `PostProcess`. Not yet run live in that form: after the next
+deploy, rerun a scratch `pcb_build_stack` and a `pcb_adjust_designators` dry run and apply.
+
+Full pytest on the merge: 8216 passed; failures are upstream's own (the probe-loop sheet count,
+the Flask dashboard test) and one websocket test that passes on its own.
+
 ### 2026.10.27.114 (deployed 10-28, tested on a scratch board, pushed to the fork)
 
 Includes .113 (inserted copper made ordinary; additive and resistivity in both readers). Tested

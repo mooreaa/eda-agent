@@ -8,6 +8,7 @@ from ..units import MM_PER_MIL
 from .option_hints import project_option_collision
 from .datasheet_hints import tag_response
 from .bulk_hints import BulkHintTracker
+from ..export.variant_bom import apply_variant, find_variant
 
 
 def _rows(result: Any, key: str) -> list:
@@ -67,6 +68,73 @@ _NO_NET_COLOR = 536870912
 #: The net identifier scope in Altium's own order (TFlattenMode).
 _HIERARCHY_MODES = ("automatic", "flat", "hierarchical", "global",
                     "strict_hierarchical")
+
+
+#: The STEP exporter settings a script can write, as the bridge names them.
+STEP_OPTIONS = {
+    "folded": bool, "fold_rate": int, "component_option": int,
+    "models_option": int, "holes_option": int, "copper_option": int,
+    "mechanical_pad_holes": bool, "electrical_pad_holes": bool,
+    "free_pad_holes": bool, "barrels_only": bool, "cover_layer": bool,
+    "component_suffix_type": int, "component_suffix": str,
+}
+
+
+def _dir_stamps(folder: str) -> dict[str, float]:
+    """Every file under ``folder`` with its modification time."""
+    import os
+    out: dict[str, float] = {}
+    for root, _dirs, files in os.walk(folder):
+        for f in files:
+            path = os.path.join(root, f)
+            try:
+                out[path] = os.path.getmtime(path)
+            except OSError:
+                pass
+    return out
+
+
+def _step_option_params(options: Optional[dict]) -> dict[str, str]:
+    """STEP exporter settings as bridge parameters; raises on an unknown one."""
+    out: dict[str, str] = {}
+    for name, value in (options or {}).items():
+        kind = STEP_OPTIONS.get(name)
+        if kind is None:
+            raise ValueError(f"unknown STEP option {name!r}; known: {sorted(STEP_OPTIONS)}")
+        if kind is bool:
+            out[name] = "true" if value else "false"
+        elif kind is int:
+            out[name] = str(int(value))
+        else:
+            out[name] = str(value)
+            out["set_component_suffix"] = "true"
+    return out
+
+
+def _netlist_nodes(pins: list) -> tuple[list[tuple[str, str, str, str]], int]:
+    """(component, pin, pin_name, net) rows for a netlist file, and how many
+    "?" rows were dropped.
+
+    project.get_nets lists a multi-part component once per placed part,
+    and the other parts' pins come back on the net "?". Such a row is
+    dropped when the same pin is on a real net; a pin seen only as "?"
+    stays under "?". Repeated rows are written once.
+    """
+    rows: list[tuple[str, str, str, str]] = []
+    for p in pins:
+        row = tuple(str(p.get(k, "")).strip()
+                    for k in ("component", "pin", "pin_name", "net"))
+        if row[0] and row[1] and row[3]:
+            rows.append(row)
+    named = {(c, p) for c, p, _n, net in rows if net != "?"}
+    nodes, seen, dropped = [], set(), 0
+    for row in rows:
+        if row[3] == "?" and (row[0], row[1]) in named:
+            dropped += 1
+        elif row not in seen:
+            seen.add(row)
+            nodes.append(row)
+    return nodes, dropped
 
 
 def register_project_tools(mcp):
@@ -152,9 +220,9 @@ def register_project_tools(mcp):
         first and refuses if it cannot; if any other project closes, it
         stops and reports it as ``closed_instead``. Without saving, it
         clears each member's modified flag so no save prompt appears; if
-        one appears anyway it answers "Save None" then "OK" (untested
-        live), but only when every listed document belongs to this
-        project, else it presses nothing. A document shared with another
+        one appears anyway it answers "Save None" then "OK", but only
+        when every listed document belongs to this project, else it
+        presses nothing. A document shared with another
         open project loses its edits too. A prompt left open blocks the
         bridge: answer it with app_press_dialog_button.
 
@@ -417,11 +485,9 @@ def register_project_tools(mcp):
 
         Note: This only removes the document from the project, it doesn't delete the file.
 
-        The project file is saved and read back: a removal held only in
-        memory comes back when the project is reopened. Altium's own save
-        leaves the old [DocumentN] sections past the new count in the file,
-        so those are taken out here (only past the count, only when the rest
-        match the project's documents, after a backup to the workspace).
+        The project file is saved and read back, and leftover [DocumentN]
+        sections past the new count are taken out (after a backup), since
+        a removal held only in memory comes back on reopen.
 
         Args:
             document_path: Full path to the document to remove
@@ -575,17 +641,8 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Write the compiled connectivity to a flat netlist file.
 
-        Pulls the full pin-net table once (the same data as get_nets) and
-        writes it as a standalone netlist that other tools can import. Two
-        formats:
-
-        - "pads": PADS-PCB ASCII, *NET* section with one *SIGNAL* block per
-          net listing its component.pin nodes. Widely importable.
-        - "tabular": one "component,pin,pin_name,net" CSV row per node, for
-          quick diffing or spreadsheet review.
-
-        Single-pin and unnamed nets are included so the file is a faithful
-        dump, not a routed-only view.
+        "pads" (PADS-PCB ASCII) or "tabular" (component,pin,pin_name,net
+        CSV). Single-pin and unnamed nets are included.
 
         Args:
             output_path: Destination file. Defaults to
@@ -610,15 +667,7 @@ def register_project_tools(mcp):
         data = await bridge.send_command_async("project.get_nets", params)
         pins = data.get("pins", []) if isinstance(data, dict) else []
 
-        nodes: list[tuple[str, str, str, str]] = []
-        for p in pins:
-            comp = str(p.get("component", "")).strip()
-            pin = str(p.get("pin", "")).strip()
-            pin_name = str(p.get("pin_name", "")).strip()
-            net = str(p.get("net", "")).strip()
-            if not comp or not pin or not net:
-                continue
-            nodes.append((comp, pin, pin_name, net))
+        nodes, dropped = _netlist_nodes(pins)
 
         by_net: dict[str, list[tuple[str, str, str, str]]] = {}
         for n in nodes:
@@ -645,7 +694,9 @@ def register_project_tools(mcp):
         else:
             out = get_config().workspace_dir / default_name
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(text, encoding="utf-8")
+        # newline="" writes the line ends as built: text mode on Windows
+        # turned the PADS CRLF into CR CR LF.
+        out.write_text(text, encoding="utf-8", newline="")
 
         return {
             "success": True,
@@ -653,14 +704,13 @@ def register_project_tools(mcp):
             "net_format": fmt,
             "net_count": len(by_net),
             "node_count": len(nodes),
+            "no_net_rows_dropped": dropped,
         }
 
     @mcp.tool()
     async def proj_compile(project_path: Optional[str] = None) -> dict[str, Any]:
         """Compile a project to check for errors.
 
-        This runs the project compilation which validates connectivity
-        and checks for design errors.
 
         Args:
             project_path: Optional project path. If None, uses active project.
@@ -681,14 +731,9 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Load every schematic sheet of a project into the Altium editor.
 
-        Project-scope operations (query_objects, batch_modify, etc. with
-        scope="project") only iterate sheets already resident in SchServer.
-        A sheet listed as a project member via get_open_documents may still
-        show loaded=false, meaning Altium hasn't opened its editor state.
-        Call this tool first to force every sheet to load as a proper
-        project member (no free documents).
-
-        This is a no-op for sheets already loaded. Safe to call repeatedly.
+        Project-scope queries and edits see only loaded sheets
+        (``loaded`` in app_list_documents); call this first. Safe to
+        repeat.
 
         Args:
             project_path: Optional project path. If None, uses focused project.
@@ -732,7 +777,8 @@ def register_project_tools(mcp):
         Args:
             output_dir: folder for the two files (made when missing).
             lcsc_parameter: the parameter holding the LCSC number. Empty
-                tries "LCSC Part #", "LCSC", "LCSC Part", "JLCPCB Part #".
+                tries "LCSC Part #", "LCSC Part Number", "LCSC", "LCSC Part",
+                "JLCPCB Part #".
             name: file name stem; default the board's name.
 
         Returns:
@@ -762,7 +808,8 @@ def register_project_tools(mcp):
             if isinstance(c, dict) and isinstance(c.get("parameters"), dict):
                 params_of[str(c.get("designator"))] = c["parameters"]
         keys = ([lcsc_parameter] if lcsc_parameter else
-                ["LCSC Part #", "LCSC", "LCSC Part", "JLCPCB Part #"])
+                ["LCSC Part #", "LCSC Part Number", "LCSC", "LCSC Part",
+                 "JLCPCB Part #"])
 
         def lcsc(ref: str) -> str:
             got = {k.lower(): v for k, v in params_of.get(ref, {}).items()}
@@ -813,34 +860,62 @@ def register_project_tools(mcp):
     async def proj_get_bom(
         project_path: Optional[str] = None,
         limit: int = 1000,
+        variant: Optional[str] = None,
     ) -> dict[str, Any]:
         """Export a full BOM from the compiled project.
 
-        DATASHEET DISCIPLINE: The BOM is the canonical list of
-        manufacturer part numbers in this design. The response carries
-        `_datasheet_guidance` with per-part search queries. Before
-        drawing any conclusion about a listed part, fetch and read
-        its datasheet (WebSearch + WebFetch if not already at hand).
-        Library metadata here is NOT authoritative.
+        DATASHEET DISCIPLINE: library metadata is NOT authoritative; read
+        a part's datasheet before drawing conclusions about it
+        (``_datasheet_guidance`` has search queries).
 
-        Returns every component with designator, comment/value, footprint,
-        library reference, and all pin-net connections.
+        Every component with designator, comment, footprint, library
+        reference and pin nets.
+
+        With ``variant``, the BOM is the one that variant builds: its
+        not-fitted parts leave ``components`` (listed in ``not_fitted``),
+        an alternate part takes the alternate's library reference and
+        footprint (``alternate`` holds its library link), and varied
+        parameter values replace the base ones (``varied_parameters``;
+        a varied Comment becomes ``comment``). An alternate keeps the base
+        comment unless the variant varies it.
 
         Args:
             project_path: Optional project path. If None, uses active project.
             limit: Max components to return (default 1000).
+            variant: A variant's name or description. Leave empty for the
+                base design.
 
         Returns:
             Dictionary with "components" array and "count", "limit",
             "limit_hit" (true when the list stopped at ``limit`` with
             components left over), "skipped_nil", plus
-            `_datasheet_guidance` + `_datasheet_parts`.
+            `_datasheet_guidance` + `_datasheet_parts`. With ``variant``
+            also ``variant``, ``not_fitted``, ``alternates``, ``varied``
+            and ``entries_not_in_bom``; each component carries
+            ``variation`` (none, fitted or alternate).
         """
         bridge = get_bridge()
         params: dict[str, Any] = {"limit": str(limit)}
         if project_path:
             params["project_path"] = project_path
         result = await bridge.send_command_async("project.get_bom", params)
+        if variant and variant.strip() and isinstance(result, dict) \
+                and isinstance(result.get("components"), list):
+            vparams: dict[str, Any] = {}
+            if project_path:
+                vparams["project_path"] = project_path
+            listing = await bridge.send_command_async(
+                "project.get_variants", vparams, timeout=120.0)
+            variants = (listing or {}).get("variants") \
+                if isinstance(listing, dict) else None
+            if not isinstance(variants, list):
+                return {"ok": False, "reason": "the project's variants could "
+                        "not be read", "variants_reply": listing}
+            chosen = find_variant(variants, variant)
+            if chosen is None:
+                return {"ok": False, "reason": f"no variant named {variant!r}",
+                        "variants": [v.get("name") for v in variants]}
+            result = {**result, **apply_variant(result["components"], chosen)}
         return tag_response(result, bom=result, context="proj_get_bom")
 
     @mcp.tool()
@@ -853,7 +928,6 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Get full information about one placed component.
 
-        IMPORTANT: for more than one, use proj_get_component_info_many.
         Pin nets need a project compile (30-60 s on a large project);
         with_pin_nets=False answers in under a second.
 
@@ -923,9 +997,8 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Full per-component info for MANY designators in ONE round-trip.
 
-        PREFER THIS over looping `proj_get_component_info`: one compile
-        for the batch. ``with_pin_nets=False`` skips the compile for a
-        sub-second metadata read.
+        One compile for the whole list (a list of one for a single part).
+        ``with_pin_nets=False`` skips the compile for a sub-second read.
 
         Parameters and library metadata are not authoritative: read the
         manufacturer datasheet before reasoning about pin functions,
@@ -1097,16 +1170,9 @@ def register_project_tools(mcp):
     async def proj_get_board_info() -> dict[str, Any]:
         """Get PCB board information, outline vertices, layer stack, origin.
 
-        IT DOES NOT REQUIRE A PCB TO BE ACTIVE, which is what this used
-        to claim. The handler resolves ANY open board, so with a
-        schematic focused it answers about some other document.
-        MEASURED: with a schematic active and a two-document project
-        focused, it returned an outline belonging to neither, and gave
-        no way to tell.
-
-        ``board_path`` in the reply names the document that actually
-        answered. Check it before trusting the geometry, or activate
-        the board you mean first.
+        It answers about ANY open board when none is focused. Check
+        ``board_path`` (the board that answered), or focus the board you
+        mean first.
 
         Returns:
             Dictionary with origin_x, origin_y, board_path, outline
@@ -1196,20 +1262,15 @@ def register_project_tools(mcp):
     @mcp.tool()
     async def proj_export_step(output_path: str,
                                board_path: str = "",
-                               overwrite: bool = False) -> dict[str, Any]:
+                               overwrite: bool = False,
+                               options: Optional[dict] = None) -> dict[str, Any]:
         """Export a board to a STEP 3D model with Altium's own exporter.
 
-        First through Altium's exporter object
-        (``PCBServer.Board3DModelExporter``), which shows no dialog and
-        keeps the options last used in File > Export > STEP 3D
-        (``route: "exporter"``). If that writes nothing, it runs PCB:Export
-        with the STEP 3D format, the route File > Export > STEP 3D takes,
-        and answers its three dialogs: the file name (already filled in),
-        the export options (Altium's defaults) and the closing "Done!"
-        (``route: "dialogs"``, with ``exporter_reason``). Only those three
-        are pressed; any other dialog stops the export and is reported.
-        ``generated`` is true only when a new file is at output_path
-        afterwards.
+        First with no dialog, on the options last used in File > Export >
+        STEP 3D (``route: "exporter"``). If that writes nothing, through
+        File > Export > STEP 3D, answering its three dialogs (``route:
+        "dialogs"``, with ``exporter_reason``); any other dialog stops it.
+        ``generated`` is true only when a new file is at output_path.
 
         Args:
             output_path: Full path for the .step file.
@@ -1218,6 +1279,11 @@ def register_project_tools(mcp):
                 Omit it to export the board already in front.
             overwrite: Replace an existing file. Off by default, so an
                 earlier export is never lost by accident.
+            options: Exporter settings to apply first, by the names
+                ``proj_step_export_options`` reads (``folded``,
+                ``fold_rate``, ``copper_option``, ``holes_option`` ...).
+                Altium keeps them for later exports, as the dialog does.
+                Applied on the exporter route only.
 
         Returns:
             ``generated``, ``output_path``, ``size_bytes``, the board that
@@ -1282,7 +1348,8 @@ def register_project_tools(mcp):
         api: dict[str, Any] = {}
         try:
             api = await bridge.send_command_async(
-                "project.export_step_api", {"output_path": output_path},
+                "project.export_step_api",
+                {"output_path": output_path, **_step_option_params(options)},
                 timeout=600.0) or {}
         except AltiumError as e:
             api = {"generated": False, "reason": str(e)}
@@ -1427,9 +1494,8 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Give a project an OutJob by copying one in the user's own style.
 
-        Every user exports differently, so this invents no outputs. It
-        copies an existing OutJob (the user's own from another project,
-        or one Altium ships), points each output at this project's
+        It invents no outputs: it copies an existing OutJob (the user's
+        own, or one Altium ships), points each output at this project's
         documents, writes every container to ``output_dir``, and adds the
         copy to the project. Run it afterwards with proj_run_outjob or
         proj_generate_fab_package.
@@ -1606,8 +1672,7 @@ def register_project_tools(mcp):
             format: Output format. Only ``"pdf"`` is silent today
                 (default). ``"png"``, ``"jpg"``, ``"bmp"`` return an
                 explicit ``IMAGE_FORMAT_UNSUPPORTED`` error.
-            width: Kept for API compatibility. Unused by the PDF path.
-            height: Kept for API compatibility. Unused by the PDF path.
+            width, height: Unused by the PDF path.
             open_print_dialog: run the PDF path anyway, for a person at
                 Altium to finish the dialog.
 
@@ -1671,9 +1736,7 @@ def register_project_tools(mcp):
     async def proj_list_outjob_containers(outjob_path: str = "") -> dict[str, Any]:
         """List all output containers defined in an OutJob file.
 
-        OutJob files define output configurations (Gerber, PDF, BOM, etc.)
-        organized into named containers. Use this to discover what outputs
-        are available before running them with `proj_run_outjob`.
+        Run one with `proj_run_outjob`.
 
         Args:
             outjob_path: Path to the .OutJob file. If omitted, uses the
@@ -1700,9 +1763,8 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Execute a specific output container from an OutJob file.
 
-        First use `proj_list_outjob_containers` to list available
-        containers, then run the desired one by name. Supports both GeneratedFiles
-        (Gerber, drill, BOM, etc.) and Publish (PDF) container types.
+        Containers are listed by `proj_list_outjob_containers`; both
+        generated-file and publish (PDF) containers run.
 
         SUCCESS MEANS A FILE WAS WRITTEN under ``output_dir`` after the
         run started; a container bound to a managed release or with its
@@ -2173,8 +2235,13 @@ def register_project_tools(mcp):
 
         Returns:
             Dictionary with "variants" array and "count". Each variant has
-            name, description, and variations array (designator, kind,
-            alternate_part, parameters).
+            name, description, its own ``parameters``, and variations
+            array (designator, unique_id, kind, alternate_part (Altium
+            reads it from the varied Comment, so a fitted part with a
+            varied Comment shows one too),
+            ``alternate_link`` for an alternate: the alternate's library,
+            symbol reference and footprint, and ``parameters``, the varied
+            parameter values).
         """
         bridge = get_bridge()
         params: dict[str, Any] = {}
@@ -2210,14 +2277,17 @@ def register_project_tools(mcp):
         variant_name: str,
         project_path: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Switch the active project variant.
+        """Switch the active project variant, or back to the base design.
 
         Args:
-            variant_name: Name of the variant to activate
+            variant_name: The variant's name or description, or
+                "[No Variations]" for the base design.
             project_path: Optional project path. If None, uses active project.
 
         Returns:
-            Dictionary confirming the switch
+            ``success``, ``variant_name`` (the variant now current) and
+            ``verified``, read back from the project; ``success`` false
+            with ``current_variant`` and a ``reason`` otherwise.
         """
         bridge = get_bridge()
         params: dict[str, Any] = {"variant_name": variant_name}
@@ -2235,12 +2305,8 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Write the variant fitted/not-fitted matrix to a CSV.
 
-        Builds the conventional component-by-variant table: one row per
-        flattened component, one column per variant, each cell
-        ``Fitted`` / ``Not Fitted`` / ``Alternate``. Unlike
-        ``proj_list_variants`` (which lists only per-variant deviations), every
-        component appears, so the file merges cleanly with a BOM in a
-        spreadsheet.
+        One row per component (every one), one column per variant, each
+        cell ``Fitted`` / ``Not Fitted`` / ``Alternate``.
 
         Args:
             output_path: Destination .csv. Defaults to
@@ -2395,6 +2461,11 @@ def register_project_tools(mcp):
         and `proj_set_component_variation` to mark parts not fitted or
         give them an alternate part.
 
+        Altium saves only the description and shows it as the variant's
+        name; leave ``description`` empty and it takes ``name``. A name
+        that differs from the description lasts until the project is
+        reopened.
+
         Args:
             name: Name for the new variant
             description: Optional description
@@ -2421,27 +2492,41 @@ def register_project_tools(mcp):
         kind: str,
         alternate_part: str = "",
         project_path: Optional[str] = None,
+        alternate_library: str = "",
+        alternate_lib_ref: str = "",
+        alternate_footprint: str = "",
     ) -> dict[str, Any]:
         """Set one part's entry in a project variant: fitted, not fitted,
         an alternate part, or no entry at all.
 
         Adds the variation when the part has none in that variant, changes
-        it when it has one, and with ``kind="remove"`` deletes it, so the
-        part follows the base design again. The part is found by its
+        it when it has one, and with ``kind="remove"`` deletes it, varied
+        parameter values included, so the part follows the base design
+        again. Parameter values: ``proj_set_parameter_variation``. The part is found by its
         designator in the compiled project; the entry is read back.
 
         Args:
             variant: The variant's name or description.
             designator: The part, e.g. "R12".
             kind: "fitted", "not_fitted", "alternate" or "remove".
-            alternate_part: For ``alternate``: the alternate part's name.
+            alternate_part: For ``alternate``: the alternate part's name,
+                which Altium keeps as the part's varied Comment.
             project_path: The .PrjPcb. Defaults to the focused project.
+            alternate_library: For ``alternate``: the library the
+                alternate comes from, e.g. "Miscellaneous Devices.IntLib".
+                Without it Altium saves the entry but loads it back as
+                fitted when the project is reopened.
+            alternate_lib_ref: The alternate's symbol in that library;
+                defaults to ``alternate_part``.
+            alternate_footprint: The alternate's footprint when it differs
+                from the base part's.
 
         Save the project (proj_save) to keep the change.
 
         Returns:
             ``before`` and ``after`` (the entry's kind, or "none"),
-            ``alternate_part``, ``unique_id`` and ``applied``.
+            ``alternate_part``, ``alternate_link``, ``unique_id`` and
+            ``applied``.
         """
         kind = kind.strip().lower()
         if kind not in ("fitted", "not_fitted", "alternate", "remove"):
@@ -2455,10 +2540,142 @@ def register_project_tools(mcp):
                                   "designator": designator.strip(), "kind": kind}
         if alternate_part.strip():
             params["alternate_part"] = alternate_part.strip()
+        for key, value in (("alternate_library", alternate_library),
+                           ("alternate_lib_ref", alternate_lib_ref),
+                           ("alternate_footprint", alternate_footprint)):
+            if value.strip():
+                if kind != "alternate":
+                    return {"ok": False, "reason": f"{key} is for kind alternate"}
+                params[key] = value.strip()
         if project_path:
             params["project_path"] = project_path
         return await get_bridge().send_command_async(
             "project.set_component_variation", params, timeout=120.0)
+
+    @mcp.tool()
+    async def proj_set_parameter_variation(
+        variant: str,
+        designator: str,
+        parameters: dict[str, Optional[str]],
+        project_path: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Set or clear the parameter values one part takes in a variant,
+        e.g. R5's Value 4k7 in variant "Lite" while the base design has 10k.
+
+        A value of None clears that parameter's variation, so the part
+        takes the base value again. A part with no entry in the variant
+        gets a fitted one to hold the values; a not-fitted part is
+        refused. Every value is read back. ``proj_get_bom`` with
+        ``variant`` applies them. Altium keeps an alternate part's name
+        as its varied Comment, so changing Comment on an alternate
+        renames the alternate.
+
+        Args:
+            variant: The variant's name or description.
+            designator: The part, e.g. "R5".
+            parameters: Parameter name to value, e.g. {"Value": "4k7",
+                "Comment": "4k7"}; None clears it.
+            project_path: The .PrjPcb. Defaults to the focused project.
+
+        Save the project (proj_save) to keep the change.
+
+        Returns:
+            ``parameters`` (the part's varied values afterwards),
+            ``entry_created``, ``not_on_part`` (names the part does not
+            carry, written anyway), ``not_applied`` and ``applied``.
+        """
+        if not variant.strip() or not designator.strip():
+            return {"ok": False, "reason": "variant and designator are required"}
+        if not parameters:
+            return {"ok": False, "reason": "parameters is empty"}
+        sets: list[str] = []
+        clears: list[str] = []
+        for name, value in parameters.items():
+            name = str(name).strip()
+            if not name or "=" in name or "~~" in name:
+                return {"ok": False, "reason": f"bad parameter name {name!r}"}
+            if value is None:
+                clears.append(name)
+            elif "~~" in str(value):
+                return {"ok": False, "reason": f"the value of {name} contains '~~'"}
+            else:
+                sets.append(f"{name}={value}")
+        params: dict[str, Any] = {"variant": variant.strip(),
+                                  "designator": designator.strip()}
+        if sets:
+            params["set"] = "~~".join(sets)
+        if clears:
+            params["clear"] = "~~".join(clears)
+        if project_path:
+            params["project_path"] = project_path
+        return await get_bridge().send_command_async(
+            "project.set_parameter_variation", params, timeout=120.0)
+
+    @mcp.tool()
+    async def proj_rename_variant(
+        variant: str,
+        new_name: str,
+        project_path: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Rename a project variant.
+
+        Altium saves a variant's description and shows it as the name, so
+        the new name is written there (and to the in-memory name). A name
+        another variant already has is refused. The name is read back.
+
+        Args:
+            variant: The variant's current name or description.
+            new_name: Its new name.
+            project_path: The .PrjPcb. Defaults to the focused project.
+
+        Save the project (proj_save) to keep the change.
+
+        Returns:
+            ``name_before``, ``name``, ``was_active`` and ``applied``.
+        """
+        if not variant.strip() or not new_name.strip():
+            return {"ok": False, "reason": "variant and new_name are required"}
+        params: dict[str, Any] = {"variant": variant.strip(),
+                                  "new_name": new_name.strip()}
+        if project_path:
+            params["project_path"] = project_path
+        return await get_bridge().send_command_async(
+            "project.rename_variant", params, timeout=60.0)
+
+    @mcp.tool()
+    async def proj_copy_variant(
+        source: str,
+        name: str,
+        project_path: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Start a new variant from an existing variant's entries.
+
+        Carries over every entry (fitted, not fitted, alternate with its
+        library link), every varied parameter value and the variant's own
+        parameters, then compares each entry with its source. Also the way
+        to keep a copy before ``proj_delete_variant``.
+
+        Args:
+            source: The variant to copy, by name or description.
+            name: The new variant's name (saved as its description, which
+                Altium shows as the name); one already in use is refused.
+            project_path: The .PrjPcb. Defaults to the focused project.
+
+        Save the project (proj_save) to keep the change.
+
+        Returns:
+            ``entries_copied``, ``parameter_values_copied``,
+            ``variant_parameters``, ``alternate_links_not_copied``,
+            ``differs`` (designators whose copy does not match) and
+            ``applied``.
+        """
+        if not source.strip() or not name.strip():
+            return {"ok": False, "reason": "source and name are required"}
+        params: dict[str, Any] = {"source": source.strip(), "name": name.strip()}
+        if project_path:
+            params["project_path"] = project_path
+        return await get_bridge().send_command_async(
+            "project.copy_variant", params, timeout=120.0)
 
     @mcp.tool()
     async def proj_net_color(
@@ -2514,11 +2731,13 @@ def register_project_tools(mcp):
         named_only: bool = False,
         limit: int = 500,
         project_path: Optional[str] = None,
+        structure: bool = False,
     ) -> dict[str, Any]:
         """Show what gives each compiled net its name, and where.
 
-        For each net: its net labels, power ports, ports, sheet entries
-        and off-sheet connectors with sheet and location, whether the
+        For each net: its net labels, power ports, ports, sheet entries,
+        off-sheet connectors and ``directives`` (the ones the compiled net
+        carries) with sheet and location, whether the
         compiler made the name up (``auto_generated``),
         ``local_scope`` (False when a power port gives the net a global
         name; a net joined across sheets by ports still reads True), its
@@ -2533,6 +2752,13 @@ def register_project_tools(mcp):
             limit: The most nets to list (default 500); ``truncated``
                 says when more were left out.
             project_path: The .PrjPcb. Defaults to the focused project.
+            structure: Add how each net is built, from the compiled
+                model: ``sub_wires``, ``lines``, ``all_items``,
+                ``removed_items``, ``scope``, ``signal_type``,
+                ``calculated_name``, ``hidden_name``, ``bus_width`` and
+                the count of ``output_pins``, ``io_pins``, ``power_pins``
+                and ``open_collector_pins`` it joins (two outputs on one
+                net drive against each other).
 
         Returns:
             ``nets_examined``, ``nets_listed``, ``truncated`` and
@@ -2545,10 +2771,162 @@ def register_project_tools(mcp):
             params["net"] = net.strip()
         if named_only:
             params["named_only"] = "true"
+        if structure:
+            params["structure"] = "true"
         if project_path:
             params["project_path"] = project_path
         return await get_bridge().send_command_async(
             "project.get_net_items", params, timeout=120.0)
+
+    @mcp.tool()
+    async def proj_step_export_options(options: Optional[dict] = None) -> dict[str, Any]:
+        """Read, or change, the settings Altium's STEP exporter keeps.
+
+        These are the settings File > Export > STEP 3D last used, kept
+        between exports: export the folded rigid-flex board, copper,
+        holes, how 3D models and parts are written, and the part name
+        suffix. ``proj_export_step`` uses whatever is set here. Nothing
+        is exported by this call.
+
+        Args:
+            options: Settings to write, by name: ``folded`` (bool),
+                ``fold_rate`` (int), ``component_option``,
+                ``models_option``, ``holes_option``, ``copper_option``
+                (Altium's codes, read them first), ``mechanical_pad_holes``,
+                ``electrical_pad_holes``, ``free_pad_holes``,
+                ``barrels_only``, ``cover_layer`` (bool),
+                ``component_suffix_type`` (int), ``component_suffix``
+                (text). Omit to read only.
+
+        Returns:
+            Every setting as it now reads, ``not_taken`` (names that did
+            not take) and ``read_errors``.
+        """
+        try:
+            params = _step_option_params(options)
+        except (ValueError, TypeError) as e:
+            return {"ok": False, "reason": str(e)}
+        return await get_bridge().send_command_async("project.step_options", params)
+
+    @mcp.tool()
+    async def proj_get_channels(project_path: str = "") -> dict[str, Any]:
+        """List the sheet instances of a multi-channel design, as compiled.
+
+        Every compiled sheet instance with its ``instance`` name,
+        hierarchical ``path``, ``room``, ``channel_prefix``,
+        ``channel_index`` and ``instance_number``, and the project's
+        ``room_naming_style``. A design without repeated channels lists
+        each sheet once.
+
+        Args:
+            project_path: The .PrjPcb. Defaults to the focused project.
+        """
+        params = {"project_path": project_path} if project_path else {}
+        return await get_bridge().send_command_async(
+            "project.get_channels", params, timeout=120.0)
+
+    @mcp.tool()
+    async def proj_component_models(project_path: str = "", designator: str = "",
+                                    limit: int = 300) -> dict[str, Any]:
+        """Show where each part's models resolve, as Altium finds them.
+
+        For each compiled part, each model (footprint, simulation, 3D...)
+        with its name, type, whether it is the current one and whether it
+        comes from an integrated library, and per datafile the library it
+        names, the entity, the kind and ``found_at``: the full path Altium
+        resolves it to, empty when it finds none. ``datafiles_not_found``
+        counts the links that resolve nowhere.
+
+        Args:
+            project_path: The .PrjPcb. Defaults to the focused project.
+            designator: One part. Empty lists every part.
+            limit: The most parts to list (default 300).
+        """
+        if limit < 1:
+            return {"ok": False, "reason": "limit is 1 or more"}
+        params: dict[str, Any] = {"limit": str(limit)}
+        if project_path:
+            params["project_path"] = project_path
+        if designator:
+            params["designator"] = designator
+        return await get_bridge().send_command_async(
+            "project.component_models", params, timeout=180.0)
+
+    @mcp.tool()
+    async def lib_library_manager(action: str, library: str = "", component: str = "",
+                                  destination: str = "", limit: int = 500) -> dict[str, Any]:
+        """Ask Altium's own library manager about a library or a part.
+
+        Args:
+            action: ``locate`` (where Altium finds ``component``, in
+                ``library`` or across the installed ones when it is
+                empty), ``contents`` (the parts of the library at
+                ``library``, a full path, with model counts, whether each
+                has a footprint and its first datafile; Altium reads only
+                a library it has installed or an open project uses, and
+                ``known_to_manager`` says which), or ``extract``
+                (an IntLib at ``library`` back into its source libraries,
+                in ``destination``).
+            library: A library name for locate, a full path otherwise.
+            component: The part, for locate.
+            destination: The folder for extract.
+            limit: The most parts contents lists (default 500).
+        """
+        import os
+        action = (action or "").strip().lower()
+        if action not in ("locate", "contents", "extract"):
+            return {"ok": False, "reason": "action is locate, contents or extract"}
+        before: dict[str, float] = {}
+        if action == "extract":
+            if not destination or not os.path.isabs(destination):
+                return {"ok": False, "reason": "destination must be a full path"}
+            if not library.lower().endswith(".intlib"):
+                return {"ok": False, "reason": "extract takes an .IntLib"}
+            os.makedirs(destination, exist_ok=True)
+            before = _dir_stamps(destination)
+        params = {"action": action, "library": library, "component": component,
+                  "destination": destination, "limit": str(limit)}
+        out = await get_bridge().send_command_async(
+            "project.library_lookup", params, timeout=300.0)
+        if action == "extract" and isinstance(out, dict):
+            after = _dir_stamps(destination)
+            out["files"] = sorted(p for p, t in after.items() if before.get(p) != t)
+        return out
+
+    @mcp.tool()
+    async def proj_output_panel(last: int = 100, clear: bool = False) -> dict[str, Any]:
+        """Read the lines in Altium's Output panel, newest last.
+
+        Altium writes progress and results of many processes there
+        (compiles, generators, scripts). ``clear`` empties the panel after
+        reading, so the next read shows only what came since.
+        """
+        if last < 1:
+            return {"ok": False, "reason": "last is 1 or more"}
+        params = {"last": str(last)}
+        if clear:
+            params["clear"] = "true"
+        return await get_bridge().send_command_async("project.output_panel", params)
+
+    @mcp.tool()
+    async def proj_add_generated_document(file_path: str,
+                                          project_path: str = "") -> dict[str, Any]:
+        """List a file the project produced under its Generated documents.
+
+        For a report, PDF, STEP or drawing written outside an OutJob, so it
+        shows with the project. The file itself is not changed. ``listed``
+        is true once the project holds it.
+        """
+        import os
+        if not file_path or not os.path.isabs(file_path):
+            return {"ok": False, "reason": "file_path must be a full path"}
+        if not os.path.isfile(file_path):
+            return {"ok": False, "reason": f"no file at {file_path}"}
+        params = {"file_path": file_path}
+        if project_path:
+            params["project_path"] = project_path
+        return await get_bridge().send_command_async(
+            "project.add_generated_document", params)
 
     @mcp.tool()
     async def proj_project_setup(
@@ -2689,16 +3067,66 @@ def register_project_tools(mcp):
         return reply
 
     @mcp.tool()
+    async def proj_make_integrated_library(
+        project_path: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Make an integrated library of every part the project places.
+
+        Altium's Design > Make Integrated Library, which runs with no
+        dialog: the symbols and footprints of the placed parts are
+        compiled into "<project>.IntLib" in the project folder,
+        replacing one already there. One document of the project must
+        be open (proj_load_sheets).
+
+        Args:
+            project_path: The .PrjPcb. Defaults to the focused project.
+
+        Returns:
+            ``intlib``, ``built`` (a new file is there, read from its
+            time), ``bytes`` and the ``focused_document`` it ran from.
+        """
+        import os
+        import asyncio
+        params: dict[str, Any] = {}
+        if project_path:
+            params["project_path"] = project_path
+        bridge = get_bridge()
+        path = project_path
+        if not path:
+            focused = await bridge.send_command_async("project.get_project_path")
+            path = focused.get("project_path") if isinstance(focused, dict) else None
+        if not path:
+            return {"ok": False, "reason": "no project is focused; pass project_path"}
+        intlib = os.path.splitext(path)[0] + ".IntLib"
+        before = os.path.getmtime(intlib) if os.path.isfile(intlib) else None
+        reply = await bridge.send_command_async(
+            "project.make_integrated_library", params, timeout=600.0)
+        if not isinstance(reply, dict) or "project" not in reply:
+            return reply
+        intlib = os.path.splitext(reply["project"])[0] + ".IntLib"
+        # The compile can finish writing a moment after the call returns.
+        for _ in range(20):
+            after = os.path.getmtime(intlib) if os.path.isfile(intlib) else None
+            if after is not None and (before is None or after > before):
+                break
+            await asyncio.sleep(0.5)
+        built = after is not None and (before is None or after > before)
+        reply.update(intlib=intlib, built=built,
+                     bytes=os.path.getsize(intlib) if os.path.isfile(intlib) else 0)
+        if not built:
+            reply["reason"] = ("no new IntLib after the run; read Altium's "
+                               "Messages panel for compile errors")
+        return reply
+
+    @mcp.tool()
     async def proj_get_declared_design_objects(
         project_path: Optional[str] = None,
     ) -> dict[str, Any]:
         """The net classes, component classes, differential pairs and rooms
         the project's schematics declare, from the compiled project.
 
-        These are what an Update PCB would create on the board (from
-        directives, class parameters and sheet rooms), read before it
-        does. Compare them with pcb_get_net_classes /
-        pcb_get_differential_pairs to see what the board is missing.
+        What an Update PCB would create on the board; compare with
+        pcb_get_net_classes / pcb_get_differential_pairs.
 
         Returns:
             ``sheets_examined`` (an empty answer from 0 sheets means
@@ -2720,8 +3148,7 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Delete a project variant, with every component variation in it.
 
-        NOT REVERSIBLE FROM HERE: no script can add variation entries
-        back, so each one has to be redone by hand in Variant Management.
+        NOT REVERSIBLE: run ``proj_copy_variant`` first to keep a copy.
         Read the variant with ``proj_list_variants`` first if you did not
         create it; ``entries_removed`` reports how many went. Addressed
         by name, since deleting one renumbers the rest.
@@ -2774,8 +3201,7 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Get all messages from the Messages panel (compile errors, ERC violations, etc.).
 
-        Compiles the project first so violation data is current, then returns
-        every violation with its text, severity, and source document.
+        Compiles the project first.
 
         Args:
             project_path: Optional project path. If None, uses active project.
@@ -2798,13 +3224,8 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Search for components across all project sheets.
 
-        DATASHEET DISCIPLINE: Results carry `_datasheet_guidance`. If
-        you're searching by a part number / comment to answer a
-        technical question (pinout, rating, behavior), the matched
-        parts' datasheets must be consulted before drawing any
-        conclusion. Symbol metadata is not ground truth.
-
-        Performs a case-insensitive partial match against the chosen property.
+        Case-insensitive partial match. For a technical question about a
+        match, read its datasheet; symbol metadata is not ground truth.
 
         Args:
             search_text: Text to search for (e.g., "U1", "100nF", "LM317")
@@ -2844,9 +3265,7 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Get pin-to-net connectivity for a specific component.
 
-        For more than one component prefer `proj_get_connectivity_many`.
-        Compiles the project and returns every pin with number, name, net
-        and electrical type.
+        Compiles the project; every pin with number, name, net and type.
 
         Args:
             designator: Component designator (e.g., "U1", "R8")
@@ -2897,13 +3316,9 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Pin-net connectivity for MANY components in ONE round-trip.
 
-        PREFER THIS over looping `proj_get_connectivity`.
-
-        DATASHEET DISCIPLINE: pin_name on every component in the
-        response comes from the symbol and can be wrong. Before
-        reasoning about pin functions, fetch each part's manufacturer
-        datasheet. The response carries `_datasheet_guidance` +
-        `_datasheet_parts`.
+        One compile for the whole list (a list of one for a single part).
+        Pin names come from the symbol and can be wrong: check pin
+        functions in the datasheet.
 
         Args:
             designators: List of component designators.
@@ -2989,13 +3404,9 @@ def register_project_tools(mcp):
         """Set ERC report levels (Project Options > Error Reporting).
 
         A project's policy, not a way to a clean ERC. Before turning a
-        check off because it reports something that is not there, look for
-        a stale compile: Altium keeps a document's state until it is
-        reopened, so a resized or redrawn sheet can report "Off sheet" or
-        duplicates that are gone (sch_set_sheet_size and sch_draw_template
-        reopen the sheet; proj_force_recompile recompiles). A demo take
-        switched "Off sheet" off for exactly that, hiding the check for
-        every later sheet.
+        check off because it reports something that is not there, rule out
+        a stale compile (proj_force_recompile): a resized or redrawn sheet
+        can report "Off sheet" or duplicates that are gone.
 
         Args:
             levels: {violation type: level}. A type is its exact description
@@ -3041,10 +3452,8 @@ def register_project_tools(mcp):
     async def proj_force_recompile() -> dict[str, Any]:
         """Flush all dirty docs, invalidate the compile cache, and recompile.
 
-        Use this when you need a guaranteed-fresh netlist, e.g.
-        immediately before re-running a connectivity check the user
-        has disputed. Returns prev / new compile tick so you can
-        verify the recompile actually happened.
+        For a netlist that is surely fresh. The compile ticks before and
+        after show the recompile happened.
 
         Returns:
             Dict with recompiled, prev_compile_tick, new_compile_tick,
@@ -3059,11 +3468,9 @@ def register_project_tools(mcp):
     async def proj_get_compile_freshness() -> dict[str, Any]:
         """Report the age of the cached netlist and which docs are dirty.
 
-        Use this when you're about to disagree with the user about
-        connectivity, first check how stale the netlist you're
-        reading actually is, and whether any open editor docs haven't
-        been saved yet. A dirty doc means the netlist does NOT
-        reflect what the user is looking at.
+        Check this before disagreeing with the user about connectivity:
+        a dirty document means the netlist does NOT reflect what the user
+        is looking at.
 
         ``needs_compile`` and ``violation_count`` are Altium's own
         answer: whether the project needs compiling now, and how many
@@ -3123,14 +3530,8 @@ def register_project_tools(mcp):
         If the parameter already exists it is updated; otherwise a new hidden
         parameter object is created on the sheet.
 
-        NOTE: the target sheet must already be loaded as a proper project
-        member. Call `proj_load_sheets` once at the start of a batch;
-        auto-opening from inside this tool risks detaching the sheet and
-        rendering it as a "free document". If the sheet isn't loaded this
-        tool returns NOT_LOADED.
-
-        The write is persisted to disk immediately via the IServerDocument
-        API, no subsequent `app_save_all` is required.
+        The sheet must be loaded (`proj_load_sheets`), else NOT_LOADED.
+        The write goes to disk at once; no `app_save_all` is needed.
 
         Args:
             file_path: Full path to the schematic document (.SchDoc).
@@ -3161,16 +3562,9 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Compare schematic and PCB component counts.
 
-        Compiles the project and compares physical component counts between the
-        schematic and the primary PCB document, via the component mappings
-        (matched + side-only) -- the same authoritative path as
-        ``proj_get_differences``. For the per-component breakdown of what is
-        extra on each side, use ``proj_get_differences``.
-
-        DATASHEET DISCIPLINE: If the diff reveals mismatched or missing
-        parts and you're proposing a fix, the datasheets of the parts
-        involved are authoritative on their pinout and behavior, fetch
-        them before suggesting a footprint change or pin reassignment.
+        Compiles the project. ``proj_get_differences`` gives the
+        per-component breakdown. Before proposing a footprint or pin fix,
+        read the parts' datasheets.
 
         Args:
             project_path: Optional project path. If None, uses active project.
@@ -3193,12 +3587,11 @@ def register_project_tools(mcp):
     async def proj_sync_pcb() -> dict[str, Any]:
         """Push schematic changes to the PCB (Design > Update PCB Document).
 
-        NOT SILENT: Altium's ECO dialog cannot be suppressed, so this
-        BLOCKS the bridge until Execute Changes is pressed. Prefer opening
-        the same dialog without blocking, and press it yourself rather
-        than asking the user: app_click_menu("Design|Import Changes From
-        <Project>.PrjPcb", expect_dialog="Engineering Change Order"), then
-        app_press_dialog_button("Execute Changes",
+        NOT SILENT: the ECO dialog BLOCKS the bridge until Execute Changes
+        is pressed. Prefer opening it without blocking and pressing it
+        yourself: app_menu(how="click", args={"menu_path": "Design|Import
+        Changes From <Project>.PrjPcb", "expect_dialog": "Engineering
+        Change Order"}), then app_press_dialog_button("Execute Changes",
         allow_irreversible=True) and "Close". It focuses the PCB first so the update runs
         schematic to board (refuses with WRONG_FOCUS if it cannot); check
         the ECO lists the PcbDoc before executing. ``app_list_open_dialogs``
@@ -3213,8 +3606,7 @@ def register_project_tools(mcp):
             board against the schematic: ``footprint_mismatch`` (the
             board's footprint is not the schematic's), ``missing_on_board``
             and ``diff_pairs_removed`` (pairs defined only on the board,
-            which a sync deletes). A footprint swap that "ran" twice and
-            never reached the board was found only by eye before.
+            which a sync deletes).
         """
         bridge = get_bridge()
         pairs_before = await _pair_names(bridge)
@@ -3230,13 +3622,9 @@ def register_project_tools(mcp):
     async def proj_sync_schematic() -> dict[str, Any]:
         """Push PCB changes back to schematic (back-annotate ECO). Attempts silent execution.
 
-        Equivalent to Design > Update Schematic in Altium Designer.
-        Mirror of update_pcb: compiles, records before-state mappings,
-        invokes PCB:UpdateSchematicFromPCB with silent-mode parameter flags
-        (DisableDialog, Silent, NoConfirm, AutoApply), recompiles, and
-        reports the after-state delta. Modern Altium versions execute
-        without a dialog; older versions may still require manual
-        confirmation (flagged via dialog_may_have_opened).
+        Design > Update Schematic, compiled before and after with the
+        change reported. Older Altium versions may still show a dialog
+        (``dialog_may_have_opened``).
 
         Returns:
             Dictionary with success, pcb_path, before/after mapping counts,

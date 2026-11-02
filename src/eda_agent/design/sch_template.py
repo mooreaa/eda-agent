@@ -405,7 +405,7 @@ def build(template: dict, pins: dict[str, list[PinEnd]], *,
                 # GND pointing up read as a supply on the Rosen sheets.
                 entry["orientation"] = int(orient) if orient is not None else (
                     3 if (style in GROUND_STYLES
-                          or "GND" in entry["net"].upper()) else 1)
+                          or "GND" in str(entry.get("net", "")).upper()) else 1)
                 d.ports.append(entry)
             else:
                 entry["orientation"] = int(item.get("orientation", 0))

@@ -61,6 +61,16 @@ Begin
     Board.BoardIterator_Destroy(Iterator);
 End;
 
+{ The refusal for copper asked onto a net the board does not have: placed  }
+{ anyway, it would carry no net while the call reported success.           }
+Function NetNotFoundError(RequestId : String; NetName : String) : String;
+Begin
+    Result := BuildErrorResponse(RequestId, 'NET_NOT_FOUND',
+        'No net named "' + NetName + '" exists on this board, so nothing was '
+        + 'placed. Create it first (pcb_create_nets_from_list), or read '
+        + 'pcb_get_nets for the names it carries.');
+End;
+
 { Find a net by name, or create it if missing (used to wire up pad nets when  }
 { populating a board without an ECO). Net creation is the standard            }
 { PCBObjectFactory(eNetObject) + AddPCBObject pattern.                        }
@@ -260,7 +270,7 @@ Begin
     Board.BoardIterator_Destroy(Iter);
 
     { Remove by re-finding each name (don't hold net refs across removal). }
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         For I := 0 To ToDelete.Count - 1 Do
         Begin
@@ -272,7 +282,7 @@ Begin
             End;
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     Connected.Free;
@@ -432,14 +442,14 @@ Begin
     // Create new class if it doesn't exist
     If Not ClassExists Then
     Begin
-        PCBServer.PreProcess;
+        PcbBeginEdit(0);
         NetClass := PCBServer.PCBClassFactoryByClassMember(eClassMemberKind_Net);
         NetClass.SuperClass := False;
         NetClass.Name := ClassName;
         Board.AddPCBObject(NetClass);
         PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
             PCBM_BoardRegisteration, NetClass.I_ObjectAddress);
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     // Add nets to the class
@@ -460,9 +470,9 @@ Begin
         End;
         If NetName <> '' Then
         Begin
-            PCBServer.PreProcess;
+            PcbBeginEdit(0);
             NetClass.AddMemberByName(NetName);
-            PCBServer.PostProcess;
+            PcbEndEdit(0);
             Inc(AddedCount);
         End;
     End;
@@ -709,7 +719,7 @@ Begin
     ItemsJson := '';
     First := True;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         Iter := Board.BoardIterator_Create;
         Try
@@ -788,7 +798,7 @@ Begin
             Board.BoardIterator_Destroy(Iter);
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     Result := BuildSuccessResponse(RequestId,
@@ -1270,6 +1280,167 @@ Begin
 End;
 
 {..............................................................................}
+{ RuleLimitsReport - Write a Length, Signal Impedance or Flight Time rule's     }
+{ limits and read each back.                                                    }
+{                                                                               }
+{ min/max_length_mils on MaxMinLength (MinLimit/MaxLimit, coords);             }
+{ min/max_signal_impedance_ohms on MaxMinImpedance (Minimum/Maximum);          }
+{ max_flight_time_ns on FlightTime rising or falling (MaximumFlightTime, in     }
+{ seconds). Each interface is a typed local assigned from the iterator, the     }
+{ one way DelphiScript narrows it. A value given for another kind of rule is    }
+{ named in the note, not written; a value that does not read back as written   }
+{ is named too. Updated counts the values that held.                           }
+{..............................................................................}
+Function RuleLimitsReport(Board : IPCB_Board; Kind : Integer; RuleName : String;
+    Params : String; Var Updated : Integer) : String;
+Var
+    Iter : IPCB_BoardIterator;
+    LenRule : IPCB_MaxMinLengthConstraint;
+    ImpRule : IPCB_RuleMaxMinImpedance;
+    RiseRule : IPCB_RuleFlightTime_RisingEdge;
+    FallRule : IPCB_RuleFlightTime_FallingEdge;
+    MinLen, MaxLen, MinImp, MaxImp, Flight, Written, Missed, Wrong : String;
+    WantC, GotC : TCoord;
+    WantD, GotD : Double;
+    Found : Boolean;
+Begin
+    Result := '';
+    MinLen := ExtractJsonValue(Params, 'min_length_mils');
+    MaxLen := ExtractJsonValue(Params, 'max_length_mils');
+    MinImp := ExtractJsonValue(Params, 'min_signal_impedance_ohms');
+    MaxImp := ExtractJsonValue(Params, 'max_signal_impedance_ohms');
+    Flight := ExtractJsonValue(Params, 'max_flight_time_ns');
+    If (MinLen = '') And (MaxLen = '') And (MinImp = '') And (MaxImp = '')
+        And (Flight = '') Then Exit;
+
+    Written := '';
+    Missed := '';
+    Wrong := '';
+    WantD := 0;
+    GotD := 0;
+    If ((MinLen <> '') Or (MaxLen <> '')) And (Kind <> eRule_MaxMinLength) Then
+        Wrong := Wrong + ' length';
+    If ((MinImp <> '') Or (MaxImp <> '')) And (Kind <> eRule_MaxMinImpedance) Then
+        Wrong := Wrong + ' signal_impedance';
+    If (Flight <> '') And (Kind <> eRule_FlightTime_RisingEdge)
+        And (Kind <> eRule_FlightTime_FallingEdge) Then
+        Wrong := Wrong + ' flight_time';
+
+    Iter := Board.BoardIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eRuleObject));
+    Iter.AddFilter_LayerSet(AllLayers);
+    Iter.AddFilter_Method(eProcessAll);
+    Found := False;
+    Try
+        If Kind = eRule_MaxMinLength Then
+        Begin
+            LenRule := Iter.FirstPCBObject;
+            While (LenRule <> Nil) And (Not Found) Do
+            Begin
+                If (LenRule.RuleKind = Kind) And (LenRule.Name = RuleName) Then
+                Begin
+                    Found := True;
+                    If MinLen <> '' Then
+                    Begin
+                        WantC := MilsToCoordF(StrToFloatDef(MinLen, -1));
+                        Try LenRule.MinLimit := WantC; Except End;
+                        GotC := LenRule.MinLimit;
+                        Written := Written + ',"min_length_mils":' + FloatToJsonStr(CoordToMilsF(GotC));
+                        If GotC = WantC Then Inc(Updated) Else Missed := Missed + ' min_length_mils';
+                    End;
+                    If MaxLen <> '' Then
+                    Begin
+                        WantC := MilsToCoordF(StrToFloatDef(MaxLen, -1));
+                        Try LenRule.MaxLimit := WantC; Except End;
+                        GotC := LenRule.MaxLimit;
+                        Written := Written + ',"max_length_mils":' + FloatToJsonStr(CoordToMilsF(GotC));
+                        If GotC = WantC Then Inc(Updated) Else Missed := Missed + ' max_length_mils';
+                    End;
+                End;
+                If Not Found Then LenRule := Iter.NextPCBObject;
+            End;
+        End
+        Else If Kind = eRule_MaxMinImpedance Then
+        Begin
+            ImpRule := Iter.FirstPCBObject;
+            While (ImpRule <> Nil) And (Not Found) Do
+            Begin
+                If (ImpRule.RuleKind = Kind) And (ImpRule.Name = RuleName) Then
+                Begin
+                    Found := True;
+                    If MinImp <> '' Then
+                    Begin
+                        WantD := StrToFloatDef(MinImp, -1);
+                        Try ImpRule.Minimum := WantD; Except End;
+                        GotD := ImpRule.Minimum;
+                        Written := Written + ',"min_signal_impedance_ohms":' + FloatToJsonStr(GotD);
+                        If Abs(GotD - WantD) < 0.0001 Then Inc(Updated)
+                        Else Missed := Missed + ' min_signal_impedance_ohms';
+                    End;
+                    If MaxImp <> '' Then
+                    Begin
+                        WantD := StrToFloatDef(MaxImp, -1);
+                        Try ImpRule.Maximum := WantD; Except End;
+                        GotD := ImpRule.Maximum;
+                        Written := Written + ',"max_signal_impedance_ohms":' + FloatToJsonStr(GotD);
+                        If Abs(GotD - WantD) < 0.0001 Then Inc(Updated)
+                        Else Missed := Missed + ' max_signal_impedance_ohms';
+                    End;
+                End;
+                If Not Found Then ImpRule := Iter.NextPCBObject;
+            End;
+        End
+        Else If (Kind = eRule_FlightTime_RisingEdge) And (Flight <> '') Then
+        Begin
+            RiseRule := Iter.FirstPCBObject;
+            While (RiseRule <> Nil) And (Not Found) Do
+            Begin
+                If (RiseRule.RuleKind = Kind) And (RiseRule.Name = RuleName) Then
+                Begin
+                    Found := True;
+                    WantD := StrToFloatDef(Flight, -1) / 1000000000;
+                    Try RiseRule.MaximumFlightTime := WantD; Except End;
+                    GotD := RiseRule.MaximumFlightTime;
+                End;
+                If Not Found Then RiseRule := Iter.NextPCBObject;
+            End;
+        End
+        Else If (Kind = eRule_FlightTime_FallingEdge) And (Flight <> '') Then
+        Begin
+            FallRule := Iter.FirstPCBObject;
+            While (FallRule <> Nil) And (Not Found) Do
+            Begin
+                If (FallRule.RuleKind = Kind) And (FallRule.Name = RuleName) Then
+                Begin
+                    Found := True;
+                    WantD := StrToFloatDef(Flight, -1) / 1000000000;
+                    Try FallRule.MaximumFlightTime := WantD; Except End;
+                    GotD := FallRule.MaximumFlightTime;
+                End;
+                If Not Found Then FallRule := Iter.NextPCBObject;
+            End;
+        End;
+    Finally
+        Board.BoardIterator_Destroy(Iter);
+    End;
+
+    If Found And (Flight <> '') And ((Kind = eRule_FlightTime_RisingEdge)
+        Or (Kind = eRule_FlightTime_FallingEdge)) Then
+    Begin
+        Written := Written + ',"max_flight_time_ns":' + FloatToJsonStr(GotD * 1000000000);
+        If Abs(GotD - WantD) < 0.000000000001 Then Inc(Updated)
+        Else Missed := Missed + ' max_flight_time_ns';
+    End;
+    If Written <> '' Then Result := ',"limits":{' + Copy(Written, 2, Length(Written)) + '}';
+    If Wrong <> '' Then
+        Result := Result + ',"limits_note":"Not written, this rule is kind '
+            + IntToStr(Kind) + ' and these apply to another kind:' + Wrong + '"'
+    Else If Missed <> '' Then
+        Result := Result + ',"limits_note":"Written but not held, read back different:'
+            + Missed + '"';
+End;
+
+{..............................................................................}
 { PCB_SetRuleProperties - Update metadata + constraint values of a rule.        }
 {                                                                               }
 { Metadata params (writable on the base IPCB_Rule reference):                   }
@@ -1292,6 +1463,7 @@ End;
 {     SilkToSilkClearance (55):  gap_mils, through each one's SetState_ pair   }
 {   - MaxMinWidth (kind 2):  min_width_mils / max_width_mils / favored_width_mils}
 {   - MaxMinHoleSize (kind 42):  min_hole_size_mils / max_hole_size_mils       }
+{   - MaxMinLength, MaxMinImpedance, FlightTime: through RuleLimitsReport      }
 {                                                                               }
 { Empirically determined kind 52 from the runtime rule list; the published     }
 { TRuleKind enum stops at 51 (DifferentialPairsRouting). Kinds 52+ are newer   }
@@ -1319,6 +1491,7 @@ Var
     RuleDiff : IPCB_DifferentialPairsRoutingRule;
     DGapMin, DGapMax, DGapPref, DGapMinMM, DGapMaxMM, DGapPrefMM, DiffReport : String;
     ImpDriven, ImpMin, ImpMax, ImpFav, ImpReport, ImpMissed : String;
+    LimitsReport : String;
     XHMin, XHMax, XHPref, XVGap, XShow, XMode, XCMin, XCMax, XAnt : String;
     XFStyle, XFDir, XFBgaDir, XFBgaVia, XFGrid, XReport, XMissed, XBad : String;
     XWDrv, XWMin, XWMax, XWFav, XWCopper : String;
@@ -1373,7 +1546,7 @@ Begin
     { -- Metadata path: writes against the base IPCB_Rule. priority is NOT    }
     { included, it is a read-only function and writing to it crashes the      }
     { engine. See the docstring above for details.                            }
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         PCBServer.SendMessageToRobots(Rule.I_ObjectAddress, c_Broadcast,
             PCBM_BeginModify, c_NoEventData);
@@ -1405,7 +1578,7 @@ Begin
         PCBServer.SendMessageToRobots(Rule.I_ObjectAddress, c_Broadcast,
             PCBM_EndModify, c_NoEventData);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     { -- Constraint values: per-kind iterator with typed iterator-returned    }
@@ -2119,11 +2292,14 @@ Begin
                 + 'Set it in PCB > Rules and Constraints Editor."';
     End;
 
+    LimitsReport := RuleLimitsReport(Board, Kind, RuleName, Params, UpdatedCount);
+
     Result := BuildSuccessResponse(RequestId,
         '{"name":"' + EscapeJsonString(Rule.Name) + '",'
         + '"rule_kind":' + IntToStr(Kind) + ','
         + '"properties_updated":' + IntToStr(UpdatedCount)
-        + GapReport + ViaReport + ConnReport + DiffReport + ImpReport + XReport + '}');
+        + GapReport + ViaReport + ConnReport + DiffReport + ImpReport + XReport
+        + LimitsReport + '}');
 End;
 
 {..............................................................................}
@@ -2448,11 +2624,12 @@ Var
     Board : IPCB_Board;
     Iterator : IPCB_BoardIterator;
     Comp : IPCB_Component;
-    BBox : TCoordRect;
+    BBox, BodyBox : TCoordRect;
     JsonItems, Designator, Footprint, LayerStr, CommentStr, SrcDesignator : String;
     First : Boolean;
     Count : Integer;
     HeightMils, BBoxX1, BBoxY1, BBoxX2, BBoxY2, BBoxW, BBoxH : Double;
+    BodyJson : String;
 Begin
     Board := GetPCBBoardAnywhere(0);
     If Board = Nil Then
@@ -2497,6 +2674,16 @@ Begin
             BBoxW := BBoxX2 - BBoxX1;
             BBoxH := BBoxY2 - BBoxY1;
         Except End;
+        { The same box without the part's designator and comment, which can }
+        { sit far from it.                                                 }
+        BodyJson := '';
+        Try
+            BodyBox := Comp.BoundingRectangleNoNameComment;
+            BodyJson := ',"bbox_no_name_comment":{"x1":' + FloatToJsonStr(CoordToMilsF(BodyBox.X1))
+                + ',"y1":' + FloatToJsonStr(CoordToMilsF(BodyBox.Y1))
+                + ',"x2":' + FloatToJsonStr(CoordToMilsF(BodyBox.X2))
+                + ',"y2":' + FloatToJsonStr(CoordToMilsF(BodyBox.Y2)) + '}';
+        Except BodyJson := ''; End;
 
         JsonItems := JsonItems + '{"designator":"' + EscapeJsonString(Designator) + '",'
             + '"comment":"' + EscapeJsonString(CommentStr) + '",'
@@ -2509,7 +2696,8 @@ Begin
             + '"height_mils":' + FloatToJsonStr(HeightMils) + ','
             + '"bbox":{"x1":' + FloatToJsonStr(BBoxX1) + ',"y1":' + FloatToJsonStr(BBoxY1)
             + ',"x2":' + FloatToJsonStr(BBoxX2) + ',"y2":' + FloatToJsonStr(BBoxY2)
-            + ',"width":' + FloatToJsonStr(BBoxW) + ',"height":' + FloatToJsonStr(BBoxH) + '}}';
+            + ',"width":' + FloatToJsonStr(BBoxW) + ',"height":' + FloatToJsonStr(BBoxH) + '}'
+            + BodyJson + '}';
         Inc(Count);
         Comp := Iterator.NextPCBObject;
     End;
@@ -2757,7 +2945,7 @@ Begin
     { IPCB_Group interface"). Direct assignment is the documented API. The   }
     { previous OleStr->Double crash was the locale-dependent StrToFloat in   }
     { the rotation path; fixed in Utils.pas StrToFloatDef.                    }
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast,
             PCBM_BeginModify, c_NoEventData);
@@ -2783,7 +2971,7 @@ Begin
         PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast,
             PCBM_EndModify, c_NoEventData);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
@@ -2853,7 +3041,7 @@ Begin
     First := True;
     Remaining := Mapping;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         While Length(Remaining) > 0 Do
         Begin
@@ -2937,7 +3125,7 @@ Begin
             ItemsJson := ItemsJson + JsonObj(EntryJson);
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     Try Board.GraphicallyInvalidate; Except End;
@@ -3254,7 +3442,7 @@ Begin
         End;
 
         { 5. Replicate + transform + re-net the source routing. }
-        PCBServer.PreProcess;
+        PcbBeginEdit(0);
         Try
             Iter := Board.BoardIterator_Create;
             Iter.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, eViaObject,
@@ -3320,7 +3508,7 @@ Begin
             End;
             Board.BoardIterator_Destroy(Iter);
         Finally
-            PCBServer.PostProcess;
+            PcbEndEdit(0);
         End;
 
         { 6. Rebuild connectivity so ratsnest / highlighting reflect the copies. }
@@ -3429,13 +3617,14 @@ Begin
         Exit;
     End;
 
-    { Find the variant by name. }
+    { By name or description: the description is what Altium saves. }
     Variant := Nil;
     NVar := Project.DM_ProjectVariantCount;
     For VarIdx := 0 To NVar - 1 Do
     Begin
         V0 := Project.DM_ProjectVariants(VarIdx);
-        If (V0 <> Nil) And (V0.DM_Name = VariantName) Then
+        If (V0 <> Nil) And ((UpperCase(V0.DM_Name) = UpperCase(VariantName))
+            Or (UpperCase(V0.DM_Description) = UpperCase(VariantName))) Then
         Begin
             Variant := V0;
             Break;
@@ -3492,7 +3681,7 @@ Begin
         End;
 
         { Deselect every board component, then select the matched ones. }
-        PCBServer.PreProcess;
+        PcbBeginEdit(0);
         Try
             Iter := Board.BoardIterator_Create;
             Iter.AddFilter_ObjectSet(MkSet(eComponentObject));
@@ -3506,7 +3695,7 @@ Begin
             End;
             Board.BoardIterator_Destroy(Iter);
         Finally
-            PCBServer.PostProcess;
+            PcbEndEdit(0);
         End;
         Try Board.ViewManager_FullUpdate; Except End;
 
@@ -3699,7 +3888,7 @@ Begin
         MapJson := '[';
         First := True;
         K := 0;
-        PCBServer.PreProcess;
+        PcbBeginEdit(0);
         Try
             GrpIter := Footprint.GroupIterator_Create;
             Try
@@ -3727,7 +3916,7 @@ Begin
                 Footprint.GroupIterator_Destroy(GrpIter);
             End;
         Finally
-            PCBServer.PostProcess;
+            PcbEndEdit(0);
         End;
         MapJson := MapJson + ']';
 
@@ -3808,7 +3997,7 @@ Begin
     Else StepDeg := 360.0 / Count;
 
     Copied := 0;
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         For K := 1 To Count - 1 Do
         Begin
@@ -3834,7 +4023,7 @@ Begin
             End;
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
     Try Board.ViewManager_FullUpdate; Except End;
 
@@ -3940,7 +4129,7 @@ Begin
 
     Scaled := 0;
     Skipped := 0;
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         For I := 0 To SelCount - 1 Do
         Begin
@@ -4019,7 +4208,7 @@ Begin
             End;
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
     Try Board.ViewManager_FullUpdate; Except End;
 
@@ -4100,7 +4289,7 @@ Begin
     MatchedComp := 0;
     UpdatedComp := 0;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         { Pass 1: walk track / arc / via, lock those whose net matches. }
         Iter := Board.BoardIterator_Create;
@@ -4193,7 +4382,7 @@ Begin
             End;
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     Try Board.GraphicallyInvalidate; Except End;
@@ -4381,7 +4570,7 @@ Begin
         End;
     End;
 
-    If Not DryRun Then PCBServer.PreProcess;
+    If Not DryRun Then PcbBeginEdit(0);
     Try
         For CandIdx := 0 To Cands.Count - 1 Do
         Begin
@@ -4463,7 +4652,7 @@ Begin
 
         End;
     Finally
-        If Not DryRun Then PCBServer.PostProcess;
+        If Not DryRun Then PcbEndEdit(0);
         Cands.Free;
     End;
 
@@ -4542,7 +4731,7 @@ Begin
     UpdatedNames := 0;
     UpdatedComments := 0;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         Iter := Board.BoardIterator_Create;
         Try
@@ -4583,7 +4772,7 @@ Begin
             Board.BoardIterator_Destroy(Iter);
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     Try Board.GraphicallyInvalidate; Except End;
@@ -4726,7 +4915,7 @@ Begin
     Failed := 0;
     Listed := 0;
     Items := '';
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         For I := 0 To Comps.Count - 1 Do
         Begin
@@ -4779,7 +4968,7 @@ Begin
             End;
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     Try Board.GraphicallyInvalidate; Except End;
@@ -4920,7 +5109,7 @@ Begin
 
         { Per-component PreProcess+PostProcess (same as singular). Each move   }
         { is structurally a singular move, just inside one IPC turn.           }
-        PCBServer.PreProcess;
+        PcbBeginEdit(0);
         Try
             PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast,
                 PCBM_BeginModify, c_NoEventData);
@@ -4956,7 +5145,7 @@ Begin
             PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast,
                 PCBM_EndModify, c_NoEventData);
         Finally
-            PCBServer.PostProcess;
+            PcbEndEdit(0);
         End;
 
         { The nets of its pads, for the ratsnest below. }
@@ -5286,6 +5475,215 @@ Begin
         + JsonBool('stiffener', DL.IsStiffener);
 End;
 
+{ Whether anything of the board lies on layer Id. Ids past the old layer   }
+{ sets (AD19 and later number layers above 255) cannot be searched, and a  }
+{ layer that cannot be searched counts as occupied, so nothing on it is lost. }
+Function LayerCarriesObjects(Board : IPCB_Board; Id : Integer) : Boolean;
+Var
+    Search : IPCB_BoardIterator;
+Begin
+    Result := (Id < 1) Or (Id > 255);
+    If Result Then Exit;
+    Search := Board.BoardIterator_Create;
+    Try
+        Search.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, ePadObject, eViaObject,
+            eFillObject, eRegionObject, eTextObject, ePolyObject));
+        Search.AddFilter_LayerSet(MkSet(Id));
+        Search.AddFilter_Method(eProcessAll);
+        Result := Search.FirstPCBObject <> Nil;
+    Finally
+        Board.BoardIterator_Destroy(Search);
+    End;
+End;
+
+{ Turn a copper layer into plain copper: additive off, and the resistivity  }
+{ of the top layer. Copper added through the older stack model came out as  }
+{ a printed-electronics layer on AD 25.8, and the board was then drawn thin }
+{ with no drilled holes. Answers whether the layer now reads plain.         }
+Function CopperToPlain(Stack : IPCB_MasterLayerStack; Layer : IPCB_LayerObject) : Boolean;
+Var
+    Cu, TopCopper : IPCB_ElectricalLayer;
+Begin
+    Cu := Layer;
+    TopCopper := Stack.First(eLayerClass_Electrical);
+    If Cu.IsAdditiveLayer Then Cu.IsAdditiveLayer := False;
+    If TopCopper <> Nil Then
+        If Cu.ElectricalResistivity <> TopCopper.ElectricalResistivity Then
+            Cu.ElectricalResistivity := TopCopper.ElectricalResistivity;
+    Result := Not Cu.IsAdditiveLayer;
+    If Result And (TopCopper <> Nil) Then
+        Result := Cu.ElectricalResistivity = TopCopper.ElectricalResistivity;
+End;
+
+{ The copper layer's fields the stack tools report. }
+Function CopperLayerJson(Board : IPCB_Board; Layer : IPCB_LayerObject) : String;
+Var
+    Cu : IPCB_ElectricalLayer;
+Begin
+    Cu := Layer;
+    Result := JsonObj(JsonStr('name', Layer.Name)
+        + ',' + JsonInt('id', Layer.LayerID)
+        + ',' + JsonBool('occupied', LayerCarriesObjects(Board, Layer.LayerID))
+        + ',' + JsonBool('additive', Cu.IsAdditiveLayer)
+        + ',' + JsonRaw('resistivity', FloatToJsonStr(Cu.ElectricalResistivity))
+        + ',' + JsonRaw('thickness_mils', FloatToJsonStr(CoordToMilsF(Cu.CopperThickness))));
+End;
+
+{ The board a stack command acts on, or Nil with the refusal in Refusal. }
+Function StackBoard(Params, RequestId : String; Var Refusal : String) : IPCB_Board;
+Begin
+    Result := ResolvePCBBoard(ExtractJsonValue(Params, 'board_path'));
+    Refusal := '';
+    If Result = Nil Then
+        Refusal := BuildErrorResponse(RequestId, 'NO_PCB',
+            'No board open at that path, and none focused');
+End;
+
+{..............................................................................}
+{ PCB_CopperLayers - the copper of the physical stack (MasterLayerStack, the  }
+{ model where a dielectric is a layer of its own), top to bottom: name, id,  }
+{ whether anything lies on it, additive flag, resistivity, thickness.        }
+{ Params: board_path (optional).                                             }
+{..............................................................................}
+Function PCB_CopperLayers(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Stack : IPCB_MasterLayerStack;
+    Layer : IPCB_LayerObject;
+    Rows, Refusal : String;
+Begin
+    Board := StackBoard(Params, RequestId, Refusal);
+    If Board = Nil Then Begin Result := Refusal; Exit; End;
+    Stack := Board.MasterLayerStack;
+    Rows := '';
+    Layer := Stack.First(eLayerClass_Electrical);
+    While Layer <> Nil Do
+    Begin
+        If Rows <> '' Then Rows := Rows + ',';
+        Rows := Rows + CopperLayerJson(Board, Layer);
+        Layer := Stack.Next(eLayerClass_Electrical, Layer);
+    End;
+    Result := BuildSuccessResponse(RequestId, JsonObj(JsonStr('board', Board.FileName)
+        + ',' + JsonRaw('layers', '[' + Rows + ']')));
+End;
+
+{..............................................................................}
+{ PCB_DropStackLayer - take one layer out of the physical stack. The top and  }
+{ bottom copper stay, and copper with anything on it is refused; afterwards  }
+{ the layer is looked for again. Params: board_path (optional), layer.       }
+{..............................................................................}
+Function PCB_DropStackLayer(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Stack : IPCB_MasterLayerStack;
+    Layer, First, Last, Walk : IPCB_LayerObject;
+    Wanted, Refusal : String;
+Begin
+    Board := StackBoard(Params, RequestId, Refusal);
+    If Board = Nil Then Begin Result := Refusal; Exit; End;
+    Stack := Board.MasterLayerStack;
+    Wanted := ExtractJsonValue(Params, 'layer');
+    Layer := StackFindPhysical(Stack, Wanted);
+    If Layer = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_LAYER',
+            'The stack has no layer ' + Wanted + ' (pcb_physical_stack lists them)');
+        Exit;
+    End;
+    If Pos('|' + Layer.Name + '|', StackClassNames(Stack, eLayerClass_Electrical)) > 0 Then
+    Begin
+        First := Stack.First(eLayerClass_Electrical);
+        Last := First;
+        Walk := First;
+        While Walk <> Nil Do
+        Begin
+            Last := Walk;
+            Walk := Stack.Next(eLayerClass_Electrical, Walk);
+        End;
+        If (Layer.Name = First.Name) Or (Layer.Name = Last.Name) Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'OUTER_COPPER',
+                'The outer copper layers stay; rename them instead');
+            Exit;
+        End;
+        If LayerCarriesObjects(Board, Layer.LayerID) Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'LAYER_OCCUPIED',
+                'Objects lie on ' + Layer.Name + ', so it stays');
+            Exit;
+        End;
+    End;
+    PcbBeginEdit(0);
+    Try
+        Stack.RemoveLayer(Layer);
+        PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
+            PCBM_BoardRegisteration, c_NoEventData);
+    Finally
+        PcbEndEdit(0);
+    End;
+    MarkDocDirtyByPath(Board.FileName);
+    Result := BuildSuccessResponse(RequestId, JsonObj(JsonStr('layer', Wanted)
+        + ',' + JsonBool('still_there', StackFindPhysical(Stack, Wanted) <> Nil)));
+End;
+
+{..............................................................................}
+{ PCB_TuneCopperLayer - change one copper layer of the physical stack: its    }
+{ name (rename_to), its thickness, and plain=true to make it plain copper.   }
+{ Every change is read back; the ones that did not hold are in 'missed'.     }
+{ Params: board_path (optional), layer, rename_to, thickness_mils, plain.    }
+{..............................................................................}
+Function PCB_TuneCopperLayer(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Stack : IPCB_MasterLayerStack;
+    Layer : IPCB_LayerObject;
+    Cu : IPCB_ElectricalLayer;
+    Wanted, NewName, Thick, Missed, Refusal : String;
+    Mils : Double;
+Begin
+    Board := StackBoard(Params, RequestId, Refusal);
+    If Board = Nil Then Begin Result := Refusal; Exit; End;
+    Stack := Board.MasterLayerStack;
+    Wanted := ExtractJsonValue(Params, 'layer');
+    Layer := StackFindPhysical(Stack, Wanted);
+    If (Layer = Nil) Or
+       (Pos('|' + Wanted + '|', StackClassNames(Stack, eLayerClass_Electrical)) = 0) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_LAYER',
+            'The stack has no copper layer ' + Wanted);
+        Exit;
+    End;
+    Cu := Layer;
+    NewName := ExtractJsonValue(Params, 'rename_to');
+    Thick := ExtractJsonValue(Params, 'thickness_mils');
+    Missed := '';
+    PcbBeginEdit(0);
+    Try
+        If NewName <> '' Then
+        Begin
+            Layer.Name := NewName;
+            If Layer.Name <> NewName Then Missed := Missed + ',"rename_to"';
+        End;
+        If Thick <> '' Then
+        Begin
+            Mils := StrToFloatDef(Thick, 0);
+            Cu.CopperThickness := MilsToCoordF(Mils);
+            If Abs(CoordToMilsF(Cu.CopperThickness) - Mils) > 0.01 Then
+                Missed := Missed + ',"thickness_mils"';
+        End;
+        If LowerCase(ExtractJsonValue(Params, 'plain')) = 'true' Then
+            If Not CopperToPlain(Stack, Layer) Then Missed := Missed + ',"plain"';
+        PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
+            PCBM_BoardRegisteration, c_NoEventData);
+    Finally
+        PcbEndEdit(0);
+    End;
+    MarkDocDirtyByPath(Board.FileName);
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonRaw('layer', CopperLayerJson(Board, Layer))
+        + ',' + JsonRaw('missed', '[' + Copy(Missed, 2, Length(Missed)) + ']')));
+End;
+
 {..............................................................................}
 { PCB_PhysicalStack - every physical layer of the board's stack in order, top }
 { down: its kind, Z top and bottom and thickness, and for a dielectric or     }
@@ -5320,11 +5718,11 @@ Begin
     Changed := False;
     If StyleStr <> '' Then
     Begin
-        PCBServer.PreProcess;
+        PcbBeginEdit(0);
         Try
             MLS.LayerStackStyle := StrToInt(StyleStr);
         Finally
-            PCBServer.PostProcess;
+            PcbEndEdit(0);
         End;
         Changed := True;
         MarkDocDirtyByPath(Board.FileName);
@@ -5369,6 +5767,16 @@ Begin
             Extra := ',' + JsonBool('additive', EL.IsAdditiveLayer) + ','
                 + JsonRaw('resistivity', FloatToJsonStr(EL.ElectricalResistivity));
         End;
+        { Copper that reads additive is a printed-electronics layer: Altium  }
+        { draws such a board paper-thin with no drilled holes (seen on      }
+        { AD 25.8, after copper was inserted through the V7 stack).         }
+        If Kind = 'copper' Then
+        Begin
+            EL := L;
+            Extra := ',' + JsonInt('layer_id', L.LayerID)
+                + ',' + JsonRaw('resistivity', FloatToJsonStr(EL.ElectricalResistivity))
+                + ',' + JsonBool('additive', EL.IsAdditiveLayer);
+        End;
         If Items <> '' Then Items := Items + ',';
         Items := Items + JsonObj(JsonInt('order', Order) + ','
             + JsonStr('name', L.Name) + ','
@@ -5398,7 +5806,7 @@ Var
     MLS : IPCB_MasterLayerStack;
     L : IPCB_LayerObject;
     DL : IPCB_DielectricLayer;
-    LayerName, TypeS, MatS, ConstS, TanS, ThickS, StiffS, Key, Missed : String;
+    LayerName, TypeS, MatS, ConstS, TanS, ThickS, StiffS, Key, Missed, NewName : String;
 Begin
     LayerName := ExtractJsonValue(Params, 'layer');
     TypeS := ExtractJsonValue(Params, 'type');
@@ -5407,6 +5815,7 @@ Begin
     TanS := ExtractJsonValue(Params, 'loss_tangent');
     ThickS := ExtractJsonValue(Params, 'thickness_mils');
     StiffS := LowerCase(ExtractJsonValue(Params, 'stiffener'));
+    NewName := ExtractJsonValue(Params, 'rename_to');
     Board := GetPCBBoardAnywhere(0);
     If Board = Nil Then
     Begin
@@ -5427,8 +5836,13 @@ Begin
     End;
     DL := L;
     Missed := '';
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
+        If NewName <> '' Then
+        Begin
+            L.Name := NewName;
+            If L.Name <> NewName Then Missed := Missed + '"rename_to",';
+        End;
         If TypeS <> '' Then
         Begin
             DL.DielectricType := StrToInt(TypeS);
@@ -5462,7 +5876,7 @@ Begin
         PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
             PCBM_BoardRegisteration, c_NoEventData);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
     If Missed <> '' Then Missed := Copy(Missed, 1, Length(Missed) - 1);
     MarkDocDirtyByPath(Board.FileName);
@@ -5639,14 +6053,14 @@ Begin
                 'The V7 stack has no layer object for ' + RefName + ' or the new layer');
             Exit;
         End;
-        PCBServer.PreProcess;
+        PcbBeginEdit(0);
         Try
             If Where = 'above' Then LS7.InsertInStackAbove(RefObj, NewObj)
             Else LS7.InsertInStackBelow(RefObj, NewObj);
             PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
                 PCBM_BoardRegisteration, c_NoEventData);
         Finally
-            PCBServer.PostProcess;
+            PcbEndEdit(0);
         End;
         NewL := Nil;
         L := MLS.First(eLayerClass_Physical);
@@ -5663,7 +6077,7 @@ Begin
         End;
         EL := NewL;
         Ordinary := False;
-        PCBServer.PreProcess;
+        PcbBeginEdit(0);
         Try
             If Name <> '' Then NewL.Name := Name;
             If ThickS <> '' Then EL.CopperThickness := MilsToCoordF(StrToFloatDef(ThickS, 0));
@@ -5671,7 +6085,7 @@ Begin
             PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
                 PCBM_BoardRegisteration, c_NoEventData);
         Finally
-            PCBServer.PostProcess;
+            PcbEndEdit(0);
         End;
         MarkDocDirtyByPath(Board.FileName);
         Result := BuildSuccessResponse(RequestId, JsonObj(
@@ -5733,13 +6147,13 @@ Begin
             Exit;
         End;
         Removed := False;
-        PCBServer.PreProcess;
+        PcbBeginEdit(0);
         Try
             Removed := MLS.RemoveLayer(L);
             PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
                 PCBM_BoardRegisteration, c_NoEventData);
         Finally
-            PCBServer.PostProcess;
+            PcbEndEdit(0);
         End;
         MarkDocDirtyByPath(Board.FileName);
         Result := BuildSuccessResponse(RequestId, JsonObj(
@@ -5757,7 +6171,7 @@ Begin
             Exit;
         End;
         DL := L;
-        PCBServer.PreProcess;
+        PcbBeginEdit(0);
         Try
             If NewName <> '' Then L.Name := NewName;
             If TypeS <> '' Then DL.DielectricType := StrToInt(TypeS);
@@ -5768,7 +6182,7 @@ Begin
             PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
                 PCBM_BoardRegisteration, c_NoEventData);
         Finally
-            PCBServer.PostProcess;
+            PcbEndEdit(0);
         End;
         MarkDocDirtyByPath(Board.FileName);
         Result := BuildSuccessResponse(RequestId, JsonObj(
@@ -5782,7 +6196,7 @@ Begin
     Begin
         EL := L;
         Ordinary := False;
-        PCBServer.PreProcess;
+        PcbBeginEdit(0);
         Try
             If NewName <> '' Then L.Name := NewName;
             If ThickS <> '' Then EL.CopperThickness := MilsToCoordF(StrToFloatDef(ThickS, 0));
@@ -5790,7 +6204,7 @@ Begin
             PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
                 PCBM_BoardRegisteration, c_NoEventData);
         Finally
-            PCBServer.PostProcess;
+            PcbEndEdit(0);
         End;
         MarkDocDirtyByPath(Board.FileName);
         Result := BuildSuccessResponse(RequestId, JsonObj(
@@ -6001,7 +6415,7 @@ Begin
         WasOnline := True;
         Try WasOnline := PCBServer.SystemOptions.DoOnlineDRC; Except End;
         Try PCBServer.SystemOptions.DoOnlineDRC := False; Except End;
-        PCBServer.PreProcess;
+        PcbBeginEdit(0);
         Try
             Iter := Board.BoardIterator_Create;
             Try
@@ -6048,7 +6462,7 @@ Begin
                 Board.BoardIterator_Destroy(Iter);
             End;
         Finally
-            PCBServer.PostProcess;
+            PcbEndEdit(0);
             Try PCBServer.SystemOptions.DoOnlineDRC := WasOnline; Except End;
         End;
     Finally
@@ -6128,7 +6542,7 @@ Begin
         Exit;
     End;
     Missed := '';
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         If Op = 'remove' Then
             Stack.RemoveImpedanceProfile(P)
@@ -6164,7 +6578,7 @@ Begin
         PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
             PCBM_BoardRegisteration, c_NoEventData);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
     After := Stack.GetImpedanceProfileCount;
     If Missed <> '' Then Missed := Copy(Missed, 1, Length(Missed) - 1);
@@ -6255,11 +6669,11 @@ Begin
     Begin
         { The layer goes as its ID: the layer object raised "Could not       }
         { convert variant of type (Dispatch) into type (Integer)" (AD 26.11).  }
-        PCBServer.PreProcess;
+        PcbBeginEdit(0);
         Try
             Try Found := P.CreateTraceImpedance(Sub, WantId); Except Found := Nil; End;
         Finally
-            PCBServer.PostProcess;
+            PcbEndEdit(0);
         End;
         If Found = Nil Then
         Begin
@@ -6271,7 +6685,7 @@ Begin
     End;
     T := Found;
     Missed := '';
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         V := LowerCase(ExtractJsonValue(Params, 'enabled'));
         If V <> '' Then Begin T.IsEnabled := (V = 'true'); If T.IsEnabled <> (V = 'true') Then Missed := Missed + '"enabled",'; End;
@@ -6302,7 +6716,7 @@ Begin
         PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
             PCBM_BoardRegisteration, c_NoEventData);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
     If Missed <> '' Then Missed := Copy(Missed, 1, Length(Missed) - 1);
     MarkDocDirtyByPath(Board.FileName);
@@ -6553,7 +6967,7 @@ Begin
         End;
     End;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         If RefObj = Nil Then
         Begin
@@ -6568,7 +6982,7 @@ Begin
         PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
             PCBM_BoardRegisteration, c_NoEventData);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
@@ -6635,13 +7049,13 @@ Begin
         Exit;
     End;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         Try LayerStack.RemoveFromStack(LayerObj); Except End;
         PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
             PCBM_BoardRegisteration, c_NoEventData);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
@@ -6752,7 +7166,7 @@ Begin
     ConstStr := ExtractJsonValue(Params, 'dielectric_constant');
     Material := ExtractJsonValue(Params, 'dielectric_material');
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         If NewName <> '' Then
             Try LayerObj.Name := NewName; Except End;
@@ -6778,7 +7192,7 @@ Begin
         PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
             PCBM_BoardRegisteration, c_NoEventData);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     { Read back rather than trusting the write. Every assignment above is late }
@@ -6996,13 +7410,13 @@ Begin
     Try ResolvedName := LayerObj.Name; Except End;
 
     Route := '';
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         Try Board.InternalPlaneNetName[TargetLayer] := NetObj.Name; Except End;
         PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
             PCBM_BoardRegisteration, c_NoEventData);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     NetBack := '';
@@ -7012,13 +7426,13 @@ Begin
 
     If Not Applied Then
     Begin
-        PCBServer.PreProcess;
+        PcbBeginEdit(0);
         Try
             Try LayerObj.Net := NetObj; Except End;
             PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
                 PCBM_BoardRegisteration, c_NoEventData);
         Finally
-            PCBServer.PostProcess;
+            PcbEndEdit(0);
         End;
         Try
             If LayerObj.Net <> Nil Then NetBack := LayerObj.Net.Name;
@@ -7062,14 +7476,14 @@ Begin
             Split := Splits.Items[I];
             If (Split.Net = Nil) Or (SplitsSeen = 1) Then
             Begin
-                PCBServer.PreProcess;
+                PcbBeginEdit(0);
                 Try
                     Split.BeginModify;
                     Try Split.Net := NetObj; Except End;
                     Split.EndModify;
                     Split.GraphicallyInvalidate;
                 Finally
-                    PCBServer.PostProcess;
+                    PcbEndEdit(0);
                 End;
                 If Split.Net <> Nil Then
                     If UpperCase(Split.Net.Name) = UpperCase(NetStr) Then Inc(SplitsSet);
@@ -7254,22 +7668,6 @@ End;
 { blue swapping is easy to miss on a busy board.                              }
 {..............................................................................}
 
-Function HexDigitValue(Ch : String) : Integer;
-Var
-    O : Integer;
-    U : String;
-Begin
-    Result := -1;
-    If Ch = '' Then Exit;
-    { Materialise before indexing. DelphiScript cannot subscript the       }
-    { RESULT of a function call, so UpperCase(Ch)[1] is a compile error    }
-    { rather than a runtime one.                                            }
-    U := UpperCase(Ch);
-    O := Ord(U[1]);
-    If (O >= Ord('0')) And (O <= Ord('9')) Then Result := O - Ord('0')
-    Else If (O >= Ord('A')) And (O <= Ord('F')) Then Result := 10 + O - Ord('A');
-End;
-
 Function ColorToHexRgb(C : Integer) : String;
 Var
     R, G, B : Integer;
@@ -7331,7 +7729,7 @@ Var
     LayerObj : IPCB_LayerObject_V7;
     Lyr : TLayer;
     JsonItems, LyrNm, UserName : String;
-    First, Visible : Boolean;
+    First, Visible, Stacked : Boolean;
     Color, Count, Shown : Integer;
 Begin
     Board := GetPCBBoardAnywhere(0);
@@ -7372,13 +7770,19 @@ Begin
 
             { The name the user gave the layer, which for a mechanical  }
             { layer is the only way to tell one from another.           }
+            { in_stack: an unused mid layer still reads as displayed, so  }
+            { visible does not tell whether the board has the layer.      }
             UserName := '';
+            Stacked := False;
             If LayerStack <> Nil Then
             Begin
                 LayerObj := Nil;
                 Try LayerObj := LayerStack.LayerObject_V7[Lyr]; Except LayerObj := Nil; End;
                 If LayerObj <> Nil Then
+                Begin
                     Try UserName := LayerObj.Name; Except UserName := ''; End;
+                    Try Stacked := LayerObj.IsInLayerStack; Except Stacked := False; End;
+                End;
             End;
 
             If Not First Then JsonItems := JsonItems + ',';
@@ -7387,6 +7791,7 @@ Begin
                 + '{"layer":"' + EscapeJsonString(LyrNm) + '",'
                 + '"name":"' + EscapeJsonString(UserName) + '",'
                 + '"visible":' + BoolToJsonStr(Visible) + ','
+                + '"in_stack":' + BoolToJsonStr(Stacked) + ','
                 + '"color":' + IntToStr(Color) + ','
                 + '"color_hex":"' + ColorToHexRgb(Color) + '"}';
             Inc(Count);
@@ -7397,6 +7802,294 @@ Begin
     Result := BuildSuccessResponse(RequestId,
         '{"layers":[' + JsonItems + '],"count":' + IntToStr(Count)
         + ',"visible_count":' + IntToStr(Shown) + '}');
+End;
+
+{..............................................................................}
+{ PCB_LayerView - What the board view shows, and changes to it, in one call   }
+{ (issue #153).                                                                }
+{                                                                              }
+{ get_layer_display walks the legacy layer range, which stops at              }
+{ Mechanical16, and set_layer_visibility takes one layer at a time. A caller  }
+{ that wants to put a view back the way the user had it (a working view for   }
+{ one task, then the user's own) needs the rest of what the editor shows:     }
+{ the current layer, single layer mode, and for a mechanical layer whether    }
+{ it stays drawn in single layer mode (the Ctrl+click lock in the View        }
+{ Configuration panel, DisplayInSingleLayerMode).                             }
+{                                                                              }
+{ Params, all optional, applied in this order:                                }
+{   show, hide     comma lists of layers to display / hide                    }
+{   lock, unlock   comma lists of MECHANICAL layers to keep drawn / not in     }
+{                  single layer mode                                           }
+{   current_layer  the layer to make current                                   }
+{   single_layer_mode  true / false                                            }
+{ A layer is a name ResolveLayerId knows, "Mechanical21", or the user's name  }
+{ of any mechanical layer, Mechanical17 and up included. Every write is read  }
+{ back; one that did not take is listed in not_applied, a name that resolves  }
+{ to nothing in unknown_layers. The reply always lists every layer: the       }
+{ legacy range as get_layer_display does, then each ENABLED mechanical layer  }
+{ from 17 up. View state only: the document is not marked modified.          }
+{..............................................................................}
+
+Function LvNextItem(Var Rest : String) : String;
+Var
+    C : Integer;
+Begin
+    C := Pos(',', Rest);
+    If C > 0 Then
+    Begin
+        Result := Trim(Copy(Rest, 1, C - 1));
+        Rest := Copy(Rest, C + 1, Length(Rest));
+    End
+    Else
+    Begin
+        Result := Trim(Rest);
+        Rest := '';
+    End;
+End;
+
+{ The layer a caller named, or eNoLayer. ResolveLayerId covers the stack and  }
+{ the user names of Mechanical1-16; the user names above 16 are matched here. }
+Function LvResolve(Board : IPCB_Board; LayerStack : IPCB_LayerStack_V7;
+    Name : String) : TLayer;
+Var
+    Obj : IPCB_LayerObject_V7;
+    Lyr : TLayer;
+    N : Integer;
+    Wanted, ThisName : String;
+Begin
+    Result := ResolveLayerId(Board, Name);
+    If Result <> eNoLayer Then Exit;
+    If LayerStack = Nil Then Exit;
+    Wanted := NormalizeLayerName(Name);
+    If Wanted = '' Then Exit;
+    For N := 17 To 1024 Do
+    Begin
+        Lyr := MechLayerFromNumber(N);
+        If Lyr = eNoLayer Then Exit;
+        Obj := Nil;
+        Try Obj := LayerStack.LayerObject_V7[Lyr]; Except Obj := Nil; End;
+        If Obj <> Nil Then
+        Begin
+            ThisName := '';
+            Try ThisName := Obj.Name; Except ThisName := ''; End;
+            If (ThisName <> '') And (NormalizeLayerName(ThisName) = Wanted) Then
+            Begin
+                Result := Lyr;
+                Exit;
+            End;
+        End;
+    End;
+End;
+
+{ One layer of the reply. Lock is read only on a mechanical layer.            }
+Function LvLayerJson(Board : IPCB_Board; LayerStack : IPCB_LayerStack_V7;
+    Lyr : TLayer; Mech : Boolean) : String;
+Var
+    Obj : IPCB_LayerObject_V7;
+    MechObj : IPCB_MechanicalLayer;
+    UserName, LockJson : String;
+    Visible, Locked : Boolean;
+Begin
+    UserName := '';
+    Visible := False;
+    LockJson := '';
+    Try Visible := Board.LayerIsDisplayed[Lyr]; Except Visible := False; End;
+    If LayerStack <> Nil Then
+    Begin
+        Obj := Nil;
+        Try Obj := LayerStack.LayerObject_V7[Lyr]; Except Obj := Nil; End;
+        If Obj <> Nil Then
+            Try UserName := Obj.Name; Except UserName := ''; End;
+        If Mech Then
+        Begin
+            MechObj := Nil;
+            Try MechObj := LayerStack.LayerObject_V7[Lyr]; Except MechObj := Nil; End;
+            If MechObj <> Nil Then
+            Begin
+                Locked := False;
+                Try
+                    Locked := MechObj.DisplayInSingleLayerMode;
+                    LockJson := ',"single_layer_lock":' + BoolToJsonStr(Locked);
+                Except
+                    LockJson := '';
+                End;
+            End;
+        End;
+    End;
+    Result := '{"layer":"' + EscapeJsonString(LayerDisplayName(Lyr)) + '",'
+        + '"name":"' + EscapeJsonString(UserName) + '",'
+        + '"visible":' + BoolToJsonStr(Visible) + LockJson + '}';
+End;
+
+Function LvIsMech(Lyr : TLayer) : Boolean;
+Begin
+    { By name, so Mechanical17 and up count too (LayerDisplayName). }
+    Result := ParseMechLayerNumber(LayerDisplayName(Lyr)) > 0;
+End;
+
+Function LvAddNote(List : String; Item : String) : String;
+Begin
+    Result := List;
+    If Result <> '' Then Result := Result + ',';
+    Result := Result + '"' + EscapeJsonString(Item) + '"';
+End;
+
+Function PCB_LayerView(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Opts : IPCB_SystemOptions;
+    LayerStack : IPCB_LayerStack_V7;
+    MechObj : IPCB_MechanicalLayer;
+    Lyr, Cur, WantCur : TLayer;
+    Pass, N : Integer;
+    Rest, Item, Want, Items, NotApplied, Unknown, SlmStr : String;
+    Show, Lock, Got, Enabled, Slm, Changed : Boolean;
+Begin
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+    Opts := Nil;
+    Try Opts := PCBServer.SystemOptions; Except Opts := Nil; End;
+    LayerStack := Nil;
+    Try LayerStack := Board.LayerStack_V7; Except LayerStack := Nil; End;
+
+    NotApplied := '';
+    Unknown := '';
+    Changed := False;
+
+    { show / hide, then lock / unlock }
+    For Pass := 1 To 4 Do
+    Begin
+        If Pass = 1 Then Rest := ExtractJsonValue(Params, 'show')
+        Else If Pass = 2 Then Rest := ExtractJsonValue(Params, 'hide')
+        Else If Pass = 3 Then Rest := ExtractJsonValue(Params, 'lock')
+        Else Rest := ExtractJsonValue(Params, 'unlock');
+        Show := Pass = 1;
+        Lock := Pass = 3;
+        While Rest <> '' Do
+        Begin
+            Item := LvNextItem(Rest);
+            If Item = '' Then Continue;
+            Lyr := LvResolve(Board, LayerStack, Item);
+            If Lyr = eNoLayer Then
+            Begin
+                Unknown := LvAddNote(Unknown, Item);
+                Continue;
+            End;
+            If Pass <= 2 Then
+            Begin
+                Try Board.LayerIsDisplayed[Lyr] := Show; Except End;
+                Got := Not Show;
+                Try Got := Board.LayerIsDisplayed[Lyr]; Except End;
+                If Got <> Show Then NotApplied := LvAddNote(NotApplied, Item + ': visible')
+                Else Changed := True;
+            End
+            Else
+            Begin
+                If Not LvIsMech(Lyr) Then
+                Begin
+                    NotApplied := LvAddNote(NotApplied,
+                        Item + ': lock exists on mechanical layers only');
+                    Continue;
+                End;
+                MechObj := Nil;
+                If LayerStack <> Nil Then
+                    Try MechObj := LayerStack.LayerObject_V7[Lyr]; Except MechObj := Nil; End;
+                Got := Not Lock;
+                If MechObj <> Nil Then
+                Begin
+                    Try MechObj.DisplayInSingleLayerMode := Lock; Except End;
+                    Try Got := MechObj.DisplayInSingleLayerMode; Except End;
+                End;
+                If Got <> Lock Then NotApplied := LvAddNote(NotApplied, Item + ': lock')
+                Else Changed := True;
+            End;
+        End;
+    End;
+
+    { The current layer is checked AFTER the view update below: Altium   }
+    { accepts a layer that is not shown, reads it back, then falls back   }
+    { to another one when the layer tabs are rebuilt (seen live on a      }
+    { mechanical layer that was not enabled).                             }
+    WantCur := eNoLayer;
+    Want := ExtractJsonValue(Params, 'current_layer');
+    If Want <> '' Then
+    Begin
+        Lyr := LvResolve(Board, LayerStack, Want);
+        If Lyr = eNoLayer Then
+            Unknown := LvAddNote(Unknown, Want)
+        Else
+        Begin
+            Try Board.CurrentLayer := Lyr; Except End;
+            WantCur := Lyr;
+            Changed := True;
+        End;
+    End;
+
+    SlmStr := LowerCase(Trim(ExtractJsonValue(Params, 'single_layer_mode')));
+    If (SlmStr = 'true') Or (SlmStr = 'false') Then
+    Begin
+        If Opts = Nil Then
+            NotApplied := LvAddNote(NotApplied, 'single_layer_mode: no system options')
+        Else
+        Begin
+            Try Opts.SingleLayerMode := (SlmStr = 'true'); Except End;
+            Got := Not (SlmStr = 'true');
+            Try Got := Opts.SingleLayerMode; Except End;
+            If Got <> (SlmStr = 'true') Then
+                NotApplied := LvAddNote(NotApplied, 'single_layer_mode')
+            Else Changed := True;
+        End;
+    End;
+
+    If Changed Then
+    Begin
+        Try Board.ViewManager_UpdateLayerTabs; Except End;
+        Try Board.ViewManager_FullUpdate; Except End;
+    End;
+
+    { the reply: the legacy range, then every enabled mechanical layer above 16 }
+    Items := '';
+    For Lyr := eTopLayer To eMultiLayer Do
+    Begin
+        If GetLayerString(Lyr) <> 'Unknown' Then
+        Begin
+            If Items <> '' Then Items := Items + ',';
+            Items := Items + LvLayerJson(Board, LayerStack, Lyr, LvIsMech(Lyr));
+        End;
+    End;
+    If LayerStack <> Nil Then
+        For N := 17 To 1024 Do
+        Begin
+            Lyr := MechLayerFromNumber(N);
+            If Lyr = eNoLayer Then Break;
+            MechObj := Nil;
+            Try MechObj := LayerStack.LayerObject_V7[Lyr]; Except MechObj := Nil; End;
+            If MechObj = Nil Then Continue;
+            Enabled := False;
+            Try Enabled := MechObj.MechanicalLayerEnabled; Except Enabled := False; End;
+            If Not Enabled Then Continue;
+            If Items <> '' Then Items := Items + ',';
+            Items := Items + LvLayerJson(Board, LayerStack, Lyr, True);
+        End;
+
+    Cur := eNoLayer;
+    Try Cur := Board.CurrentLayer; Except Cur := eNoLayer; End;
+    If (WantCur <> eNoLayer) And (Cur <> WantCur) Then
+        NotApplied := LvAddNote(NotApplied, Want + ': current layer');
+    Slm := False;
+    If Opts <> Nil Then
+        Try Slm := Opts.SingleLayerMode; Except Slm := False; End;
+
+    Result := BuildSuccessResponse(RequestId, '{'
+        + '"current_layer":"' + EscapeJsonString(LayerDisplayName(Cur)) + '",'
+        + '"single_layer_mode":' + BoolToJsonStr(Slm) + ','
+        + '"layers":[' + Items + '],'
+        + '"not_applied":[' + NotApplied + '],'
+        + '"unknown_layers":[' + Unknown + ']}');
 End;
 
 {..............................................................................}
@@ -7824,7 +8517,7 @@ Begin
     Cleared := 0;
     If Clean Then
     Begin
-        PCBServer.PreProcess;
+        PcbBeginEdit(0);
         Try
             For I := 0 To Polys.Count - 1 Do
             Begin
@@ -7851,7 +8544,7 @@ Begin
                 End;
             End;
         Finally
-            PCBServer.PostProcess;
+            PcbEndEdit(0);
         End;
     End;
 
@@ -7884,7 +8577,7 @@ Begin
             Begin
                 Before := PolygonCopper(Poly, AreaBefore, ExactBefore);
                 Ok := True;
-                PCBServer.PreProcess;
+                PcbBeginEdit(0);
                 Try
                     Poly.BeginModify;
                     Poly.SetState_CopperPourInvalid;
@@ -7894,7 +8587,7 @@ Begin
                 Except
                     Ok := False;
                 End;
-                PCBServer.PostProcess;
+                PcbEndEdit(0);
                 After := PolygonCopper(Poly, AreaAfter, ExactAfter);
                 If Ok Then Inc(Rebuilt) Else Inc(Failed);
                 Items := Items + ',"rebuilt":' + BoolToJsonStr(Ok)
@@ -8021,7 +8714,7 @@ Begin
     DidStandoff := False;
     DidMove := False;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         Body := PCBServer.PCBObjectFactory(eComponentBodyObject, eNoDimension,
             eCreate_Default);
@@ -8100,7 +8793,7 @@ Begin
                 DidStandoff := True;
             Except End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     { READ THE POSITION BACK. The placement is the one thing a caller cannot
@@ -8215,14 +8908,14 @@ Begin
         Exit;
     End;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         Body := AddExtrudedBody(Board, PointsStr, 'mil', 0, 0, Layer,
             MilsToCoordF(Standoff), MilsToCoordF(Overall),
             ExtractJsonValue(Params, 'color'), ExtractJsonValue(Params, 'opacity'),
             ExtractJsonValue(Params, 'identifier'), Applied);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
     If Body = Nil Then
     Begin
@@ -8305,7 +8998,13 @@ Begin
         Exit;
     End;
 
-    PCBServer.PreProcess;
+    If (NetStr <> '') And (FindNetByName(Board, NetStr) = Nil) Then
+    Begin
+        Result := NetNotFoundError(RequestId, NetStr);
+        Exit;
+    End;
+
+    PcbBeginEdit(0);
     Try
         Via := PCBServer.PCBObjectFactory(eViaObject, eNoDimension, eCreate_Default);
         If Via = Nil Then
@@ -8336,7 +9035,7 @@ Begin
         PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
             PCBM_BoardRegisteration, Via.I_ObjectAddress);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
@@ -8402,9 +9101,15 @@ Begin
         Exit;
     End;
 
-    PCBServer.PreProcess;
+    If (NetStr <> '') And (FindNetByName(Board, NetStr) = Nil) Then
+    Begin
+        Result := NetNotFoundError(RequestId, NetStr);
+        Exit;
+    End;
+
+    PcbBeginEdit(0);
     Try
-        Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
+        Track :=PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
         If Track = Nil Then
         Begin
             Result := BuildErrorResponse(RequestId, 'CREATE_FAILED', 'Failed to create track object');
@@ -8435,7 +9140,7 @@ Begin
         PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
             PCBM_BoardRegisteration, Track.I_ObjectAddress);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
@@ -8467,7 +9172,7 @@ Var
     PipePos, CommaPos, Placed, Failed, FieldIdx : Integer;
     TX1, TY1, TX2, TY2 : Double;   { sub-mil coordinates: local patch 2026-09-18 }
     TWidth : Double;               { a 0.1 mm rule is 3.937 mil, not an integer }
-    LayerStr, NetStr, BadLayers : String;
+    LayerStr, NetStr, BadLayers, BadNets : String;
     FoundNet : IPCB_Net;
     TrackLayer : TLayer;
     { 7 named locals instead of `Array[0..6] Of String` - fixed-size       }
@@ -8492,9 +9197,10 @@ Begin
     Placed := 0;
     Failed := 0;
     BadLayers := '';
+    BadNets := '';
     Remaining := TracksStr;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         While Length(Remaining) > 0 Do
         Begin
@@ -8567,6 +9273,21 @@ Begin
                 Continue;
             End;
 
+            { A net the board does not have: skipped and named, as a layer is. }
+            FoundNet := Nil;
+            If NetStr <> '' Then
+            Begin
+                FoundNet := FindNetByName(Board, NetStr);
+                If FoundNet = Nil Then
+                Begin
+                    Inc(Failed);
+                    If BadNets = '' Then BadNets := NetStr
+                    Else If Pos(NetStr, BadNets) = 0 Then
+                        BadNets := BadNets + ', ' + NetStr;
+                    Continue;
+                End;
+            End;
+
             Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
             If Track = Nil Then
             Begin
@@ -8582,11 +9303,8 @@ Begin
 
             Track.Layer := TrackLayer;
 
-            If NetStr <> '' Then
-            Begin
-                FoundNet := FindNetByName(Board, NetStr);
+            If FoundNet <> Nil Then
                 BindPrimitiveToNet(FoundNet, Track);
-            End;
 
             Board.AddPCBObject(Track);
             Inc(Placed);
@@ -8598,7 +9316,7 @@ Begin
         PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
             PCBM_BoardRegisteration, c_NoEventData);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
@@ -8606,7 +9324,8 @@ Begin
     Result := BuildSuccessResponse(RequestId,
         '{"placed":' + IntToStr(Placed) + ','
         + '"failed":' + IntToStr(Failed) + ','
-        + '"unknown_layers":"' + EscapeJsonString(BadLayers) + '"}');
+        + '"unknown_layers":"' + EscapeJsonString(BadLayers) + '",'
+        + '"unknown_nets":"' + EscapeJsonString(BadNets) + '"}');
 End;
 
 {..............................................................................}
@@ -8621,7 +9340,7 @@ Function PCB_PlaceVias(Params : String; RequestId : String) : String;
 Var
     Board : IPCB_Board;
     Via : IPCB_Via;
-    ViasStr, ViaStr, Remaining, Token, BadLayers : String;
+    ViasStr, ViaStr, Remaining, Token, BadLayers, BadNets : String;
     PipePos, CommaPos, Placed, Failed, FieldIdx : Integer;
     VX, VY, VSize, VHole : Double;
     LowLayer, HighLayer : TLayer;
@@ -8645,9 +9364,10 @@ Begin
     Placed := 0;
     Failed := 0;
     BadLayers := '';
+    BadNets := '';
     Remaining := ViasStr;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         While Length(Remaining) > 0 Do
         Begin
@@ -8722,6 +9442,21 @@ Begin
                 Continue;
             End;
 
+            { A net the board does not have: skipped and named, as a layer is. }
+            FoundNet := Nil;
+            If F6 <> '' Then
+            Begin
+                FoundNet := FindNetByName(Board, F6);
+                If FoundNet = Nil Then
+                Begin
+                    Inc(Failed);
+                    If BadNets = '' Then BadNets := F6
+                    Else If Pos(F6, BadNets) = 0 Then
+                        BadNets := BadNets + ', ' + F6;
+                    Continue;
+                End;
+            End;
+
             Via := PCBServer.PCBObjectFactory(eViaObject, eNoDimension, eCreate_Default);
             If Via = Nil Then
             Begin
@@ -8736,12 +9471,8 @@ Begin
             Via.LowLayer := LowLayer;
             Via.HighLayer := HighLayer;
 
-            If F6 <> '' Then
-            Begin
-                FoundNet := FindNetByName(Board, F6);
-                If FoundNet <> Nil Then
-                    BindPrimitiveToNet(FoundNet, Via);
-            End;
+            If FoundNet <> Nil Then
+                BindPrimitiveToNet(FoundNet, Via);
 
             Board.AddPCBObject(Via);
             Inc(Placed);
@@ -8749,7 +9480,7 @@ Begin
         PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
             PCBM_BoardRegisteration, c_NoEventData);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
@@ -8757,7 +9488,8 @@ Begin
     Result := BuildSuccessResponse(RequestId,
         '{"placed":' + IntToStr(Placed) + ','
         + '"failed":' + IntToStr(Failed) + ','
-        + '"unknown_layers":"' + EscapeJsonString(BadLayers) + '"}');
+        + '"unknown_layers":"' + EscapeJsonString(BadLayers) + '",'
+        + '"unknown_nets":"' + EscapeJsonString(BadNets) + '"}');
 End;
 
 {..............................................................................}
@@ -8811,7 +9543,7 @@ Begin
         Exit;
     End;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         Arc := PCBServer.PCBObjectFactory(eArcObject, eNoDimension, eCreate_Default);
         If Arc = Nil Then
@@ -8840,7 +9572,7 @@ Begin
         PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
             PCBM_BoardRegisteration, Arc.I_ObjectAddress);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
@@ -8852,7 +9584,7 @@ Begin
         + '"radius":' + FloatToJsonStr(ArcRad) + ','
         + '"start_angle":' + FloatToJsonStr(ArcSA) + ','
         + '"end_angle":' + FloatToJsonStr(ArcEA) + ','
-        + '"width":' + FloatToJsonStr(ArcWidth) + ',',
+        + '"width":' + FloatToJsonStr(ArcWidth) + ','
         + '"keepout":' + BoolToJsonStr(Arc.IsKeepout) + ','
         + '"layer":"' + EscapeJsonString(GetLayerString(Arc.Layer)) + '"}');
 End;
@@ -8863,13 +9595,109 @@ End;
 {         stroke (mils, optional; Altium's default when empty)              }
 {..............................................................................}
 
+{ A text justification by name -> Altium's TTextAutoposition ordinal, the    }
+{ anchor of a multiline text inside its frame: 1 top left, 2 centre left,    }
+{ 3 bottom left, 4 top centre, 5 centre, 6 bottom centre, 7 top right,       }
+{ 8 centre right, 9 bottom right. -1 for a name that is not one of them.     }
+Function TextJustifyCode(Name : String) : Integer;
+Begin
+    Name := LowerCase(Name);
+    If Name = 'top_left' Then Result := 1
+    Else If Name = 'center_left' Then Result := 2
+    Else If Name = 'bottom_left' Then Result := 3
+    Else If Name = 'top_center' Then Result := 4
+    Else If Name = 'center' Then Result := 5
+    Else If Name = 'bottom_center' Then Result := 6
+    Else If Name = 'top_right' Then Result := 7
+    Else If Name = 'center_right' Then Result := 8
+    Else If Name = 'bottom_right' Then Result := 9
+    Else Result := -1;
+End;
+
+{ Where on its frame a justification sits, as a fraction of the frame:     }
+{ 0 left / bottom, 0.5 centre, 1 right / top.                              }
+Function TextJustifyFracX(Code : Integer) : Double;
+Begin
+    If Code >= 7 Then Result := 1
+    Else If Code >= 4 Then Result := 0.5
+    Else Result := 0;
+End;
+
+Function TextJustifyFracY(Code : Integer) : Double;
+Var
+    Row : Integer;
+Begin
+    Row := (Code - 1) Mod 3;
+    If Row = 0 Then Result := 1
+    Else If Row = 1 Then Result := 0.5
+    Else Result := 0;
+End;
+
+{ The width of the text's longest line, in mils, measured on the placed }
+{ text itself: each line set as its text in turn (a single-line text      }
+{ draws CR LF on one row, so the whole text cannot be measured at once),   }
+{ its box read, the full text put back. 0 when no box reads.               }
+Function TextLongestLineMils(TextObj : IPCB_Text; S : String) : Double;
+Var
+    Rest, Line : String;
+    P : Integer;
+    Box : TCoordRect;
+    W : Double;
+Begin
+    Result := 0;
+    Rest := S;
+    While Rest <> '' Do
+    Begin
+        P := Pos(#10, Rest);
+        If P > 0 Then
+        Begin
+            Line := Copy(Rest, 1, P - 1);
+            Rest := Copy(Rest, P + 1, Length(Rest));
+        End
+        Else
+        Begin
+            Line := Rest;
+            Rest := '';
+        End;
+        If Copy(Line, Length(Line), 1) = #13 Then
+            Line := Copy(Line, 1, Length(Line) - 1);
+        If Line <> '' Then
+        Begin
+            TextObj.BeginModify;
+            TextObj.Text := Line;
+            TextObj.EndModify;
+            Box := TextObj.BoundingRectangle;
+            W := CoordToMilsF(Box.Right - Box.Left);
+            If W > Result Then Result := W;
+        End;
+    End;
+    TextObj.BeginModify;
+    TextObj.Text := S;
+    TextObj.EndModify;
+End;
+
+{ 1 true, 0 false, -1 not given, -2 neither. }
+Function TextFlag(S : String) : Integer;
+Begin
+    S := LowerCase(S);
+    If S = '' Then Result := -1
+    Else If S = 'true' Then Result := 1
+    Else If S = 'false' Then Result := 0
+    Else Result := -2;
+End;
+
 Function PCB_PlaceText(Params : String; RequestId : String) : String;
 Var
     Board : IPCB_Board;
     TextObj : IPCB_Text;
     TextStr, XStr, YStr, LayerStr, HeightStr, RotStr, StrokeStr : String;
+    KindStr, StrokeFontStr, FontNameStr, JustStr, FrameWStr, FrameHStr : String;
+    MarginStr, Extra : String;
     TX, TY : Double;
     TRot, THeight, TStroke : Double;
+    FrameW, FrameH, Margin, FX, FY, Ang : Double;
+    Kind, StrokeFontNo, Just, BoldF, ItalicF, InvF : Integer;
+    Box : TCoordRect;
     TargetLayer : TLayer;
 Begin
     Board := GetPCBBoardAnywhere(0);
@@ -8911,6 +9739,79 @@ Begin
         Exit;
     End;
 
+    { The text's own style, all optional (issue: text properties on create). }
+    { A justification makes the text MULTILINE: Altium justifies a text only }
+    { inside its frame, and a single-line text ignores the setting. x / y is }
+    { then the point the justification names, e.g. the centre for center.   }
+    KindStr := LowerCase(ExtractJsonValue(Params, 'kind'));
+    StrokeFontStr := LowerCase(ExtractJsonValue(Params, 'stroke_font'));
+    FontNameStr := ExtractJsonValue(Params, 'font_name');
+    BoldF := TextFlag(ExtractJsonValue(Params, 'bold'));
+    ItalicF := TextFlag(ExtractJsonValue(Params, 'italic'));
+    InvF := TextFlag(ExtractJsonValue(Params, 'inverted'));
+    JustStr := ExtractJsonValue(Params, 'justification');
+    FrameWStr := ExtractJsonValue(Params, 'frame_width');
+    FrameHStr := ExtractJsonValue(Params, 'frame_height');
+    MarginStr := ExtractJsonValue(Params, 'margin');
+
+    If KindStr = '' Then Kind := -1
+    Else If KindStr = 'stroke' Then Kind := 0
+    Else If KindStr = 'truetype' Then Kind := 1
+    Else Kind := -2;
+    { A TrueType-only setting asks for a TrueType text. }
+    If (Kind = -1) And ((FontNameStr <> '') Or (BoldF = 1) Or (ItalicF = 1) Or
+       (InvF = 1)) Then Kind := 1;
+    If StrokeFontStr = '' Then StrokeFontNo := 0
+    Else If StrokeFontStr = 'default' Then StrokeFontNo := 1
+    Else If StrokeFontStr = 'sans_serif' Then StrokeFontNo := 2
+    Else If StrokeFontStr = 'serif' Then StrokeFontNo := 3
+    Else StrokeFontNo := -1;
+    If JustStr = '' Then Just := 0 Else Just := TextJustifyCode(JustStr);
+    FrameW := StrToFloatDef(FrameWStr, 0);
+    FrameH := StrToFloatDef(FrameHStr, 0);
+    Margin := StrToFloatDef(MarginStr, 0);
+
+    If (Kind = -2) Or (StrokeFontNo < 0) Or (Just < 0) Or (BoldF = -2) Or
+       (ItalicF = -2) Or (InvF = -2) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_VALUE',
+            'kind is stroke or truetype; stroke_font default, sans_serif or serif; '
+            + 'justification top_left, top_center, top_right, center_left, center, '
+            + 'center_right, bottom_left, bottom_center or bottom_right; bold, italic '
+            + 'and inverted true or false');
+        Exit;
+    End;
+    If ((FrameWStr <> '') And (Not IsFloatStr(FrameWStr))) Or
+       ((FrameHStr <> '') And (Not IsFloatStr(FrameHStr))) Or
+       ((MarginStr <> '') And (Not IsFloatStr(MarginStr))) Or
+       (FrameW < 0) Or (FrameH < 0) Or (Margin < 0) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_VALUE',
+            'frame_width, frame_height and margin are mils, not below zero');
+        Exit;
+    End;
+    If ((FrameWStr <> '') Or (FrameHStr <> '')) And (Just = 0) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_VALUE',
+            'a frame needs a justification: it is where the text sits in it');
+        Exit;
+    End;
+    { Bold, italic and inverted are TrueType only: refused on a stroke text  }
+    { rather than written and silently ignored by Altium.                    }
+    If (Kind = 0) And ((BoldF = 1) Or (ItalicF = 1) Or (InvF = 1) Or
+       (FontNameStr <> '')) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_VALUE',
+            'bold, italic, inverted and font_name are TrueType only (kind truetype)');
+        Exit;
+    End;
+    If (Kind = 1) And (StrokeFontNo > 0) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_VALUE',
+            'stroke_font is for a stroke text, not kind truetype');
+        Exit;
+    End;
+
     If LayerStr = '' Then TargetLayer := eTopOverlay
     Else TargetLayer := ResolveLayerId(Board, LayerStr);
     If TargetLayer = eNoLayer Then
@@ -8920,7 +9821,7 @@ Begin
         Exit;
     End;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         TextObj := PCBServer.PCBObjectFactory(eTextObject, eNoDimension, eCreate_Default);
         If TextObj = Nil Then
@@ -8934,7 +9835,17 @@ Begin
         TextObj.Text := TextStr;
         TextObj.Size := MilsToCoordF(THeight);
         If TStroke > 0 Then TextObj.Width := MilsToCoordF(TStroke);
-        TextObj.Rotation := TRot;
+        If Kind >= 0 Then
+        Begin
+            TextObj.TextKind := Kind;
+            TextObj.UseTTFonts := Kind = 1;
+        End;
+        If StrokeFontNo > 0 Then TextObj.FontID := StrokeFontNo;
+        If FontNameStr <> '' Then TextObj.FontName := FontNameStr;
+        If BoldF >= 0 Then TextObj.Bold := BoldF = 1;
+        If ItalicF >= 0 Then TextObj.Italic := ItalicF = 1;
+        If InvF >= 0 Then TextObj.Inverted := InvF = 1;
+        If MarginStr <> '' Then TextObj.InvertedTTTextBorder := MilsToCoordF(Margin);
 
         TextObj.Layer := TargetLayer;
 
@@ -8942,11 +9853,85 @@ Begin
 
         PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
             PCBM_BoardRegisteration, TextObj.I_ObjectAddress);
+
+        { Justified: framed, then the frame moved so the justification     }
+        { point lands on x / y, and turned about it. Altium grows a frame    }
+        { smaller than the text (plus the margin of an inverted text, whose  }
+        { filled box IS the frame) only when the edit is closed, so the     }
+        { frame is read again after EndModify and the text moved once more  }
+        { when it grew. MEASURED: a 60 x 20 frame became 209.8 x 52.6 at     }
+        { EndModify and, placed from the asked size, sat 75 mil off. With no }
+        { frame WIDTH given the frame is as wide as the longest line,        }
+        { measured on the text (+ 1 mil): Altium wraps a line at its spaces  }
+        { when the frame is narrower, and grows a narrower frame only to the }
+        { longest WORD (a 1 mil frame put every word on its own line).       }
+        { MEASURED: a frame from that width up keeps every line whole.       }
+        { No frame height: 1 mil, grown by Altium to the lines.              }
+        If Just > 0 Then
+        Begin
+            If FrameW <= 0 Then
+            Begin
+                FrameW := TextLongestLineMils(TextObj, TextStr);
+                If FrameW > 0 Then FrameW := FrameW + 1 Else FrameW := 1;
+            End;
+            TextObj.BeginModify;
+            If FrameH <= 0 Then FrameH := 1;
+            TextObj.Multiline := True;
+            TextObj.MultilineTextWidth := MilsToCoordF(FrameW);
+            TextObj.MultilineTextHeight := MilsToCoordF(FrameH);
+            TextObj.MultilineTextAutoPosition := Just;
+            Ang := TRot * 3.14159265358979 / 180.0;
+            FX := TextJustifyFracX(Just) * FrameW;
+            FY := TextJustifyFracY(Just) * FrameH;
+            TextObj.XLocation := MilsToCoordF(TX - (FX * Cos(Ang) - FY * Sin(Ang)));
+            TextObj.YLocation := MilsToCoordF(TY - (FX * Sin(Ang) + FY * Cos(Ang)));
+            TextObj.Rotation := TRot;
+            TextObj.EndModify;
+            If (TextObj.MultilineTextWidth <> MilsToCoordF(FrameW)) Or
+               (TextObj.MultilineTextHeight <> MilsToCoordF(FrameH)) Then
+            Begin
+                FrameW := CoordToMilsF(TextObj.MultilineTextWidth);
+                FrameH := CoordToMilsF(TextObj.MultilineTextHeight);
+                FX := TextJustifyFracX(Just) * FrameW;
+                FY := TextJustifyFracY(Just) * FrameH;
+                TextObj.BeginModify;
+                TextObj.XLocation := MilsToCoordF(TX - (FX * Cos(Ang) - FY * Sin(Ang)));
+                TextObj.YLocation := MilsToCoordF(TY - (FX * Sin(Ang) + FY * Cos(Ang)));
+                TextObj.EndModify;
+            End;
+            TextObj.GraphicallyInvalidate;
+        End
+        Else
+        Begin
+            TextObj.BeginModify;
+            TextObj.Rotation := TRot;
+            TextObj.EndModify;
+        End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
+
+    { Everything read back off the placed text. }
+    Box := TextObj.BoundingRectangle;
+    Extra := ',"kind":' + IntToStr(TextObj.TextKind)
+        + ',"font_id":' + IntToStr(TextObj.FontID)
+        + ',"font_name":"' + EscapeJsonString(TextObj.FontName) + '"'
+        + ',"bold":' + BoolToJsonStr(TextObj.Bold)
+        + ',"italic":' + BoolToJsonStr(TextObj.Italic)
+        + ',"multiline":' + BoolToJsonStr(TextObj.Multiline)
+        + ',"justification":' + IntToStr(TextObj.MultilineTextAutoPosition)
+        + ',"frame_width":' + FloatToJsonStr(CoordToMilsF(TextObj.MultilineTextWidth))
+        + ',"frame_height":' + FloatToJsonStr(CoordToMilsF(TextObj.MultilineTextHeight))
+        + ',"inverted":' + BoolToJsonStr(TextObj.Inverted)
+        + ',"margin":' + FloatToJsonStr(CoordToMilsF(TextObj.InvertedTTTextBorder))
+        + ',"location":[' + FloatToJsonStr(CoordToMilsF(TextObj.XLocation)) + ','
+        + FloatToJsonStr(CoordToMilsF(TextObj.YLocation)) + ']'
+        + ',"bounds":[' + FloatToJsonStr(CoordToMilsF(Box.Left)) + ','
+        + FloatToJsonStr(CoordToMilsF(Box.Bottom)) + ','
+        + FloatToJsonStr(CoordToMilsF(Box.Right)) + ','
+        + FloatToJsonStr(CoordToMilsF(Box.Top)) + ']';
 
     Result := BuildSuccessResponse(RequestId,
         '{"placed":true,'
@@ -8955,8 +9940,9 @@ Begin
         + '"y":' + FloatToJsonStr(TY) + ','
         + '"height":' + FloatToJsonStr(CoordToMilsF(TextObj.Size)) + ','
         + '"stroke":' + FloatToJsonStr(CoordToMilsF(TextObj.Width)) + ','
-        + '"rotation":' + FloatToJsonStr(TRot) + ','
-        + '"layer":"' + EscapeJsonString(GetLayerString(TextObj.Layer)) + '"}');
+        + '"rotation":' + FloatToJsonStr(TextObj.Rotation) + ','
+        + '"layer":"' + EscapeJsonString(GetLayerString(TextObj.Layer)) + '"'
+        + Extra + '}');
 End;
 
 {..............................................................................}
@@ -9007,7 +9993,13 @@ Begin
         Exit;
     End;
 
-    PCBServer.PreProcess;
+    If (NetStr <> '') And (FindNetByName(Board, NetStr) = Nil) Then
+    Begin
+        Result := NetNotFoundError(RequestId, NetStr);
+        Exit;
+    End;
+
+    PcbBeginEdit(0);
     Try
         Fill := PCBServer.PCBObjectFactory(eFillObject, eNoDimension, eCreate_Default);
         If Fill = Nil Then
@@ -9036,7 +10028,7 @@ Begin
         PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
             PCBM_BoardRegisteration, Fill.I_ObjectAddress);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
@@ -9116,6 +10108,7 @@ Var
     RuleValue, MaxValue, FavoredValue, MaxUncoupVal : Double;
     HasMaxValue, AllowedVal : Boolean;
     L : TLayer;
+    LimitCount : Integer;
 Begin
     Board := GetPCBBoardAnywhere(0);
     If Board = Nil Then
@@ -9187,7 +10180,7 @@ Begin
     { Indexed properties also use function-call form: RuleWidth.MinWidth(L)    }
     { not RuleWidth.MinWidth[L], bracket form is rejected in DelphiScript.    }
     Rule := Nil;
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         If RuleTypeStr = 'clearance' Then
         Begin
@@ -9316,13 +10309,30 @@ Begin
                 Rule := RulePlaneC;
             End;
         End
+        Else If (RuleTypeStr = 'length') Or (RuleTypeStr = 'signal_impedance')
+            Or (RuleTypeStr = 'flight_time_rising') Or (RuleTypeStr = 'flight_time_falling') Then
+        Begin
+            { Made with its name and scope here; the limits are written and }
+            { read back by RuleLimitsReport once the rule is on the board.  }
+            If RuleTypeStr = 'length' Then
+                Rule := PCBServer.PCBRuleFactory(eRule_MaxMinLength)
+            Else If RuleTypeStr = 'signal_impedance' Then
+                Rule := PCBServer.PCBRuleFactory(eRule_MaxMinImpedance)
+            Else If RuleTypeStr = 'flight_time_rising' Then
+                Rule := PCBServer.PCBRuleFactory(eRule_FlightTime_RisingEdge)
+            Else
+                Rule := PCBServer.PCBRuleFactory(eRule_FlightTime_FallingEdge);
+            Rule.Name := RuleName;
+            If ScopeStr <> '' Then Rule.Scope1Expression := ScopeStr;
+        End
         Else
         Begin
             Result := BuildErrorResponse(RequestId, 'INVALID_PARAM',
                 'Unknown rule_type: ' + RuleTypeStr + '. Use clearance, width, '
                 + 'via_size, differential_pairs, solder_mask_expansion, '
-                + 'paste_mask_expansion, vias_under_smd, polygon_connect or '
-                + 'plane_connect');
+                + 'paste_mask_expansion, vias_under_smd, polygon_connect, '
+                + 'plane_connect, length, signal_impedance, flight_time_rising or '
+                + 'flight_time_falling');
             Exit;
         End;
 
@@ -9331,10 +10341,22 @@ Begin
         PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
             PCBM_BoardRegisteration, Rule.I_ObjectAddress);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
+
+    If (RuleTypeStr = 'length') Or (RuleTypeStr = 'signal_impedance')
+        Or (RuleTypeStr = 'flight_time_rising') Or (RuleTypeStr = 'flight_time_falling') Then
+    Begin
+        LimitCount := 0;
+        Result := BuildSuccessResponse(RequestId,
+            '{"created":true,'
+            + '"name":"' + EscapeJsonString(RuleName) + '",'
+            + '"rule_type":"' + EscapeJsonString(RuleTypeStr) + '"'
+            + RuleLimitsReport(Board, Rule.RuleKind, RuleName, Params, LimitCount) + '}');
+        Exit;
+    End;
 
     { vias_under_smd carries no measurement, so reporting value_mils for it }
     { would be reporting a number the rule does not hold.                   }
@@ -9416,13 +10438,13 @@ Begin
         Exit;
     End;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
             PCBM_BoardRegisteration, Rule.I_ObjectAddress);
         Board.RemovePCBObject(Rule);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
@@ -9540,7 +10562,7 @@ Begin
 
     Try OldLayer := GetLayerString(Comp.Layer); Except OldLayer := 'Unknown'; End;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast,
             PCBM_BeginModify, c_NoEventData);
@@ -9554,7 +10576,7 @@ Begin
         PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast,
             PCBM_EndModify, c_NoEventData);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     Try NewLayer := GetLayerString(Comp.Layer); Except NewLayer := 'Unknown'; End;
@@ -9658,7 +10680,7 @@ Begin
         CenterY := (MinY + MaxY) / 2;
 
         { Second pass: apply alignment. }
-        PCBServer.PreProcess;
+        PcbBeginEdit(0);
         Try
             For I := 0 To Resolved.Count - 1 Do
             Begin
@@ -9692,7 +10714,7 @@ Begin
                     PCBM_EndModify, c_NoEventData);
             End;
         Finally
-            PCBServer.PostProcess;
+            PcbEndEdit(0);
         End;
 
         MarkDocDirtyByPath(Board.FileName);
@@ -9839,7 +10861,7 @@ Begin
     NewX := Round(OldX / GridSize) * GridSize;
     NewY := Round(OldY / GridSize) * GridSize;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast,
             PCBM_BeginModify, c_NoEventData);
@@ -9853,7 +10875,7 @@ Begin
         PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast,
             PCBM_EndModify, c_NoEventData);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
@@ -9929,9 +10951,9 @@ Var
     Board : IPCB_Board;
     Iterator : IPCB_BoardIterator;
     Via : IPCB_Via;
-    JsonItems, NetName : String;
+    JsonItems, NetName, WantNet : String;
     First : Boolean;
-    Count : Integer;
+    Count, Returned, Offset, Limit : Integer;
 Begin
     Board := GetPCBBoardAnywhere(0);
     If Board = Nil Then
@@ -9940,9 +10962,16 @@ Begin
         Exit;
     End;
 
+    { net keeps one net's vias; offset and limit page a large board. Count }
+    { is every via that matches, Returned the ones on this page; limit 0   }
+    { is every one, as before.                                               }
+    WantNet := ExtractJsonValue(Params, 'net');
+    Offset := StrToIntDef(ExtractJsonValue(Params, 'offset'), 0);
+    Limit := StrToIntDef(ExtractJsonValue(Params, 'limit'), 0);
     JsonItems := '';
     First := True;
     Count := 0;
+    Returned := 0;
 
     Iterator := Board.BoardIterator_Create;
     Iterator.AddFilter_ObjectSet(MkSet(eViaObject));
@@ -9952,13 +10981,23 @@ Begin
     Via := Iterator.FirstPCBObject;
     While Via <> Nil Do
     Begin
-        If Not First Then JsonItems := JsonItems + ',';
-        First := False;
-
         Try
             If Via.Net <> Nil Then NetName := Via.Net.Name
             Else NetName := '';
         Except NetName := ''; End;
+        If (WantNet <> '') And (NetName <> WantNet) Then
+        Begin
+            Via := Iterator.NextPCBObject;
+            Continue;
+        End;
+        Inc(Count);
+        If (Count <= Offset) Or ((Limit > 0) And (Returned >= Limit)) Then
+        Begin
+            Via := Iterator.NextPCBObject;
+            Continue;
+        End;
+        If Not First Then JsonItems := JsonItems + ',';
+        First := False;
 
         JsonItems := JsonItems + '{"x":' + FloatToJsonStr(CoordToMilsF(Via.x)) + ','
             + '"y":' + FloatToJsonStr(CoordToMilsF(Via.y)) + ','
@@ -9967,13 +11006,17 @@ Begin
             + '"net":"' + EscapeJsonString(NetName) + '",'
             + '"low_layer":"' + EscapeJsonString(GetLayerString(Via.LowLayer)) + '",'
             + '"high_layer":"' + EscapeJsonString(GetLayerString(Via.HighLayer)) + '"}';
-        Inc(Count);
+        Inc(Returned);
         Via := Iterator.NextPCBObject;
     End;
     Board.BoardIterator_Destroy(Iterator);
 
     Result := BuildSuccessResponse(RequestId,
-        '{"vias":[' + JsonItems + '],"count":' + IntToStr(Count) + '}');
+        '{"vias":[' + JsonItems + '],"count":' + IntToStr(Count)
+        + ',"returned":' + IntToStr(Returned)
+        + ',"offset":' + IntToStr(Offset)
+        + ',"more":' + BoolToJsonStr(Offset + Returned < Count)
+        + ',"net":"' + EscapeJsonString(WantNet) + '"}');
 End;
 
 { Distance in mils from (Px, Py) to the segment A-B, every input in mils.   }
@@ -10223,13 +11266,13 @@ Begin
     Try FoundLayer := Layer2String(FoundObj.Layer); Except End;
     BRect := FoundObj.BoundingRectangle;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
             PCBM_BoardRegisteration, FoundObj.I_ObjectAddress);
         Board.RemovePCBObject(FoundObj);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
@@ -10441,7 +11484,7 @@ Begin
         Board.BoardIterator_Destroy(Iterator);
     End;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         For I := 0 To Matches.Count - 1 Do
         Begin
@@ -10459,7 +11502,7 @@ Begin
             Except End;
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
     { Do NOT Free a TInterfaceList holding board-primitive interface refs --
       releasing them through the COM marshaller faults in oleaut32 (read of
@@ -10647,6 +11690,244 @@ Begin
         Except End;
     End;
     Result := Abs(Sum) / 2.0;
+End;
+
+{ The pour at position Wanted in board iteration order (pcb_get_polygons'  }
+{ order), or Nil; Count is how many pours were passed on the way.           }
+Function PourAtPosition(Board : IPCB_Board; Wanted : Integer; Var Count : Integer) : IPCB_Polygon;
+Var
+    Walk : IPCB_BoardIterator;
+Begin
+    Count := 0;
+    Walk := Board.BoardIterator_Create;
+    Try
+        Walk.AddFilter_ObjectSet(MkSet(ePolyObject));
+        Walk.AddFilter_LayerSet(AllLayers);
+        Walk.AddFilter_Method(eProcessAll);
+        Result := Walk.FirstPCBObject;
+        While (Result <> Nil) And (Count < Wanted) Do
+        Begin
+            Result := Walk.NextPCBObject;
+            Inc(Count);
+        End;
+    Finally
+        Board.BoardIterator_Destroy(Walk);
+    End;
+End;
+
+{ One outline corner: where it is and, for an arc, its centre, radius and   }
+{ start and end angles.                                                     }
+Function PourCornerJson(Seg : TPolySegment) : String;
+Var
+    Body : String;
+Begin
+    Body := JsonRaw('at', '[' + FloatToJsonStr(CoordToMilsF(Seg.vx)) + ','
+        + FloatToJsonStr(CoordToMilsF(Seg.vy)) + ']');
+    If Seg.Kind <> ePolySegmentLine Then
+        Body := Body + ',' + JsonRaw('arc', JsonObj(
+            JsonRaw('centre', '[' + FloatToJsonStr(CoordToMilsF(Seg.cx)) + ','
+                + FloatToJsonStr(CoordToMilsF(Seg.cy)) + ']')
+            + ',' + JsonRaw('radius', FloatToJsonStr(CoordToMilsF(Seg.Radius)))
+            + ',' + JsonRaw('from_deg', FloatToJsonStr(Seg.Angle1))
+            + ',' + JsonRaw('to_deg', FloatToJsonStr(Seg.Angle2))));
+    Result := JsonObj(Body);
+End;
+
+{..............................................................................}
+{ PCB_PourOutline - the outline one pour fills, as Altium holds it: each     }
+{ corner (arcs with centre, radius and angles) and whether the closing      }
+{ vertex at PointCount equals the first (a stale one spikes the pour).      }
+{ Params: index (pcb_get_polygons' order), name (optional; refused when the }
+{ pour at index has another, since positions shift as pours come and go).   }
+{..............................................................................}
+Function PCB_PourOutline(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Pour : IPCB_Polygon;
+    First, Last : TPolySegment;
+    Wanted, Passed, I, Corners : Integer;
+    Expected, Net, OnLayer, Rows : String;
+Begin
+    Wanted := StrToIntDef(ExtractJsonValue(Params, 'index'), -1);
+    If Wanted < 0 Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'index counts from 0');
+        Exit;
+    End;
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+    Pour := PourAtPosition(Board, Wanted, Passed);
+    If Pour = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_FOUND',
+            'The board has ' + IntToStr(Passed) + ' pours, none at ' + IntToStr(Wanted));
+        Exit;
+    End;
+    Expected := Trim(ExtractJsonValue(Params, 'name'));
+    If (Expected <> '') And (UpperCase(Expected) <> UpperCase(Pour.Name)) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'POUR_CHANGED',
+            'Pour ' + IntToStr(Wanted) + ' is now ' + Pour.Name + ', not ' + Expected
+            + '; read pcb_get_polygons again');
+        Exit;
+    End;
+    Net := '';
+    Try If Pour.Net <> Nil Then Net := Pour.Net.Name; Except Net := ''; End;
+    OnLayer := 'Unknown';
+    Try OnLayer := GetLayerString(Pour.Layer); Except End;
+    Corners := Pour.PointCount;
+    Rows := '';
+    For I := 0 To Corners - 1 Do
+        Rows := Rows + ',' + PourCornerJson(Pour.Segments[I]);
+    First := Pour.Segments[0];
+    Last := Pour.Segments[Corners];
+    Result := BuildSuccessResponse(RequestId, JsonObj(JsonInt('index', Wanted)
+        + ',' + JsonStr('name', Pour.Name) + ',' + JsonStr('net', Net)
+        + ',' + JsonStr('layer', OnLayer) + ',' + JsonInt('corners', Corners)
+        + ',' + JsonRaw('outline', '[' + Copy(Rows, 2, Length(Rows)) + ']')
+        + ',' + JsonRaw('closing_vertex', '[' + FloatToJsonStr(CoordToMilsF(Last.vx)) + ','
+            + FloatToJsonStr(CoordToMilsF(Last.vy)) + ']')
+        + ',' + JsonBool('closes_on_first', (Corners > 0) And (Last.vx = First.vx)
+            And (Last.vy = First.vy))));
+End;
+
+{..............................................................................}
+{ PCB_PourCopper - the copper one pour poured: each region it holds, as the   }
+{ region's own geometric polygon (its outline and every hole, in mils, with  }
+{ the area). Read through a typed IPCB_Region: the geometric polygon of a     }
+{ REGION is declared in this binding, the one of an IPCB_Polygon is not.      }
+{ Its contours count from 0 and say which are holes, so no index base has to }
+{ be guessed (cf. RegionCopperSqMils). A hatched pour's copper is tracks and  }
+{ arcs, which are counted, not drawn: pcb_get_copper reads those.             }
+{ Params: index (pcb_get_polygons' order), name (optional; refused when the  }
+{ pour at index has another, since positions shift as pours come and go).    }
+{..............................................................................}
+Function PourContourJson(Contour : Pgpc_vertex_list) : String;
+Var
+    J : Integer;
+Begin
+    Result := '';
+    For J := 0 To Contour.Count - 1 Do
+    Begin
+        If J > 0 Then Result := Result + ',';
+        Result := Result + '[' + FloatToJsonStr(CoordToMilsF(Contour.x(J))) + ','
+            + FloatToJsonStr(CoordToMilsF(Contour.y(J))) + ']';
+    End;
+    Result := '[' + Result + ']';
+End;
+
+Function PCB_PourCopper(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Pour : IPCB_Polygon;
+    Iter : IPCB_GroupIterator;
+    Region : IPCB_Region;
+    Stroke : IPCB_Primitive;
+    Shape : IPCB_GeometricPolygon;
+    Contour : Pgpc_vertex_list;
+    Wanted, Passed, I, Pieces, Holes, Vertices, Strokes : Integer;
+    Expected, Net, OnLayer, Rows, Outlines, HoleRows : String;
+    Area, PieceArea : Double;
+Begin
+    Wanted := StrToIntDef(ExtractJsonValue(Params, 'index'), -1);
+    If Wanted < 0 Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'index counts from 0');
+        Exit;
+    End;
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+    Pour := PourAtPosition(Board, Wanted, Passed);
+    If Pour = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_FOUND',
+            'The board has ' + IntToStr(Passed) + ' pours, none at ' + IntToStr(Wanted));
+        Exit;
+    End;
+    Expected := Trim(ExtractJsonValue(Params, 'name'));
+    If (Expected <> '') And (UpperCase(Expected) <> UpperCase(Pour.Name)) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'POUR_CHANGED',
+            'Pour ' + IntToStr(Wanted) + ' is now ' + Pour.Name + ', not ' + Expected
+            + '; read pcb_get_polygons again');
+        Exit;
+    End;
+    Net := '';
+    Try If Pour.Net <> Nil Then Net := Pour.Net.Name; Except Net := ''; End;
+    OnLayer := 'Unknown';
+    Try OnLayer := GetLayerString(Pour.Layer); Except End;
+
+    Rows := '';
+    Pieces := 0;
+    Holes := 0;
+    Vertices := 0;
+    Area := 0;
+    Iter := Pour.GroupIterator_Create;
+    Try
+        Iter.AddFilter_ObjectSet(MkSet(eRegionObject));
+        Region := Iter.FirstPCBObject;
+        While Region <> Nil Do
+        Begin
+            Inc(Pieces);
+            Shape := Region.GeometricPolygon;
+            Outlines := '';
+            HoleRows := '';
+            PieceArea := 0;
+            For I := 0 To Shape.Count - 1 Do
+            Begin
+                Contour := Shape.Contour(I);
+                Vertices := Vertices + Contour.Count;
+                If Shape.IsHole(I) Then
+                Begin
+                    Inc(Holes);
+                    PieceArea := PieceArea - Contour.Area / 100000000.0;
+                    HoleRows := HoleRows + ',' + PourContourJson(Contour);
+                End
+                Else
+                Begin
+                    PieceArea := PieceArea + Contour.Area / 100000000.0;
+                    Outlines := Outlines + ',' + PourContourJson(Contour);
+                End;
+            End;
+            Area := Area + PieceArea;
+            Rows := Rows + ',' + JsonObj(
+                JsonRaw('outlines', '[' + Copy(Outlines, 2, Length(Outlines)) + ']')
+                + ',' + JsonRaw('holes', '[' + Copy(HoleRows, 2, Length(HoleRows)) + ']')
+                + ',' + JsonFloat('area_sqmils', PieceArea));
+            Region := Iter.NextPCBObject;
+        End;
+    Finally
+        Pour.GroupIterator_Destroy(Iter);
+    End;
+
+    Strokes := 0;
+    Iter := Pour.GroupIterator_Create;
+    Try
+        Iter.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject));
+        Stroke := Iter.FirstPCBObject;
+        While Stroke <> Nil Do
+        Begin
+            Inc(Strokes);
+            Stroke := Iter.NextPCBObject;
+        End;
+    Finally
+        Pour.GroupIterator_Destroy(Iter);
+    End;
+
+    Result := BuildSuccessResponse(RequestId, JsonObj(JsonInt('index', Wanted)
+        + ',' + JsonStr('name', Pour.Name) + ',' + JsonStr('net', Net)
+        + ',' + JsonStr('layer', OnLayer) + ',' + JsonInt('pieces', Pieces)
+        + ',' + JsonInt('holes', Holes) + ',' + JsonInt('vertices', Vertices)
+        + ',' + JsonFloat('area_sqmils', Area) + ',' + JsonInt('strokes', Strokes)
+        + ',' + JsonRaw('copper', '[' + Copy(Rows, 2, Length(Rows)) + ']')));
 End;
 
 {..............................................................................}
@@ -10839,7 +12120,7 @@ Begin
         Exit;
     End;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         PCBServer.SendMessageToRobots(FoundPoly.I_ObjectAddress, c_Broadcast,
             PCBM_BeginModify, c_NoEventData);
@@ -10940,7 +12221,7 @@ Begin
         PCBServer.SendMessageToRobots(FoundPoly.I_ObjectAddress, c_Broadcast,
             PCBM_EndModify, c_NoEventData);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
@@ -11118,7 +12399,7 @@ Begin
     End;
     If ScopeExpr = '' Then ScopeExpr := 'All';
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         Rule := PCBServer.PCBRuleFactory(eRule_ConfinementConstraint);
         Rule.Name := RoomName;
@@ -11143,7 +12424,7 @@ Begin
         PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
             PCBM_BoardRegisteration, Rule.I_ObjectAddress);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
@@ -11388,7 +12669,7 @@ Begin
             Result := BuildErrorResponse(RequestId, 'BAD_PARAM', 'radius must be positive');
             Exit;
         End;
-        PCBServer.PreProcess;
+        PcbBeginEdit(0);
         Try
             Board.BoardOutline.PointCount := 4;
             For K := 0 To 3 Do
@@ -11410,7 +12691,7 @@ Begin
             Board.BoardOutline.Validate;
             RefreshBoardOutline(Board);
         Finally
-            PCBServer.PostProcess;
+            PcbEndEdit(0);
         End;
         MarkDocDirtyByPath(Board.FileName);
         Result := BuildSuccessResponse(RequestId,
@@ -11456,7 +12737,7 @@ Begin
                 Result := BuildErrorResponse(RequestId, 'BAD_PARAM', 'a polygon needs three points or more');
                 Exit;
             End;
-            PCBServer.PreProcess;
+            PcbBeginEdit(0);
             Try
                 Board.BoardOutline.PointCount := N;
                 For K := 0 To N - 1 Do
@@ -11488,7 +12769,7 @@ Begin
                 Board.BoardOutline.Validate;
                 RefreshBoardOutline(Board);
             Finally
-                PCBServer.PostProcess;
+                PcbEndEdit(0);
             End;
         Finally
             Xs.Free;
@@ -11511,7 +12792,7 @@ Begin
     Cx1 := MilsToCoordF(X1);  Cy1 := MilsToCoordF(Y1);
     Cx2 := MilsToCoordF(X2);  Cy2 := MilsToCoordF(Y2);
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         { IPCB_BoardOutline inherits from IPCB_Polygon. Per the verified
           DelphiScript idiom, you assign a
@@ -11534,7 +12815,7 @@ Begin
         { Without this the outline's cached size kept the old rectangle. }
         RefreshBoardOutline(Board);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
@@ -11612,7 +12893,13 @@ Begin
         Exit;
     End;
 
-    PCBServer.PreProcess;
+    If (NetStr <> '') And (FindNetByName(Board, NetStr) = Nil) Then
+    Begin
+        Result := NetNotFoundError(RequestId, NetStr);
+        Exit;
+    End;
+
+    PcbBeginEdit(0);
     Try
         Polygon := PCBServer.PCBObjectFactory(ePolyObject, eNoDimension, eCreate_Default);
         If Polygon = Nil Then
@@ -11673,7 +12960,7 @@ Begin
         { before the polygon joined the board, the name stayed empty.       }
         Try If Polygon.Name = '' Then Polygon.Name := Polygon.GetDefaultName; Except End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
@@ -11687,7 +12974,7 @@ Begin
         + '"poured":' + BoolToJsonStr(PolygonCopper(Polygon, CopperSqMils, CopperExact) > 0) + ','
         + '"repour_mode":"' + RepourModeName(0) + '",'
         + '"name":"' + EscapeJsonString(Polygon.Name) + '",'
-        + '"layer":"' + EscapeJsonString(GetLayerString(Polygon.Layer)) + '",'
+        + '"layer":"' + EscapeJsonString(LayerDisplayName(Polygon.Layer)) + '",'
         + '"net":"' + EscapeJsonString(NetStr) + '"}');
 End;
 
@@ -11779,7 +13066,7 @@ Begin
             Board.BoardIterator_Destroy(Iter);
         End;
 
-        PCBServer.PreProcess;
+        PcbBeginEdit(0);
         Try
             For I := 0 To Outline.PointCount - 1 Do
             Begin
@@ -11833,7 +13120,7 @@ Begin
                 Inc(Added);
             End;
         Finally
-            PCBServer.PostProcess;
+            PcbEndEdit(0);
         End;
     Finally
         Have.Free;
@@ -11906,7 +13193,7 @@ Begin
     End;
 
     N := Outline.PointCount;
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         Polygon := PCBServer.PCBObjectFactory(ePolyObject, eNoDimension, eCreate_Default);
         If Polygon = Nil Then
@@ -11956,7 +13243,7 @@ Begin
         { before the polygon joined the board, the name stayed empty.       }
         Try If Polygon.Name = '' Then Polygon.Name := Polygon.GetDefaultName; Except End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
     MarkDocDirtyByPath(Board.FileName);
     Result := BuildSuccessResponse(RequestId,
@@ -12031,8 +13318,14 @@ Begin
         Exit;
     End;
 
+    If (NetStr <> '') And (FindNetByName(Board, NetStr) = Nil) Then
+    Begin
+        Result := NetNotFoundError(RequestId, NetStr);
+        Exit;
+    End;
+
     PlacedCount := 0;
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         { Positions are X1 + n * Pitch, not a running sum, so a decimal pitch }
         { does not drift; the 1e-6 mil slack keeps the last column when the  }
@@ -12067,7 +13360,7 @@ Begin
             Iy := Y1 + Ny * Pitch;
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
@@ -12124,7 +13417,7 @@ Begin
         Exit;
     End;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         DiffPair := PCBServer.PCBObjectFactory(eDifferentialPairObject, eNoDimension, eCreate_Default);
         If DiffPair = Nil Then
@@ -12141,7 +13434,7 @@ Begin
         PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
             PCBM_BoardRegisteration, DiffPair.I_ObjectAddress);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
@@ -12250,7 +13543,13 @@ Begin
         Exit;
     End;
 
-    PCBServer.PreProcess;
+    If (NetStr <> '') And (FindNetByName(Board, NetStr) = Nil) Then
+    Begin
+        Result := NetNotFoundError(RequestId, NetStr);
+        Exit;
+    End;
+
+    PcbBeginEdit(0);
     Try
         Region := PCBServer.PCBObjectFactory(eRegionObject, eNoDimension, eCreate_Default);
         If Region = Nil Then
@@ -12329,7 +13628,7 @@ Begin
         PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
             PCBM_BoardRegisteration, Region.I_ObjectAddress);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
@@ -12471,7 +13770,7 @@ Begin
 
     Step := (EndVal - StartVal) / (Count - 1);
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         For I := 0 To Count - 1 Do
         Begin
@@ -12497,7 +13796,7 @@ Begin
                 PCBM_EndModify, c_NoEventData);
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
@@ -12564,7 +13863,7 @@ Begin
         TextY := (Y1 + Y2) / 2;
     End;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         Dim := PCBServer.PCBObjectFactory(eDimensionObject, eLinearDimension, eCreate_Default);
         If Dim = Nil Then
@@ -12591,7 +13890,7 @@ Begin
         PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
             PCBM_BoardRegisteration, Dim.I_ObjectAddress);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
@@ -12666,7 +13965,13 @@ Begin
         Exit;
     End;
 
-    PCBServer.PreProcess;
+    If (NetStr <> '') And (FindNetByName(Board, NetStr) = Nil) Then
+    Begin
+        Result := NetNotFoundError(RequestId, NetStr);
+        Exit;
+    End;
+
+    PcbBeginEdit(0);
     Try
         Pad := PCBServer.PCBObjectFactory(ePadObject, eNoDimension, eCreate_Default);
         If Pad = Nil Then
@@ -12697,7 +14002,7 @@ Begin
         PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
             PCBM_BoardRegisteration, Pad.I_ObjectAddress);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
@@ -12791,7 +14096,7 @@ Begin
         Exit;
     End;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         Comp := PCBServer.PCBObjectFactory(eComponentObject, eNoDimension, eCreate_Default);
         If Comp = Nil Then
@@ -12856,7 +14161,7 @@ Begin
             Comp.GroupIterator_Destroy(GrpIter);
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
@@ -12944,7 +14249,7 @@ Begin
     FailedCount := 0;
     BadLayers := '';
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         Remaining := PlacementsStr;
         While Remaining <> '' Do
@@ -13043,7 +14348,7 @@ Begin
             PlacedCount := PlacedCount + 1;
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
@@ -13296,7 +14601,7 @@ Begin
     BoardPath := Board.FileName;
     Sigs := TStringList.Create;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         While Remaining <> '' Do
         Begin
@@ -13585,7 +14890,7 @@ Begin
             First := False;
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
         Sigs.Free;
     End;
 
@@ -13685,7 +14990,7 @@ Begin
         Exit;
     End;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         Dim := PCBServer.PCBObjectFactory(eDimensionObject, eAngularDimension, eCreate_Default);
         If Dim = Nil Then
@@ -13703,7 +15008,7 @@ Begin
         PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
             PCBM_BoardRegisteration, Dim.I_ObjectAddress);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
@@ -13747,7 +15052,7 @@ Begin
         Exit;
     End;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         Dim := PCBServer.PCBObjectFactory(eDimensionObject, eRadialDimension, eCreate_Default);
         If Dim = Nil Then
@@ -13766,7 +15071,7 @@ Begin
         PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
             PCBM_BoardRegisteration, Dim.I_ObjectAddress);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
@@ -13834,7 +15139,7 @@ Begin
         Exit;
     End;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         Try Emb.Layer := TargetLayer; Except End;
         Try Emb.XLocation := MilsToCoordF(X); Except End;
@@ -13853,7 +15158,7 @@ Begin
         PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
             PCBM_BoardRegisteration, Emb.I_ObjectAddress);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
@@ -13982,7 +15287,7 @@ Begin
     FirstPlaced := True;
     FirstSkipped := True;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         NetIter := Board.BoardIterator_Create;
         Try
@@ -14077,7 +15382,7 @@ Begin
             Board.BoardIterator_Destroy(NetIter);
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     If Placed > 0 Then MarkDocDirtyByPath(Board.FileName);
@@ -14273,7 +15578,7 @@ Begin
         If GridSize >= PadHMils Then Break;
     End;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         { Suppress the existing full-area paste opening on the pad.          }
         Cache := Pad.GetState_Cache;
@@ -14308,7 +15613,7 @@ Begin
             End;
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
@@ -14402,7 +15707,7 @@ Begin
     ItemsJson := '';
     First := True;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         Iterator := Board.BoardIterator_Create;
         Try
@@ -14468,7 +15773,7 @@ Begin
             Board.BoardIterator_Destroy(Iterator);
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     Try Board.GraphicallyInvalidate; Except End;
@@ -14657,7 +15962,7 @@ Begin
     Total := 0;
     Cleared := 0;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         Iter := Board.BoardIterator_Create;
         Try
@@ -14696,7 +16001,7 @@ Begin
             Board.BoardIterator_Destroy(Iter);
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     If Cleared > 0 Then MarkDocDirtyByPath(Board.FileName);
@@ -15048,7 +16353,7 @@ Begin
     First := True;
     SaveNeeded := False;
 
-    If Not DryRun Then PCBServer.PreProcess;
+    If Not DryRun Then PcbBeginEdit(0);
     Try
         Iter := Nil;
         Try
@@ -15401,7 +16706,7 @@ Begin
             Try Board.BoardIterator_Destroy(Iter); Except End;
         End;
     Finally
-        If Not DryRun Then PCBServer.PostProcess;
+        If Not DryRun Then PcbEndEdit(0);
     End;
 
     If SaveNeeded Then
@@ -15570,7 +16875,7 @@ Begin
 
     Matched := Matches.Count;
     Verified := 0;
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         For I := 0 To Matches.Count - 1 Do
         Begin
@@ -15596,7 +16901,7 @@ Begin
             If Ok Then Verified := Verified + 1;
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     If Matched > 0 Then MarkDocDirtyByPath(Board.FileName);
@@ -15740,7 +17045,7 @@ Begin
     Changed := 0;
     Failed := 0;
     Items := '';
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         For I := 0 To Targets.Count - 1 Do
         Begin
@@ -15790,7 +17095,7 @@ Begin
                 + ',"ok":' + BoolToJsonStr(Ok) + '}';
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
     If Targets.Count > 0 Then MarkDocDirtyByPath(Board.FileName);
 
@@ -15933,7 +17238,7 @@ Begin
     First := True;
     PairApplied := False;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         { 'Not Set' is the one kind several layers may share, so it never    }
         { displaces anything. Nor does a paired kind, which no layer holds.   }
@@ -16021,7 +17326,7 @@ Begin
         PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
             PCBM_BoardRegisteration, c_NoEventData);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     { Read back rather than trusting the write. The assignment is late bound  }
@@ -16068,8 +17373,9 @@ End;
 {..............................................................................}
 { PCB_GetMechLayerNames - List the enabled (displayed) mechanical layers with  }
 { their custom names. Uses only proven accessors (LayerStack_V7 /              }
-{ LayerObject_V7[] / LayerIsDisplayed) -- ILayer.MechanicalLayer(i) and        }
-{ MechanicalLayerEnabled are undeclared in this script binding.               }
+{ LayerObject_V7[] / LayerIsDisplayed). ILayer.MechanicalLayer(i) is         }
+{ undeclared in this binding; MechanicalLayerEnabled is read through a local  }
+{ typed IPCB_LayerObject_V7.                                                  }
 {..............................................................................}
 
 { Name, enable and kind the mechanical layers of the OPEN BOARD.              }
@@ -16491,7 +17797,7 @@ Begin
         If XStr <> '' Then WantX := MilsToCoordF(StrToFloatDef(XStr, 0));
         If YStr <> '' Then WantY := MilsToCoordF(StrToFloatDef(YStr, 0));
 
-        PCBServer.PreProcess;
+        PcbBeginEdit(0);
         Try
             PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast,
                 PCBM_BeginModify, c_NoEventData);
@@ -16515,7 +17821,7 @@ Begin
             PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast,
                 PCBM_EndModify, c_NoEventData);
         Finally
-            PCBServer.PostProcess;
+            PcbEndEdit(0);
         End;
         Applied := Applied + 1;
 
@@ -16740,7 +18046,7 @@ Begin
     WasOnline := True;
     Try WasOnline := PCBServer.SystemOptions.DoOnlineDRC; Except End;
     Try PCBServer.SystemOptions.DoOnlineDRC := False; Except End;
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         For I := 0 To Comps.Count - 1 Do
         Begin
@@ -16801,7 +18107,7 @@ Begin
             End;
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
         Try PCBServer.SystemOptions.DoOnlineDRC := WasOnline; Except End;
     End;
 
@@ -16896,7 +18202,7 @@ Begin
 
     BeforeLen := CoordToMilsF(Net.RoutedLength);
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         For I := 0 To Bumps - 1 Do
         Begin
@@ -16927,7 +18233,7 @@ Begin
             X := X + 2 * Step;
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     ResetParameters;
@@ -17002,7 +18308,7 @@ Begin
     ToolC := MilsToCoord(118);
     Inset := Border / 2;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         { Embedded-board array (the panel core). Emb is the subtype so the    }
         { RowCount/ColCount/Spacing members resolve.                          }
@@ -17045,7 +18351,7 @@ Begin
             NewFiducial(Board, MilsToCoordF(Inset), MilsToCoordF(PanH - Inset), FidC, eTopLayer);
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     { Convert the selected rail tracks into the actual board outline. }
@@ -17087,7 +18393,7 @@ Begin
 
     Removed := 0;
     Guard := 0;
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         FoundOne := True;
         While FoundOne And (Guard < 100000) Do
@@ -17141,7 +18447,7 @@ Begin
             End;
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
@@ -17296,7 +18602,7 @@ Begin
     MinX := MinX - Margin; MinY := MinY - Margin;
     MaxX := MaxX + Margin; MaxY := MaxY + Margin;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         Trk := NewTrack(MinX, MinY, MaxX, MinY, RailW, MechL); Board.AddPCBObject(Trk); Trk.Selected := True;
         Trk := NewTrack(MaxX, MinY, MaxX, MaxY, RailW, MechL); Board.AddPCBObject(Trk); Trk.Selected := True;
@@ -17304,7 +18610,7 @@ Begin
         Trk := NewTrack(MinX, MaxY, MinX, MinY, RailW, MechL); Board.AddPCBObject(Trk); Trk.Selected := True;
         Try Board.LayerIsDisplayed[MechL] := True; Except End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     ResetParameters;
@@ -17499,7 +18805,7 @@ Begin
     NoRing := 0;
     NoRule := 0;
     Failed := 0;
-    If Not DryRun Then PCBServer.PreProcess;
+    If Not DryRun Then PcbBeginEdit(0);
     Try
         For I := 0 To Matches.Count - 1 Do
         Begin
@@ -17571,7 +18877,7 @@ Begin
             HistAdd(After, ViaSizeKey(Via.Size, Via.HoleSize));
         End;
     Finally
-        If Not DryRun Then PCBServer.PostProcess;
+        If Not DryRun Then PcbEndEdit(0);
     End;
 
     If (Not DryRun) And (Changed + Failed > 0) Then MarkDocDirtyByPath(Board.FileName);
@@ -17728,7 +19034,7 @@ Begin
     Failed := 0;
     Children := 0;
     Filtered := 0;
-    If Not DryRun Then PCBServer.PreProcess;
+    If Not DryRun Then PcbBeginEdit(0);
     Try
         For I := 0 To Matches.Count - 1 Do
         Begin
@@ -17782,7 +19088,7 @@ Begin
             HistAdd(After, ViaSizeKey(Via.Size, Via.HoleSize));
         End;
     Finally
-        If Not DryRun Then PCBServer.PostProcess;
+        If Not DryRun Then PcbEndEdit(0);
     End;
 
     If (Not DryRun) And (Changed + Failed > 0) Then MarkDocDirtyByPath(Board.FileName);
@@ -17842,7 +19148,7 @@ Begin
     End;
     Copied := 0;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         Iter := Board.BoardIterator_Create;
         Try
@@ -17868,7 +19174,7 @@ Begin
             Board.BoardIterator_Destroy(Iter);
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
@@ -17977,7 +19283,7 @@ Begin
     NewMx := Round(nx);
     NewMy := Round(ny);
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         PCBServer.SendMessageToRobots(Best.I_ObjectAddress, c_Broadcast,
             PCBM_BeginModify, c_NoEventData);
@@ -17986,7 +19292,7 @@ Begin
         PCBServer.SendMessageToRobots(Best.I_ObjectAddress, c_Broadcast,
             PCBM_EndModify, c_NoEventData);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
     MarkDocDirtyByPath(Board.FileName);
 
@@ -18175,7 +19481,7 @@ Begin
         End;
     End;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         For I := 0 To Victims.Count - 1 Do
         Begin
@@ -18199,7 +19505,7 @@ Begin
             End;
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     Board.GraphicalView_ZoomRedraw;
@@ -18294,11 +19600,11 @@ Begin
             End;
             If A <> Nil Then
             Begin
-                PCBServer.PreProcess;
+                PcbBeginEdit(0);
                 Try
                     Board.RemovePCBObject(A);
                 Finally
-                    PCBServer.PostProcess;
+                    PcbEndEdit(0);
                 End;
                 SliverDeleted := SliverDeleted + 1;
                 DidWork := True;
@@ -18412,7 +19718,7 @@ Begin
 
             If MergeA <> Nil Then
             Begin
-                PCBServer.PreProcess;
+                PcbBeginEdit(0);
                 Try
                     NewT := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
                     NewT.Layer := NewLayer;
@@ -18426,7 +19732,7 @@ Begin
                     Board.RemovePCBObject(MergeA);
                     Board.RemovePCBObject(MergeB);
                 Finally
-                    PCBServer.PostProcess;
+                    PcbEndEdit(0);
                 End;
                 Merged := Merged + 1;
                 DidWork := True;
@@ -18502,7 +19808,7 @@ Begin
     Placed := 0; Scanned := 0;
     MaxPads := 5000; MaxScan := 200000;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         Gy := BR.Bottom + MarginC;
         While (Gy <= BR.Top - MarginC) And (Placed < MaxPads) And (Scanned < MaxScan) Do
@@ -18543,7 +19849,7 @@ Begin
             Gy := Gy + PitchC;
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
@@ -18607,7 +19913,7 @@ Begin
     ViaHole := StrToFloatDef(ExtractJsonValue(Params, 'via_hole_mils'), 28);
     Moved := 0; ViasAdded := 0;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         { move pass: layer change does not alter the iterated set, so in-place }
         Iter := Board.BoardIterator_Create;
@@ -18680,7 +19986,7 @@ Begin
             Board.BoardIterator_Destroy(Iter);
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     MarkDocDirtyByPath(Board.FileName);
@@ -18774,7 +20080,7 @@ Begin
         Exit;
     End;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         Target.BeginModify;
         Target.PointCount := 2 * N;
@@ -18823,7 +20129,7 @@ Begin
         Target.EndModify;
         Target.GraphicallyInvalidate;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
     OrigList.Free;
 
@@ -18891,7 +20197,7 @@ Begin
     CreatedCount := 0;
     ExistingCount := 0;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         Remaining := NetsStr;
         While Remaining <> '' Do
@@ -18927,7 +20233,7 @@ Begin
             CreatedCount := CreatedCount + 1;
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     Existing.Free;
@@ -19275,11 +20581,11 @@ Begin
         Exit;
     End;
     Before := NetRoutingCount(Board, Net);
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         Board.CleanNet(Net);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
     After := NetRoutingCount(Board, Net);
     Try Board.ViewManager_FullUpdate; Except End;
@@ -19374,13 +20680,13 @@ Begin
         Exit;
     End;
     Pair := Board.LayerPair[PairIdx];
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         If BackStr <> '' Then Pair.IsBackdrill := (BackStr = 'true');
         If DrawStr <> '' Then Pair.PlotDrillDrawing := (DrawStr = 'true');
         If GuideStr <> '' Then Pair.PlotDrillGuide := (GuideStr = 'true');
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
     MarkDocDirtyByPath(Board.FileName);
     Result := BuildSuccessResponse(RequestId, JsonObj(JsonRaw('pair', DrillPairJson(Pair, PairIdx))));
@@ -19521,6 +20827,66 @@ Begin
         JsonInt('count', Count) + ',' + JsonRaw('xsignals', '[' + Items + ']')));
 End;
 
+{ The board's xSignal class of that name, made when there is none and Make. }
+Function XSignalClassNamed(Board : IPCB_Board; ClassName : String; Make : Boolean) : IPCB_ObjectClass;
+Var
+    Iter : IPCB_BoardIterator;
+    Cls : IPCB_ObjectClass;
+Begin
+    Result := Nil;
+    Iter := Board.BoardIterator_Create;
+    Try
+        Iter.SetState_FilterAll;
+        Iter.AddFilter_ObjectSet(MkSet(eClassObject));
+        Cls := Iter.FirstPCBObject;
+        While (Cls <> Nil) And (Result = Nil) Do
+        Begin
+            If (Cls.MemberKind = eClassMemberKind_Signal)
+                And (UpperCase(Cls.Name) = UpperCase(ClassName)) Then Result := Cls;
+            Cls := Iter.NextPCBObject;
+        End;
+    Finally
+        Board.BoardIterator_Destroy(Iter);
+    End;
+    If (Result <> Nil) Or (Not Make) Then Exit;
+    PcbBeginEdit(0);
+    Try
+        Result := PCBServer.PCBClassFactoryByClassMember(eClassMemberKind_Signal);
+        If Result <> Nil Then
+        Begin
+            Result.SuperClass := False;
+            Result.Name := ClassName;
+            Board.AddPCBObject(Result);
+            PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
+                PCBM_BoardRegisteration, Result.I_ObjectAddress);
+        End;
+    Finally
+        PcbEndEdit(0);
+    End;
+End;
+
+{ Whether the class lists that member name. A class has no member count  }
+{ here, so the names are read until one raises or Limit is reached.      }
+Function ClassListsMember(Cls : IPCB_ObjectClass; MemberName : String; Limit : Integer) : Boolean;
+Var
+    I : Integer;
+    Got : String;
+Begin
+    Result := False;
+    If Cls = Nil Then Exit;
+    For I := 0 To Limit - 1 Do
+    Begin
+        Got := '';
+        Try Got := Cls.MemberName[I]; Except Break; End;
+        If Got = '' Then Break;
+        If UpperCase(Got) = UpperCase(MemberName) Then
+        Begin
+            Result := True;
+            Exit;
+        End;
+    End;
+End;
+
 {..............................................................................}
 { PCB_CreateXSignals - create xSignals between pins (PinPairsManager.         }
 { CreateFromPins on the pads), and put them in an xSignal class when one is   }
@@ -19539,8 +20905,10 @@ Var
     Made : IInterface;
     PinStr, ClassName, Item, Desig, PadName, Missing, NewItems, BeforeNames : String;
     MissingPlain : String;
-    TabPos, DotPos, I, Before, After, Found : Integer;
+    TabPos, DotPos, I, Before, After, Found, Unlisted : Integer;
     Classed : Boolean;
+    SigClass : IPCB_ObjectClass;
+    Unclassed : String;
 Begin
     PinStr := ExtractJsonValue(Params, 'pins');
     ClassName := ExtractJsonValue(Params, 'class_name');
@@ -19607,11 +20975,11 @@ Begin
         If PP <> Nil Then BeforeNames := BeforeNames + PP.Name + #9;
     End;
     Made := Nil;
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         Made := Mgr.CreateFromPins(Pins);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
     Classed := False;
     If (ClassName <> '') And (Made <> Nil) Then
@@ -19624,6 +20992,14 @@ Begin
         End;
     End;
     After := Mgr.PinPairsCount;
+    { A class assignment that raised nothing is not a membership: the     }
+    { xSignals were found outside the class they named. Each new          }
+    { xSignal is looked for in the class, added as a member when missing, }
+    { and looked for again.                                                }
+    SigClass := Nil;
+    If ClassName <> '' Then SigClass := XSignalClassNamed(Board, ClassName, True);
+    Unlisted := 0;
+    Unclassed := '';
     NewItems := '';
     For I := 0 To After - 1 Do
     Begin
@@ -19631,9 +21007,28 @@ Begin
         Try PP := Mgr.PinPairs[I]; Except PP := Nil; End;
         If PP = Nil Then Continue;
         If Pos(#9 + PP.Name + #9, BeforeNames) > 0 Then Continue;
+        If ClassName <> '' Then
+        Begin
+            If (SigClass <> Nil) And Not ClassListsMember(SigClass, PP.Name, After + 64) Then
+            Begin
+                PcbBeginEdit(0);
+                Try
+                    Try SigClass.AddMember(PP.CastToPrimitive); Except End;
+                Finally
+                    PcbEndEdit(0);
+                End;
+            End;
+            If (SigClass = Nil) Or Not ClassListsMember(SigClass, PP.Name, After + 64) Then
+            Begin
+                Inc(Unlisted);
+                If Unclassed <> '' Then Unclassed := Unclassed + ',';
+                Unclassed := Unclassed + '"' + EscapeJsonString(PP.Name) + '"';
+            End;
+        End;
         If NewItems <> '' Then NewItems := NewItems + ',';
         NewItems := NewItems + XSignalJson(Mgr, PP, I);
     End;
+    If ClassName <> '' Then Classed := (SigClass <> Nil) And (Unlisted = 0) And (After > Before);
     MarkDocDirtyByPath(Board.FileName);
     Result := BuildSuccessResponse(RequestId, JsonObj(
         JsonInt('count_before', Before) + ','
@@ -19641,6 +21036,7 @@ Begin
         + JsonBool('returned_pairs', Made <> Nil) + ','
         + JsonStr('class_name', ClassName) + ','
         + JsonBool('class_assigned', Classed) + ','
+        + JsonRaw('not_in_class', '[' + Unclassed + ']') + ','
         + JsonRaw('created', '[' + NewItems + ']')));
 End;
 
@@ -19881,7 +21277,7 @@ Begin
         End;
     End;
     Items := '';
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         For I := 0 To Comps.Count - 1 Do
         Begin
@@ -19912,7 +21308,7 @@ Begin
             End;
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
     If Comps.Count > 0 Then MarkDocDirtyByPath(Board.FileName);
     Result := BuildSuccessResponse(RequestId, JsonObj(
@@ -19958,7 +21354,7 @@ Begin
     End;
     Before := Mgr.PinPairsCount;
     Deleted := '';
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         For I := Before - 1 DownTo 0 Do
         Begin
@@ -19973,7 +21369,7 @@ Begin
             Deleted := Deleted + '"' + EscapeJsonString(Name) + '"';
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
     After := Mgr.PinPairsCount;
     If After <> Before Then MarkDocDirtyByPath(Board.FileName);
@@ -20041,11 +21437,11 @@ Begin
             Exit;
         End;
     End;
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         Board.AddLayerPair(LowLayer, HighLayer);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
     After := Board.DrillLayerPairsCount;
     If After <> Before Then MarkDocDirtyByPath(Board.FileName);
@@ -20184,7 +21580,7 @@ Begin
     Missing := '';
     NoColour := '';
     Changed := False;
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         While NetsStr <> '' Do
         Begin
@@ -20248,7 +21644,7 @@ Begin
             Items := Items + NetDisplayJson(Net);
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
     If Changed Then
     Begin
@@ -21304,13 +22700,13 @@ Begin
         Exit;
     End;
     Before := PourBoundsJson(Found);
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         PCBServer.SendMessageToRobots(Found.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
         Found.GrowPolyshape(MilsToCoordF(Dist));
         PCBServer.SendMessageToRobots(Found.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
     Try Found.GraphicallyInvalidate; Except End;
     MarkDocDirtyByPath(Board.FileName);
@@ -21628,7 +23024,7 @@ Begin
         End;
         Idx := StrToInt(IdxStr);
     End;
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         If (Op = 'split') Or (Op = 'unsplit') Then
         Begin
@@ -21768,7 +23164,7 @@ Begin
             Exit;
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
     If Changed Then
     Begin
@@ -21826,7 +23222,7 @@ Begin
             Exit;
         End;
     End;
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         If Op = 'create' Then
         Begin
@@ -21889,7 +23285,7 @@ Begin
             Exit;
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
     If Changed Then
     Begin
@@ -22154,7 +23550,7 @@ Begin
     Bound := 0;
     Failed := 0;
 
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         Remaining := BindingsStr;
         While Length(Remaining) > 0 Do
@@ -22244,7 +23640,7 @@ Begin
             Bound := Bound + 1;
         End;
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
     End;
 
     CompsJson := '';
@@ -22661,6 +24057,37 @@ Begin
     Result := Entry;
 End;
 
+{ The solder mask of one pad or via: tenting per side, whether the        }
+{ expansion runs from the hole edge, and the expansion when it is set on  }
+{ the object by hand (null when the board's mask rule decides it). The    }
+{ sliver check needs every opening the mask will have.                    }
+Function LmMaskJson(Obj : IPCB_Primitive) : String;
+Var
+    Cache : TPadCache;
+    TentTop, TentBot, FromHole : Boolean;
+    Manual : String;
+    Bottom : Integer;
+Begin
+    TentTop := False;
+    TentBot := False;
+    FromHole := False;
+    Try TentTop := Obj.GetState_IsTenting_Top; Except TentTop := False; End;
+    Try TentBot := Obj.GetState_IsTenting_Bottom; Except TentBot := False; End;
+    Try FromHole := Obj.SolderMaskExpansionFromHoleEdge; Except FromHole := False; End;
+    Manual := 'null';
+    Try
+        Cache := Obj.GetState_Cache;
+        If Cache.SolderMaskExpansionValid = eCacheManual Then
+        Begin
+            Bottom := Cache.SolderMaskExpansion;
+            If Cache.UseSeparateExpansions Then Bottom := Cache.SolderMaskBottomExpansion;
+            Manual := '[' + IntToStr(Cache.SolderMaskExpansion) + ',' + IntToStr(Bottom) + ']';
+        End;
+    Except Manual := 'null'; End;
+    Result := ',"tent":[' + BoolToJsonStr(TentTop) + ',' + BoolToJsonStr(TentBot)
+        + '],"from_hole":' + BoolToJsonStr(FromHole) + ',"mask":' + Manual;
+End;
+
 Function LmPadsSection(Board : IPCB_Board; Offset : Integer; Limit : Integer) : String;
 Var
     Iter : IPCB_BoardIterator;
@@ -22771,7 +24198,7 @@ Begin
                         + ',"hole_type":"' + HoleStr
                         + '","hole_width":' + IntToStr(Pad.HoleWidth)
                         + ',"hole_rotation":' + FloatToJsonStr(Pad.HoleRotation)
-                        + ',"plated":' + BoolToJsonStr(Pad.Plated) + '}';
+                        + ',"plated":' + BoolToJsonStr(Pad.Plated) + LmMaskJson(Pad) + '}';
                     Inc(Emitted);
                 End;
                 Inc(Idx);
@@ -22812,8 +24239,33 @@ Begin
     End;
 End;
 
+{ LmCopperKinds - The object kinds a copper read may be narrowed to, as the  }
+{ "k" each entry carries. An empty list is every kind, read as before.       }
+Function LmNextKind(Var Rest : String) : String;
+Var
+    C : Integer;
+Begin
+    C := Pos(',', Rest);
+    If C > 0 Then
+    Begin
+        Result := Trim(Copy(Rest, 1, C - 1));
+        Rest := Copy(Rest, C + 1, Length(Rest));
+    End
+    Else
+    Begin
+        Result := Trim(Rest);
+        Rest := '';
+    End;
+End;
+
+Function LmCopperKindKnown(Kind : String) : Boolean;
+Begin
+    Result := (Kind = 'track') Or (Kind = 'arc') Or (Kind = 'via')
+        Or (Kind = 'region') Or (Kind = 'fill') Or (Kind = 'polygon');
+End;
+
 Function LmCopperSection(Board : IPCB_Board; Offset : Integer; Limit : Integer;
-    Trace : Boolean) : String;
+    Trace : Boolean; Kinds : String; OnLayer : TLayer; SelectedOnly : Boolean) : String;
 Var
     Iter : IPCB_BoardIterator;
     Obj : IPCB_Primitive;
@@ -22831,7 +24283,11 @@ Var
     Lyr : TLayer;
     Idx, Emitted, I : Integer;
     Items, Entry, Common, PolyPts, Body, OwnerName, OwnerNet, Sizes : String;
-    More, Keepout, InPoly : Boolean;
+    More, Keepout, InPoly, Wanted, Wide : Boolean;
+    OneLayer : IPCB_LayerSet;
+    Passes : TStringList;
+    P : Integer;
+    Rest, Kind : String;
 Begin
     Items := '';
     Idx := 0;
@@ -22853,147 +24309,203 @@ Begin
         End;
     End;
     If Trace Then LmTrace('copper offset=' + IntToStr(Offset) + ' limit=' + IntToStr(Limit));
-    Iter := Board.BoardIterator_Create;
-    Try
-        Iter.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, eViaObject,
-            eRegionObject, eFillObject, ePolyObject));
-        Iter.AddFilter_LayerSet(AllLayers);
-        Iter.AddFilter_Method(eProcessAll);
-        Obj := Iter.FirstPCBObject;
-        While Obj <> Nil Do
-        Begin
-            If Idx >= Offset Then
-            Begin
-                If Emitted >= Limit Then
-                Begin
-                    More := True;
-                    Break;
-                End;
-                If Trace Then LmTrace(IntToStr(Idx) + ' kind=' + IntToStr(Obj.ObjectId) + ' flags');
-                Keepout := False;
-                Try Keepout := Obj.IsKeepout; Except Keepout := False; End;
-                InPoly := False;
-                Try InPoly := Obj.InPolygon; Except InPoly := False; End;
-                { Poured copper carries no net of its own: the pour that   }
-                { made it does. Name it here so the reader need not guess  }
-                { the owner from geometry, which fails on nested pours.    }
-                OwnerName := '';
-                OwnerNet := '';
-                If InPoly Then
-                Begin
-                    If Trace Then LmTrace(IntToStr(Idx) + ' owner');
-                    PourOwner := Obj.Polygon;
-                    If PourOwner <> Nil Then
-                    Begin
-                        OwnerName := PourOwner.Name;
-                        If PourOwner.Net <> Nil Then OwnerNet := PourOwner.Net.Name;
-                    End;
-                End;
-                If Trace Then LmTrace(IntToStr(Idx) + ' common');
-                Common := ',"layer":"' + GetLayerString(Obj.Layer)
-                    + '","net":"' + EscapeJsonString(LmNetName(Obj))
-                    + '","comp":"' + EscapeJsonString(LmOwner(Obj))
-                    + '","keepout":' + BoolToJsonStr(Keepout)
-                    + ',"in_polygon":' + BoolToJsonStr(InPoly)
-                    + ',"pour":"' + EscapeJsonString(OwnerName)
-                    + '","pour_net":"' + EscapeJsonString(OwnerNet) + '"}';
-                Entry := '';
-                If Obj.ObjectId = eTrackObject Then
-                Begin
-                    Track := Obj;
-                    Entry := '{"k":"track","v":[' + IntToStr(Track.X1) + ',' + IntToStr(Track.Y1)
-                        + ',' + IntToStr(Track.X2) + ',' + IntToStr(Track.Y2) + ','
-                        + IntToStr(Track.Width) + ']' + Common;
-                End;
-                If Obj.ObjectId = eArcObject Then
-                Begin
-                    Arc := Obj;
-                    Entry := '{"k":"arc","v":[' + IntToStr(Arc.XCenter) + ',' + IntToStr(Arc.YCenter)
-                        + ',' + IntToStr(Arc.Radius) + ',' + FloatToJsonStr(Arc.StartAngle)
-                        + ',' + FloatToJsonStr(Arc.EndAngle) + ',' + IntToStr(Arc.LineWidth) + ']'
-                        + Common;
-                End;
-                If Obj.ObjectId = eViaObject Then
-                Begin
-                    Via := Obj;
-                    If Trace Then LmTrace(IntToStr(Idx) + ' via sizes');
-                    { Size per spanned signal layer. Where Altium removed an  }
-                    { unconnected pad the size falls to the hole, and the    }
-                    { clearance there is measured from the barrel.            }
-                    Sizes := '';
-                    For I := 0 To SigLayers.Count - 1 Do
-                    Begin
-                        Lyr := StrToIntDef(SigLayers[I], 0);
-                        If Via.IntersectLayer(Lyr) Then
-                        Begin
-                            If Sizes <> '' Then Sizes := Sizes + ',';
-                            Sizes := Sizes + '["' + GetLayerString(Lyr) + '",'
-                                + IntToStr(Via.SizeOnLayer(Lyr)) + ']';
-                        End;
-                    End;
-                    Entry := '{"k":"via","v":[' + IntToStr(Via.X) + ',' + IntToStr(Via.Y)
-                        + ',' + IntToStr(Via.Size) + ',' + IntToStr(Via.HoleSize) + ']'
-                        + ',"low":"' + GetLayerString(Via.LowLayer)
-                        + '","high":"' + GetLayerString(Via.HighLayer)
-                        + '","sizes":[' + Sizes + ']' + Common;
-                End;
-                If Obj.ObjectId = eRegionObject Then
-                Begin
-                    Region := Obj;
-                    If Trace Then LmTrace(IntToStr(Idx) + ' region shape');
-                    Entry := '{"k":"region","kind":' + IntToStr(Region.Kind)
-                        + ',"cutout":' + BoolToJsonStr(Region.Kind = eRegionKind_BoardCutout)
-                        + ',"copper":' + BoolToJsonStr(Region.Kind = eRegionKind_Copper)
-                        + ',' + LmRegionShape(Region) + Common;
-                End;
-                If Obj.ObjectId = eFillObject Then
-                Begin
-                    Fill := Obj;
-                    Entry := '{"k":"fill","v":[' + IntToStr(Fill.X1Location) + ','
-                        + IntToStr(Fill.Y1Location) + ',' + IntToStr(Fill.X2Location) + ','
-                        + IntToStr(Fill.Y2Location) + ',' + FloatToJsonStr(Fill.Rotation) + ']'
-                        + Common;
-                End;
-                If Obj.ObjectId = ePolyObject Then
-                Begin
-                    { A pour's BOUNDARY. The copper it pours is its own   }
-                    { regions and tracks, which arrive flagged in_polygon.  }
-                    Poly := Obj;
-                    If Trace Then LmTrace(IntToStr(Idx) + ' polygon points');
-                    PolyPts := '';
-                    For I := 0 To Poly.PointCount - 1 Do
-                    Begin
-                        Seg := Poly.Segments[I];
-                        If PolyPts <> '' Then PolyPts := PolyPts + ',';
-                        If Seg.Kind = ePolySegmentLine Then
-                        Begin
-                            PolyPts := PolyPts + '[' + IntToStr(Seg.vx) + ',' + IntToStr(Seg.vy) + ']';
-                        End
-                        Else
-                        Begin
-                            PolyPts := PolyPts + '[' + IntToStr(Seg.vx) + ',' + IntToStr(Seg.vy)
-                                + ',' + IntToStr(Seg.cx) + ',' + IntToStr(Seg.cy) + ','
-                                + IntToStr(Seg.Radius) + ',' + FloatToJsonStr(Seg.Angle1) + ','
-                                + FloatToJsonStr(Seg.Angle2) + ']';
-                        End;
-                    End;
-                    Entry := '{"k":"polygon","name":"' + EscapeJsonString(Poly.Name)
-                        + '","pour_over":' + BoolToJsonStr(Poly.PourOver <> ePolygonPourOver_None)
-                        + ',"pts":[' + PolyPts + ']' + Common;
-                End;
-                If Entry <> '' Then
-                Begin
-                    If Items <> '' Then Items := Items + ',';
-                    Items := Items + Entry;
-                End;
-                Inc(Emitted);
-            End;
-            Inc(Idx);
-            Obj := Iter.NextPCBObject;
-        End;
-    Finally
-        Board.BoardIterator_Destroy(Iter);
+    { One pass per kind asked for, in the order given; no kinds is ONE pass  }
+    { over every kind, so the unnarrowed read keeps its order and paging.    }
+    Passes := TStringList.Create;
+    Rest := Kinds;
+    While Rest <> '' Do
+    Begin
+        Kind := LmNextKind(Rest);
+        If Kind <> '' Then Passes.Add(Kind);
     End;
+    If Passes.Count = 0 Then Passes.Add('all');
+    For P := 0 To Passes.Count - 1 Do
+    Begin
+        If More Then Break;
+        Iter := Board.BoardIterator_Create;
+        Try
+            { One object type per pass; 'all' is the unnarrowed read. A read of }
+            { polygons then never walks the tracks: on a 10,000-object board the }
+            { pours came last, and a reader that wanted them read everything.    }
+            Kind := Trim(Passes[P]);
+            If Kind = 'track' Then Iter.AddFilter_ObjectSet(MkSet(eTrackObject))
+            Else If Kind = 'arc' Then Iter.AddFilter_ObjectSet(MkSet(eArcObject))
+            Else If Kind = 'via' Then Iter.AddFilter_ObjectSet(MkSet(eViaObject))
+            Else If Kind = 'region' Then Iter.AddFilter_ObjectSet(MkSet(eRegionObject))
+            Else If Kind = 'fill' Then Iter.AddFilter_ObjectSet(MkSet(eFillObject))
+            Else If Kind = 'polygon' Then Iter.AddFilter_ObjectSet(MkSet(ePolyObject))
+            Else
+                Iter.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, eViaObject,
+                    eRegionObject, eFillObject, ePolyObject));
+            { The legacy layer set stops at Mechanical16: the V7 set reaches  }
+            { every mechanical layer (issue #149). A layer the legacy set     }
+            { cannot hold gets a V7 set of its own, so the board hands out    }
+            { that layer only; the match by name below stays as a guard.      }
+            Wide := (OnLayer <> eNoLayer) And (GetLayerString(OnLayer) = 'Unknown');
+            If (OnLayer <> eNoLayer) And Not Wide Then
+                Iter.AddFilter_LayerSet(MkSet(OnLayer))
+            Else If Wide Then
+            Begin
+                OneLayer := LayerSet.CreateLayerSet;
+                OneLayer.Include(OnLayer);
+                Iter.AddFilter_IPCB_LayerSet(OneLayer);
+            End
+            Else
+                Iter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
+            Iter.AddFilter_Method(eProcessAll);
+            Obj := Iter.FirstPCBObject;
+            While Obj <> Nil Do
+            Begin
+                { Selected only: an object not selected is not counted either, }
+                { so offset and limit page through the selection itself.       }
+                Wanted := True;
+                If SelectedOnly Then
+                Begin
+                    Wanted := False;
+                    Try Wanted := Obj.Selected; Except Wanted := False; End;
+                End;
+                If Wanted And Wide Then
+                Begin
+                    Try Wanted := LayerDisplayName(Obj.Layer) = LayerDisplayName(OnLayer);
+                    Except Wanted := False; End;
+                End;
+                If Wanted Then
+                Begin
+                    If Idx >= Offset Then
+                    Begin
+                        If Emitted >= Limit Then
+                        Begin
+                            More := True;
+                            Break;
+                        End;
+                        If Trace Then LmTrace(IntToStr(Idx) + ' kind=' + IntToStr(Obj.ObjectId) + ' flags');
+                        Keepout := False;
+                        Try Keepout := Obj.IsKeepout; Except Keepout := False; End;
+                        InPoly := False;
+                        Try InPoly := Obj.InPolygon; Except InPoly := False; End;
+                        { Poured copper carries no net of its own: the pour that   }
+                        { made it does. Name it here so the reader need not guess  }
+                        { the owner from geometry, which fails on nested pours.    }
+                        OwnerName := '';
+                        OwnerNet := '';
+                        If InPoly Then
+                        Begin
+                            If Trace Then LmTrace(IntToStr(Idx) + ' owner');
+                            PourOwner := Obj.Polygon;
+                            If PourOwner <> Nil Then
+                            Begin
+                                OwnerName := PourOwner.Name;
+                                If PourOwner.Net <> Nil Then OwnerNet := PourOwner.Net.Name;
+                            End;
+                        End;
+                        If Trace Then LmTrace(IntToStr(Idx) + ' common');
+                        Common := ',"layer":"' + LayerDisplayName(Obj.Layer)
+                            + '","net":"' + EscapeJsonString(LmNetName(Obj))
+                            + '","comp":"' + EscapeJsonString(LmOwner(Obj))
+                            + '","keepout":' + BoolToJsonStr(Keepout)
+                            + ',"in_polygon":' + BoolToJsonStr(InPoly)
+                            + ',"pour":"' + EscapeJsonString(OwnerName)
+                            + '","pour_net":"' + EscapeJsonString(OwnerNet) + '"}';
+                        Entry := '';
+                        If Obj.ObjectId = eTrackObject Then
+                        Begin
+                            Track := Obj;
+                            Entry := '{"k":"track","v":[' + IntToStr(Track.X1) + ',' + IntToStr(Track.Y1)
+                                + ',' + IntToStr(Track.X2) + ',' + IntToStr(Track.Y2) + ','
+                                + IntToStr(Track.Width) + ']' + Common;
+                        End;
+                        If Obj.ObjectId = eArcObject Then
+                        Begin
+                            Arc := Obj;
+                            Entry := '{"k":"arc","v":[' + IntToStr(Arc.XCenter) + ',' + IntToStr(Arc.YCenter)
+                                + ',' + IntToStr(Arc.Radius) + ',' + FloatToJsonStr(Arc.StartAngle)
+                                + ',' + FloatToJsonStr(Arc.EndAngle) + ',' + IntToStr(Arc.LineWidth) + ']'
+                                + Common;
+                        End;
+                        If Obj.ObjectId = eViaObject Then
+                        Begin
+                            Via := Obj;
+                            If Trace Then LmTrace(IntToStr(Idx) + ' via sizes');
+                            { Size per spanned signal layer. Where Altium removed an  }
+                            { unconnected pad the size falls to the hole, and the    }
+                            { clearance there is measured from the barrel.            }
+                            Sizes := '';
+                            For I := 0 To SigLayers.Count - 1 Do
+                            Begin
+                                Lyr := StrToIntDef(SigLayers[I], 0);
+                                If Via.IntersectLayer(Lyr) Then
+                                Begin
+                                    If Sizes <> '' Then Sizes := Sizes + ',';
+                                    Sizes := Sizes + '["' + GetLayerString(Lyr) + '",'
+                                        + IntToStr(Via.SizeOnLayer(Lyr)) + ']';
+                                End;
+                            End;
+                            Entry := '{"k":"via","v":[' + IntToStr(Via.X) + ',' + IntToStr(Via.Y)
+                                + ',' + IntToStr(Via.Size) + ',' + IntToStr(Via.HoleSize) + ']'
+                                + ',"low":"' + GetLayerString(Via.LowLayer)
+                                + '","high":"' + GetLayerString(Via.HighLayer)
+                                + '","sizes":[' + Sizes + ']' + LmMaskJson(Via) + Common;
+                        End;
+                        If Obj.ObjectId = eRegionObject Then
+                        Begin
+                            Region := Obj;
+                            If Trace Then LmTrace(IntToStr(Idx) + ' region shape');
+                            Entry := '{"k":"region","kind":' + IntToStr(Region.Kind)
+                                + ',"cutout":' + BoolToJsonStr(Region.Kind = eRegionKind_BoardCutout)
+                                + ',"copper":' + BoolToJsonStr(Region.Kind = eRegionKind_Copper)
+                                + ',' + LmRegionShape(Region) + Common;
+                        End;
+                        If Obj.ObjectId = eFillObject Then
+                        Begin
+                            Fill := Obj;
+                            Entry := '{"k":"fill","v":[' + IntToStr(Fill.X1Location) + ','
+                                + IntToStr(Fill.Y1Location) + ',' + IntToStr(Fill.X2Location) + ','
+                                + IntToStr(Fill.Y2Location) + ',' + FloatToJsonStr(Fill.Rotation) + ']'
+                                + Common;
+                        End;
+                        If Obj.ObjectId = ePolyObject Then
+                        Begin
+                            { A pour's BOUNDARY. The copper it pours is its own   }
+                            { regions and tracks, which arrive flagged in_polygon.  }
+                            Poly := Obj;
+                            If Trace Then LmTrace(IntToStr(Idx) + ' polygon points');
+                            PolyPts := '';
+                            For I := 0 To Poly.PointCount - 1 Do
+                            Begin
+                                Seg := Poly.Segments[I];
+                                If PolyPts <> '' Then PolyPts := PolyPts + ',';
+                                If Seg.Kind = ePolySegmentLine Then
+                                Begin
+                                    PolyPts := PolyPts + '[' + IntToStr(Seg.vx) + ',' + IntToStr(Seg.vy) + ']';
+                                End
+                                Else
+                                Begin
+                                    PolyPts := PolyPts + '[' + IntToStr(Seg.vx) + ',' + IntToStr(Seg.vy)
+                                        + ',' + IntToStr(Seg.cx) + ',' + IntToStr(Seg.cy) + ','
+                                        + IntToStr(Seg.Radius) + ',' + FloatToJsonStr(Seg.Angle1) + ','
+                                        + FloatToJsonStr(Seg.Angle2) + ']';
+                                End;
+                            End;
+                            Entry := '{"k":"polygon","name":"' + EscapeJsonString(Poly.Name)
+                                + '","pour_over":' + BoolToJsonStr(Poly.PourOver <> ePolygonPourOver_None)
+                                + ',"pts":[' + PolyPts + ']' + Common;
+                        End;
+                        If Entry <> '' Then
+                        Begin
+                            If Items <> '' Then Items := Items + ',';
+                            Items := Items + Entry;
+                        End;
+                        Inc(Emitted);
+                    End;
+                    Inc(Idx);
+                End;
+                Obj := Iter.NextPCBObject;
+            End;
+        Finally
+            Board.BoardIterator_Destroy(Iter);
+        End;
+    End;
+    Passes.Free;
     SigLayers.Free;
     Body := '"copper":[' + Items + '],"offset":' + IntToStr(Offset)
         + ',"count":' + IntToStr(Emitted) + ',"more":' + BoolToJsonStr(More);
@@ -23222,6 +24734,8 @@ Var
     Board : IPCB_Board;
     Section, Body, Response : String;
     Offset, Limit : Integer;
+    Kinds, KindList, KindOne, LayerStr, Bad : String;
+    OnLayer : TLayer;
 Begin
     Board := GetPCBBoardAnywhere(0);
     If Board = Nil Then
@@ -23241,8 +24755,46 @@ Begin
     If Section = 'components' Then Body := LmComponentsSection(Board);
     If Section = 'pads' Then Body := LmPadsSection(Board, Offset, Limit);
     If Section = 'copper' Then
+    Begin
+        { kinds, layer and selected narrow the copper read. A kind or layer }
+        { not known is refused, not dropped: a typo must not read as "none".}
+        Kinds := LowerCase(Trim(ExtractJsonValue(Params, 'kinds')));
+        KindList := '';
+        Bad := '';
+        While Kinds <> '' Do
+        Begin
+            KindOne := LmNextKind(Kinds);
+            If KindOne = '' Then Continue;
+            If LmCopperKindKnown(KindOne) Then
+            Begin
+                If KindList <> '' Then KindList := KindList + ',';
+                KindList := KindList + KindOne;
+            End
+            Else
+                Bad := Bad + ' ' + KindOne;
+        End;
+        If Bad <> '' Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'BAD_KINDS',
+                'kinds takes track, arc, via, region, fill, polygon; got' + Bad);
+            Exit;
+        End;
+        OnLayer := eNoLayer;
+        LayerStr := Trim(ExtractJsonValue(Params, 'layer'));
+        If LayerStr <> '' Then
+        Begin
+            OnLayer := ResolveLayerId(Board, LayerStr);
+            If OnLayer = eNoLayer Then
+            Begin
+                Result := BuildErrorResponse(RequestId, 'UNKNOWN_LAYER',
+                    'Unknown layer name: ' + LayerStr + '. ' + BoardLayerNamesHint(Board));
+                Exit;
+            End;
+        End;
         Body := LmCopperSection(Board, Offset, Limit,
-            LowerCase(ExtractJsonValue(Params, 'trace')) = 'true');
+            LowerCase(ExtractJsonValue(Params, 'trace')) = 'true', KindList, OnLayer,
+            LowerCase(ExtractJsonValue(Params, 'selected')) = 'true');
+    End;
     If Section = 'rules' Then Body := LmRulesSection(Board);
     If Section = 'classes' Then Body := LmClassesSection(Board);
 
@@ -23368,6 +24920,660 @@ Begin
 End;
 
 {..............................................................................}
+{ PCB_MakeLibrary - make a PCB library of every footprint on a board, as      }
+{ Design > Make PCB Library does (PCB:BuildPCBLibrary), and save it.          }
+{ MEASURED on AD 26.11.1.5: no dialog; the process opens an unsaved library   }
+{ named after the board (a digit added when the name is taken) and leaves an  }
+{ empty file of that name on disk until the library is saved.                 }
+{ Params: board_path (optional), out_path (optional, default the name Altium  }
+{ chose), add_to_project (to the board's project).                            }
+{..............................................................................}
+Function PCB_MakeLibrary(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Why, BoardPath, OutPath, MadePath, SavePath, Names, FpName : String;
+    BoardDoc, LibDoc : IServerDocument;
+    Doc : IDocument;
+    Workspace : IWorkspace;
+    Project : IProject;
+    PcbLib : IPCB_Library;
+    Iter : IPCB_LibraryIterator;
+    Fp : IPCB_LibComponent;
+    Count : Integer;
+    AddIt, Saved, Added, ProjSaved : Boolean;
+Begin
+    OutPath := ExtractJsonValue(Params, 'out_path');
+    AddIt := LowerCase(ExtractJsonValue(Params, 'add_to_project')) = 'true';
+    Board := GeoMapBoard(Params, Why);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', Why);
+        Exit;
+    End;
+    BoardPath := Board.FileName;
+    If OutPath <> '' Then
+    Begin
+        LibDoc := Nil;
+        Try LibDoc := Client.GetDocumentByPath(OutPath); Except LibDoc := Nil; End;
+        If LibDoc <> Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'TARGET_OPEN',
+                OutPath + ' is open in Altium. Close it or pick another out_path.');
+            Exit;
+        End;
+        If FileExists(OutPath) Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'TARGET_EXISTS',
+                OutPath + ' exists. Pick another out_path; nothing was made.');
+            Exit;
+        End;
+    End;
+    BoardDoc := Nil;
+    Try BoardDoc := Client.GetDocumentByPath(BoardPath); Except BoardDoc := Nil; End;
+    If BoardDoc = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_OPEN',
+            'The board ' + BoardPath + ' has no open document');
+        Exit;
+    End;
+    Try BoardDoc.Focus; Except End;
+    ResetParameters;
+    AddStringParameter('AddLibraryToProject', 'False');
+    RunProcess('PCB:BuildPCBLibrary');
+
+    MadePath := '';
+    Workspace := GetWorkspace;
+    If Workspace <> Nil Then
+    Begin
+        Doc := Workspace.DM_FocusedDocument;
+        If Doc <> Nil Then Try MadePath := Doc.DM_FullPath; Except End;
+    End;
+    If (UpperCase(ExtractFileExt(MadePath)) <> '.PCBLIB')
+        Or (UpperCase(MadePath) = UpperCase(BoardPath)) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_MADE',
+            'Make PCB Library opened no library (focused: ' + MadePath + ')');
+        Exit;
+    End;
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    Count := 0;
+    Names := '';
+    If PcbLib <> Nil Then
+    Begin
+        Iter := PcbLib.LibraryIterator_Create;
+        Try
+            Fp := Iter.FirstPCBObject;
+            While Fp <> Nil Do
+            Begin
+                FpName := '';
+                Try FpName := Fp.Name; Except End;
+                If Count > 0 Then Names := Names + ',';
+                Names := Names + '"' + EscapeJsonString(FpName) + '"';
+                Inc(Count);
+                Fp := Iter.NextPCBObject;
+            End;
+        Finally
+            PcbLib.LibraryIterator_Destroy(Iter);
+        End;
+    End;
+
+    SavePath := MadePath;
+    If OutPath <> '' Then SavePath := OutPath;
+    Saved := False;
+    LibDoc := Nil;
+    Try LibDoc := Client.GetDocumentByPath(MadePath); Except LibDoc := Nil; End;
+    If LibDoc <> Nil Then
+    Begin
+        Try LibDoc.SetFileName(SavePath); Except End;
+        Try
+            LibDoc.SetModified(True);
+            LibDoc.DoFileSave('');
+        Except End;
+        Saved := FileExists(SavePath);
+    End;
+
+    Added := False;
+    ProjSaved := False;
+    If AddIt And Saved Then
+    Begin
+        Project := ProjectHoldingDoc(BoardPath);
+        If Project <> Nil Then
+        Begin
+            Try
+                Project.DM_AddSourceDocument(SavePath);
+                Added := True;
+            Except Added := False; End;
+            If Added Then ProjSaved := SaveProjectFile(Project);
+        End;
+    End;
+
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonStr('board', BoardPath) + ','
+        + JsonStr('made_as', MadePath) + ','
+        + JsonStr('library', SavePath) + ','
+        + JsonBool('saved', Saved) + ','
+        + JsonInt('footprint_count', Count) + ','
+        + JsonRaw('footprints', '[' + Names + ']') + ','
+        + JsonBool('added_to_project', Added) + ','
+        + JsonBool('project_saved', ProjSaved)));
+End;
+
+{ The templates of a pad/via library, as a JSON array.                      }
+Function PadViaTemplatesJson(PvLib : IPCB_PadViaLibrary) : String;
+Var
+    T : IPCB_PadViaTemplate;
+    I, N : Integer;
+    Name, Descr, TemplateIdStr : String;
+    LinkCount : Integer;
+Begin
+    Result := '';
+    If PvLib = Nil Then Exit;
+    N := 0;
+    Try N := PvLib.GetState_Count; Except N := 0; End;
+    For I := 0 To N - 1 Do
+    Begin
+        T := Nil;
+        Try T := PvLib.GetState_Template(I); Except T := Nil; End;
+        If T = Nil Then Continue;
+        Name := ''; Descr := ''; TemplateIdStr := ''; LinkCount := 0;
+        Try Name := T.GetState_TemplateName; Except End;
+        Try Descr := T.GetState_TemplateDescription; Except End;
+        Try TemplateIdStr := T.GetFullTemplateID; Except End;
+        Try LinkCount := T.GetState_PrimLinkCount; Except End;
+        If Result <> '' Then Result := Result + ',';
+        Result := Result + '{"name":"' + EscapeJsonString(Name) + '","description":"'
+            + EscapeJsonString(Descr) + '","id":"' + EscapeJsonString(TemplateIdStr)
+            + '","used_by":' + IntToStr(LinkCount) + '}';
+    End;
+End;
+
+{ The installed pad/via libraries and their templates, as a JSON array.    }
+Function InstalledPadViaLibrariesJson(Dummy : Integer) : String;
+Var
+    Mgr : IPCB_PadViaLibraryManager;
+    PvLib : IPCB_PadViaLibrary;
+    I, N : Integer;
+    Name, Path : String;
+Begin
+    Result := '';
+    Mgr := Nil;
+    Try Mgr := PCBServer.GetState_PadViaLibraryManager; Except Mgr := Nil; End;
+    If Mgr = Nil Then Exit;
+    N := 0;
+    Try N := Mgr.GetInstalledLibraryCount; Except N := 0; End;
+    For I := 0 To N - 1 Do
+    Begin
+        PvLib := Nil;
+        Try PvLib := Mgr.GetInstalledLibrary(I); Except PvLib := Nil; End;
+        If PvLib = Nil Then Continue;
+        Name := ''; Path := '';
+        Try Name := PvLib.GetState_LibraryName; Except End;
+        Try Path := PvLib.GetState_LibraryPath; Except End;
+        If Result <> '' Then Result := Result + ',';
+        Result := Result + '{"name":"' + EscapeJsonString(Name) + '","path":"'
+            + EscapeJsonString(Path) + '","templates":[' + PadViaTemplatesJson(PvLib) + ']}';
+    End;
+End;
+
+{..............................................................................}
+{ PCB_GetPadViaLibrary - the pad and via templates a board holds in its own   }
+{ library, and the installed pad/via libraries (.PvLib) with theirs.          }
+{ Params: board_path (optional).                                             }
+{..............................................................................}
+Function PCB_GetPadViaLibrary(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Why, LibPath : String;
+    PvLib : IPCB_PadViaLibrary;
+    ServerDoc : IServerDocument;
+    PvDoc : IPCB_PadViaLibraryDocument;
+Begin
+    LibPath := ExtractJsonValue(Params, 'library_path');
+    If LibPath <> '' Then
+    Begin
+        ResetParameters;
+        AddStringParameter('ObjectKind', 'Document');
+        AddStringParameter('FileName', LibPath);
+        RunProcess('WorkspaceManager:OpenObject');
+        ServerDoc := Nil;
+        Try ServerDoc := Client.GetDocumentByPath(LibPath); Except ServerDoc := Nil; End;
+        PvLib := Nil;
+        If ServerDoc <> Nil Then
+            Try
+                PvDoc := ServerDoc;
+                PvLib := PvDoc.GetState_PadViaLibrary;
+            Except PvLib := Nil; End;
+        If PvLib = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'NO_PADVIA_LIBRARY',
+                'No pad/via library opened at ' + LibPath);
+            Exit;
+        End;
+        Result := BuildSuccessResponse(RequestId, JsonObj(
+            JsonStr('library', LibPath) + ','
+            + JsonRaw('templates', '[' + PadViaTemplatesJson(PvLib) + ']') + ','
+            + JsonRaw('installed_libraries', '[' + InstalledPadViaLibrariesJson(0) + ']')));
+        Exit;
+    End;
+    Board := GeoMapBoard(Params, Why);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', Why);
+        Exit;
+    End;
+    PvLib := Nil;
+    Try PvLib := Board.GetState_PadViaLibrary; Except PvLib := Nil; End;
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonStr('board', Board.FileName) + ','
+        + JsonRaw('board_templates', '[' + PadViaTemplatesJson(PvLib) + ']') + ','
+        + JsonRaw('installed_libraries', '[' + InstalledPadViaLibrariesJson(0) + ']')));
+End;
+
+{..............................................................................}
+{ PCB_AddPadViaTemplate - make a template in the board's pad/via library from  }
+{ a via (at x, y) or a pad (component designator and pad name) on the board.  }
+{ Altium names the template from the object's sizes.                          }
+{ Params: board_path (optional), x and y (mil, a via), or component and pad.  }
+{..............................................................................}
+Function PCB_AddPadViaTemplate(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Why, CompDes, PadName, XStr, YStr, Got : String;
+    PvLib : IPCB_PadViaLibrary;
+    Iter : IPCB_BoardIterator;
+    GrpIter : IPCB_GroupIterator;
+    Obj, Found : IPCB_Primitive;
+    Comp : IPCB_Component;
+    Pad : IPCB_Pad;
+    Via : IPCB_Via;
+    TX, TY, Tol : Integer;
+    Before, After, Matches : Integer;
+Begin
+    Board := GeoMapBoard(Params, Why);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', Why);
+        Exit;
+    End;
+    PvLib := Nil;
+    Try PvLib := Board.GetState_PadViaLibrary; Except PvLib := Nil; End;
+    If PvLib = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PADVIA_LIBRARY',
+            'The board gave no pad/via library');
+        Exit;
+    End;
+    CompDes := ExtractJsonValue(Params, 'component');
+    PadName := ExtractJsonValue(Params, 'pad');
+    XStr := ExtractJsonValue(Params, 'x');
+    YStr := ExtractJsonValue(Params, 'y');
+    Found := Nil;
+    Matches := 0;
+    Got := '';
+    If CompDes <> '' Then
+    Begin
+        Comp := FindPCBComponentByDesignator(Board, CompDes);
+        If Comp = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'NO_COMPONENT', 'No component ' + CompDes);
+            Exit;
+        End;
+        GrpIter := Comp.GroupIterator_Create;
+        Try
+            GrpIter.AddFilter_ObjectSet(MkSet(ePadObject));
+            Obj := GrpIter.FirstPCBObject;
+            While Obj <> Nil Do
+            Begin
+                Pad := Obj;
+                If (Pad.Name = PadName) And (Found = Nil) Then Found := Obj;
+                Obj := GrpIter.NextPCBObject;
+            End;
+        Finally
+            Comp.GroupIterator_Destroy(GrpIter);
+        End;
+        Got := 'pad ' + CompDes + '.' + PadName;
+        If Found <> Nil Then Matches := 1;
+    End
+    Else
+    Begin
+        If (XStr = '') Or (YStr = '') Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'MISSING_PARAM',
+                'Give x and y of a via, or component and pad');
+            Exit;
+        End;
+        TX := Board.XOrigin + MilsToCoordF(StrToFloatDef(XStr, 0));
+        TY := Board.YOrigin + MilsToCoordF(StrToFloatDef(YStr, 0));
+        Tol := MilsToCoord(1);
+        Iter := Board.BoardIterator_Create;
+        Try
+            Iter.AddFilter_ObjectSet(MkSet(eViaObject));
+            Iter.AddFilter_LayerSet(AllLayers);
+            Iter.AddFilter_Method(eProcessAll);
+            Obj := Iter.FirstPCBObject;
+            While Obj <> Nil Do
+            Begin
+                Via := Obj;
+                If (Abs(Via.X - TX) <= Tol) And (Abs(Via.Y - TY) <= Tol) Then
+                Begin
+                    Inc(Matches);
+                    Found := Obj;
+                End;
+                Obj := Iter.NextPCBObject;
+            End;
+        Finally
+            Board.BoardIterator_Destroy(Iter);
+        End;
+        Got := 'via at ' + XStr + ', ' + YStr;
+    End;
+    If Found = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_FOUND', 'No ' + Got + ' on the board');
+        Exit;
+    End;
+    If Matches > 1 Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'AMBIGUOUS',
+            IntToStr(Matches) + ' vias sit there; nothing was added');
+        Exit;
+    End;
+    Before := 0;
+    Try Before := PvLib.GetState_Count; Except End;
+    PcbBeginEdit(0);
+    Try
+        PvLib.AddTemplateByPrimitive(Found);
+    Finally
+        PcbEndEdit(0);
+    End;
+    After := 0;
+    Try After := PvLib.GetState_Count; Except End;
+    If After > Before Then MarkDocDirtyByPath(Board.FileName);
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonStr('board', Board.FileName) + ','
+        + JsonStr('from', Got) + ','
+        + JsonInt('templates_before', Before) + ','
+        + JsonInt('templates_after', After) + ','
+        + JsonRaw('board_templates', '[' + PadViaTemplatesJson(PvLib) + ']')));
+End;
+
+{..............................................................................}
+{ PCB_MakePadViaLibrary - write the templates in a board's own pad/via        }
+{ library to a new pad/via library file (.PvLib): a new PvLib document, each  }
+{ template copied into it, then saved.                                        }
+{ Params: board_path (optional), out_path (required).                       }
+{..............................................................................}
+Function PCB_MakePadViaLibrary(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Why, OutPath : String;
+    BoardLib, DestLib : IPCB_PadViaLibrary;
+    T : IPCB_PadViaTemplate;
+    ServerDoc : IServerDocument;
+    PvDoc : IPCB_PadViaLibraryDocument;
+    I, N, Copied, Before : Integer;
+    Saved : Boolean;
+Begin
+    OutPath := ExtractJsonValue(Params, 'out_path');
+    If OutPath = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'out_path is required');
+        Exit;
+    End;
+    ServerDoc := Nil;
+    Try ServerDoc := Client.GetDocumentByPath(OutPath); Except ServerDoc := Nil; End;
+    If (ServerDoc <> Nil) Or FileExists(OutPath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'TARGET_EXISTS',
+            OutPath + ' exists or is open. Pick another out_path; nothing was made.');
+        Exit;
+    End;
+    Board := GeoMapBoard(Params, Why);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', Why);
+        Exit;
+    End;
+    BoardLib := Nil;
+    Try BoardLib := Board.GetState_PadViaLibrary; Except BoardLib := Nil; End;
+    N := 0;
+    If BoardLib <> Nil Then Try N := BoardLib.GetState_Count; Except N := 0; End;
+    If N = 0 Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_TEMPLATES',
+            'The board holds no pad or via templates; add one with pcb_add_pad_via_template');
+        Exit;
+    End;
+    ServerDoc := Client.OpenNewDocument('PVLIB', OutPath, ExtractFileName(OutPath), False);
+    If ServerDoc = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'CREATE_FAILED', 'Altium made no PvLib document');
+        Exit;
+    End;
+    DestLib := Nil;
+    Try
+        PvDoc := ServerDoc;
+        DestLib := PvDoc.GetState_PadViaLibrary;
+    Except DestLib := Nil; End;
+    If DestLib = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PADVIA_LIBRARY',
+            'The new PvLib document gave no library to add to');
+        Exit;
+    End;
+    { MEASURED on AD 26.11.1.5: AddExternalTemplate copies a template into  }
+    { another library and the copy is saved; AddTemplate with a template     }
+    { adds nothing. A new PvLib starts with one default template of its own. }
+    Before := 0;
+    Try Before := DestLib.GetState_Count; Except End;
+    For I := 0 To N - 1 Do
+    Begin
+        T := Nil;
+        Try T := BoardLib.GetState_Template(I); Except T := Nil; End;
+        If T <> Nil Then Try DestLib.AddExternalTemplate(T); Except End;
+    End;
+    Copied := 0;
+    Try Copied := DestLib.GetState_Count - Before; Except Copied := 0; End;
+    Saved := False;
+    Try ServerDoc.SetFileName(OutPath); Except End;
+    Try
+        ServerDoc.SetModified(True);
+        ServerDoc.DoFileSave('');
+    Except End;
+    Saved := FileExists(OutPath);
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonStr('board', Board.FileName) + ','
+        + JsonStr('library', OutPath) + ','
+        + JsonInt('board_templates', N) + ','
+        + JsonInt('copied', Copied) + ','
+        + JsonBool('saved', Saved) + ','
+        + JsonRaw('templates', '[' + PadViaTemplatesJson(DestLib) + ']')));
+End;
+
+{ A part's designator as the resize tool reads it: layer, height, stroke,  }
+{ angle, mirrored, stroke font, visible, and the middle of its box.         }
+Function DesignatorLabelJson(Board : IPCB_Board; Comp : IPCB_Component) : String;
+Var
+    DesText : IPCB_Text;
+    Box : TCoordRect;
+Begin
+    DesText := Nil;
+    Try DesText := Comp.Name; Except DesText := Nil; End;
+    If DesText = Nil Then
+    Begin
+        Result := JsonRaw('label', 'null');
+        Exit;
+    End;
+    Box := DesText.BoundingRectangle;
+    Result := JsonRaw('label', JsonObj(JsonStr('layer', GetLayerString(DesText.Layer))
+        + ',' + JsonRaw('height_mils', FloatToJsonStr(CoordToMilsF(DesText.Size)))
+        + ',' + JsonRaw('stroke_mils', FloatToJsonStr(CoordToMilsF(DesText.Width)))
+        + ',' + JsonRaw('angle', FloatToJsonStr(DesText.Rotation))
+        + ',' + JsonBool('mirrored', DesText.MirrorFlag)
+        + ',' + JsonBool('stroke_font', Not DesText.UseTTFonts)
+        + ',' + JsonBool('visible', Comp.NameOn)
+        + ',' + JsonRaw('middle_mils', '['
+            + FloatToJsonStr(CoordToMilsF((Box.Left + Box.Right) Div 2 - Board.XOrigin)) + ','
+            + FloatToJsonStr(CoordToMilsF((Box.Bottom + Box.Top) Div 2 - Board.YOrigin)) + ']')));
+End;
+
+{..............................................................................}
+{ PCB_PartOutlines - each part's box without its designator and comment      }
+{ texts, which side it sits on, and its designator (DesignatorLabelJson).    }
+{ Params: board_path (optional), designators ('|' separated, empty for all). }
+{..............................................................................}
+Function PCB_PartOutlines(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Why, Only, Name, Rows : String;
+    Walk : IPCB_BoardIterator;
+    Comp : IPCB_Component;
+    Box : TCoordRect;
+Begin
+    Board := GeoMapBoard(Params, Why);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', Why);
+        Exit;
+    End;
+    Only := ExtractJsonValue(Params, 'designators');
+    Rows := '';
+    Walk := Board.BoardIterator_Create;
+    Try
+        Walk.AddFilter_ObjectSet(MkSet(eComponentObject));
+        Walk.AddFilter_LayerSet(AllLayers);
+        Walk.AddFilter_Method(eProcessAll);
+        Comp := Walk.FirstPCBObject;
+        While Comp <> Nil Do
+        Begin
+            Name := '';
+            Try Name := Comp.Name.Text; Except Name := ''; End;
+            If (Only = '') Or (Pos('|' + Name + '|', '|' + Only + '|') > 0) Then
+            Begin
+                Box := Comp.BoundingRectangleNoNameComment;
+                Rows := Rows + ',' + JsonObj(JsonStr('designator', Name)
+                    + ',' + JsonBool('bottom', Comp.Layer = eBottomLayer)
+                    + ',' + JsonRaw('box_mils', '['
+                        + FloatToJsonStr(CoordToMilsF(Box.Left - Board.XOrigin)) + ','
+                        + FloatToJsonStr(CoordToMilsF(Box.Bottom - Board.YOrigin)) + ','
+                        + FloatToJsonStr(CoordToMilsF(Box.Right - Board.XOrigin)) + ','
+                        + FloatToJsonStr(CoordToMilsF(Box.Top - Board.YOrigin)) + ']')
+                    + ',' + DesignatorLabelJson(Board, Comp));
+            End;
+            Comp := Walk.NextPCBObject;
+        End;
+    Finally
+        Board.BoardIterator_Destroy(Walk);
+    End;
+    Result := BuildSuccessResponse(RequestId, JsonObj(JsonStr('board', Board.FileName)
+        + ',' + JsonRaw('parts', '[' + Copy(Rows, 2, Length(Rows)) + ']')));
+End;
+
+{ Restyle one designator: shown, stroke font, height and stroke in mils,    }
+{ angle, mirror and, when LayerId is a layer, that layer; then centred on   }
+{ its part. True when the text reads back as asked.                        }
+Function RestyleDesignator(Comp : IPCB_Component; LayerId : Integer;
+    HeightMils, StrokeMils, Angle : Double; Mirrored : Boolean) : Boolean;
+Var
+    DesText : IPCB_Text;
+    Written : Boolean;
+Begin
+    Result := False;
+    DesText := Comp.Name;
+    If DesText = Nil Then Exit;
+    Written := True;
+    Try
+        Comp.BeginModify;
+        Comp.NameOn := True;
+        DesText.BeginModify;
+        DesText.UseTTFonts := False;
+        If LayerId <> eNoLayer Then DesText.Layer := LayerId;
+        DesText.Size := MilsToCoordF(HeightMils);
+        DesText.Width := MilsToCoordF(StrokeMils);
+        DesText.Rotation := Angle;
+        DesText.MirrorFlag := Mirrored;
+        DesText.EndModify;
+        Comp.ChangeNameAutoposition(eAutoPos_CenterCenter);
+        Comp.EndModify;
+    Except
+        Written := False;
+    End;
+    If Not Written Then Exit;
+    Result := Comp.NameOn And (DesText.MirrorFlag = Mirrored)
+        And (Abs(CoordToMilsF(DesText.Size) - HeightMils) < 0.01)
+        And (Abs(CoordToMilsF(DesText.Width) - StrokeMils) < 0.01)
+        And ((LayerId = eNoLayer) Or (DesText.Layer = LayerId));
+End;
+
+{..............................................................................}
+{ PCB_SetDesignatorTexts - restyle designators, one batch op per part:       }
+{ 'designator=..;height=<mil>;stroke=<mil>;angle=..;mirror=true|false;       }
+{ layer=..' (layer optional), ops separated by '~~'. Online DRC is off for  }
+{ the run. Each part is read back after its write.                          }
+{ Params: board_path (optional), ops.                                        }
+{..............................................................................}
+Function PCB_SetDesignatorTexts(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Why, Ops, Op, Name, OnLayer, Rows, Missing : String;
+    Comp : IPCB_Component;
+    LayerId, Held, Refused : Integer;
+    Height, Stroke : Double;
+    Ok, DrcWasOn : Boolean;
+Begin
+    Board := GeoMapBoard(Params, Why);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', Why);
+        Exit;
+    End;
+    Ops := ExtractJsonValue(Params, 'ops');
+    Rows := '';
+    Missing := '';
+    Held := 0;
+    Refused := 0;
+    DrcWasOn := False;
+    Try DrcWasOn := PCBServer.SystemOptions.DoOnlineDRC; Except End;
+    Try PCBServer.SystemOptions.DoOnlineDRC := False; Except End;
+    PcbBeginEdit(0);
+    Try
+        Op := NextBatchOp(Ops);
+        While Op <> '' Do
+        Begin
+            Name := GetBatchField(Op, 'designator');
+            Comp := FindPCBComponentByDesignator(Board, Name);
+            If Comp = Nil Then
+                Missing := Missing + ',"' + EscapeJsonString(Name) + '"'
+            Else
+            Begin
+                OnLayer := GetBatchField(Op, 'layer');
+                LayerId := eNoLayer;
+                If OnLayer <> '' Then LayerId := ResolveLayerId(Board, OnLayer);
+                Height := StrToFloatDef(GetBatchField(Op, 'height'), 0);
+                Stroke := StrToFloatDef(GetBatchField(Op, 'stroke'), 0);
+                Ok := (Height > 0) And (Stroke > 0) And ((OnLayer = '') Or (LayerId <> eNoLayer));
+                If Ok Then
+                    Ok := RestyleDesignator(Comp, LayerId, Height, Stroke,
+                        StrToFloatDef(GetBatchField(Op, 'angle'), 0),
+                        LowerCase(GetBatchField(Op, 'mirror')) = 'true');
+                If Ok Then Inc(Held) Else Inc(Refused);
+                Rows := Rows + ',' + JsonObj(JsonStr('designator', Name)
+                    + ',' + JsonBool('held', Ok) + ',' + DesignatorLabelJson(Board, Comp));
+            End;
+            Op := NextBatchOp(Ops);
+        End;
+    Finally
+        PcbEndEdit(0);
+        Try PCBServer.SystemOptions.DoOnlineDRC := DrcWasOn; Except End;
+    End;
+    Try Board.GraphicallyInvalidate; Except End;
+    If Held > 0 Then MarkDocDirtyByPath(Board.FileName);
+    Result := BuildSuccessResponse(RequestId, JsonObj(JsonStr('board', Board.FileName)
+        + ',' + JsonInt('held', Held) + ',' + JsonInt('refused', Refused)
+        + ',' + JsonRaw('missing', '[' + Copy(Missing, 2, Length(Missing)) + ']')
+        + ',' + JsonRaw('parts', '[' + Copy(Rows, 2, Length(Rows)) + ']')));
+End;
+
+{..............................................................................}
 { PCB_DumpFreePrimitives - Write every free primitive of the open board to a   }
 { tab-separated file, in board iterator order, for pcb_apply_geometry_map.     }
 {                                                                              }
@@ -23389,6 +25595,138 @@ End;
 { first line break.                                                            }
 {..............................................................................}
 
+{..............................................................................}
+{ The geometry map's walk, narrowed (dump_free_primitives).                    }
+{ Two sorts of filter. KINDS and LAYERS narrow the WALK itself: the apply pass }
+{ finds objects by their ordinal in that walk, so it reads the dump's W line   }
+{ and walks the same set. NETS, SELECTED, NAME and BOUNDS only decide which    }
+{ walked objects are written: the ordinals still count every walked object,   }
+{ so the apply needs nothing for them.                                         }
+{ GmKindsBad names the first kind the dump does not know; GmWants says whether }
+{ a kind is in the list (an empty list is every kind); GmWalkSet is the layer  }
+{ set of the listed layers, a V7 set so Mechanical17 and up are walked alone   }
+{ too (issue #155), or Nil for every layer; GmKeep and GmNameOk are the        }
+{ write filters.                                                               }
+{..............................................................................}
+
+Function GmKindsBad(Kinds : String) : String;
+Var
+    Rest, Kind : String;
+    Cut : Integer;
+Begin
+    Result := '';
+    Rest := Kinds;
+    While Rest <> '' Do
+    Begin
+        Cut := Pos(',', Rest);
+        If Cut > 0 Then
+        Begin
+            Kind := Trim(Copy(Rest, 1, Cut - 1));
+            Rest := Copy(Rest, Cut + 1, Length(Rest));
+        End
+        Else
+        Begin
+            Kind := Trim(Rest);
+            Rest := '';
+        End;
+        If (Kind <> '') And (Kind <> 'track') And (Kind <> 'arc') And (Kind <> 'via')
+            And (Kind <> 'text') And (Kind <> 'fill') And (Kind <> 'region')
+            And (Kind <> 'polygon') Then
+        Begin
+            Result := Kind;
+            Exit;
+        End;
+    End;
+End;
+
+Function GmWants(Kinds : String; Kind : String) : Boolean;
+Begin
+    Result := (Kinds = '') Or (Pos(',' + Kind + ',', ',' + Kinds + ',') > 0);
+End;
+
+Function GmWalkSet(Board : IPCB_Board; Layers : String; Var Bad : String) : IPCB_LayerSet;
+Var
+    Rest, Name : String;
+    Cut : Integer;
+    OnLayer : TLayer;
+Begin
+    Result := Nil;
+    Bad := '';
+    Rest := Trim(Layers);
+    If Rest = '' Then Exit;
+    Result := LayerSet.CreateLayerSet;
+    While Rest <> '' Do
+    Begin
+        Cut := Pos(',', Rest);
+        If Cut > 0 Then
+        Begin
+            Name := Trim(Copy(Rest, 1, Cut - 1));
+            Rest := Copy(Rest, Cut + 1, Length(Rest));
+        End
+        Else
+        Begin
+            Name := Trim(Rest);
+            Rest := '';
+        End;
+        If Name <> '' Then
+        Begin
+            OnLayer := ResolveLayerId(Board, Name);
+            If OnLayer = eNoLayer Then
+            Begin
+                Bad := Name;
+                Result := Nil;
+                Exit;
+            End;
+            Result.Include(OnLayer);
+        End;
+    End;
+End;
+
+Function GmNameOk(Name : String; Mask : String) : Boolean;
+Begin
+    Result := True;
+    If Mask = '' Then Exit;
+    If Copy(Mask, Length(Mask), 1) = '*' Then
+        Result := UpperCase(Copy(Name, 1, Length(Mask) - 1))
+            = UpperCase(Copy(Mask, 1, Length(Mask) - 1))
+    Else
+        Result := UpperCase(Name) = UpperCase(Mask);
+End;
+
+Function GmKeep(Prim : IPCB_Primitive; Nets : String; SelOnly : Boolean;
+    HasBox : Boolean; BX1, BY1, BX2, BY2 : TCoord) : Boolean;
+Var
+    NName : String;
+    Sel : Boolean;
+    BR : TCoordRect;
+Begin
+    Result := False;
+    If Nets <> '' Then
+    Begin
+        NName := '';
+        Try If Prim.Net <> Nil Then NName := Prim.Net.Name; Except NName := ''; End;
+        If NName = '' Then Exit;
+        If Pos(',' + UpperCase(NName) + ',', ',' + UpperCase(Nets) + ',') = 0 Then Exit;
+    End;
+    If SelOnly Then
+    Begin
+        Sel := False;
+        Try Sel := Prim.Selected; Except Sel := False; End;
+        If Not Sel Then Exit;
+    End;
+    If HasBox Then
+    Begin
+        Try
+            BR := Prim.BoundingRectangle;
+            If (BR.Right < BX1) Or (BR.Left > BX2) Or (BR.Top < BY1) Or (BR.Bottom > BY2) Then
+                Exit;
+        Except
+            Exit;
+        End;
+    End;
+    Result := True;
+End;
+
 Function PCB_DumpFreePrimitives(Params : String; RequestId : String) : String;
 Var
     Board : IPCB_Board;
@@ -23406,6 +25744,11 @@ Var
     Idx, Lyr, N, Holes, Cut, I, SC : Integer;
     NT, NA, NV, NX, NF, NR, NP, NO : Integer;
     BR : TCoordRect;
+    Kinds, LayerStr, Bad, Nets, NameMask, BoxStr, PName : String;
+    Walk : IPCB_LayerSet;
+    SelOnly, HasBox : Boolean;
+    BX1, BY1, BX2, BY2 : TCoord;
+    BoxV : TStringList;
 Begin
     OutPath := ExtractJsonValue(Params, 'out_path');
     If OutPath = '' Then
@@ -23422,210 +25765,326 @@ Begin
         Exit;
     End;
 
+    { Narrowed to kinds and one layer when asked: a caller that edits one   }
+    { layer's objects need not have the whole board dumped.                 }
+    Kinds := LowerCase(StringReplace(Trim(ExtractJsonValue(Params, 'kinds')), ' ', '', MkSet(rfReplaceAll)));
+    Bad := GmKindsBad(Kinds);
+    If Bad <> '' Then
+    Begin
+        Response := BuildErrorResponse(RequestId, 'BAD_KINDS', 'Unknown kind: ' + Bad
+            + '. Kinds are track, arc, via, text, fill, region, polygon.');
+        Result := Response;
+        Exit;
+    End;
+    { One layer or several, comma-separated. }
+    LayerStr := Trim(ExtractJsonValue(Params, 'layer'));
+    Walk := GmWalkSet(Board, LayerStr, Bad);
+    If Bad <> '' Then
+    Begin
+        Response := BuildErrorResponse(RequestId, 'UNKNOWN_LAYER',
+            'Unknown layer name: ' + Bad + '. ' + BoardLayerNamesHint(Board));
+        Result := Response;
+        Exit;
+    End;
+    { What is written of the walk: nets (comma-separated, an object with no }
+    { net is left out), the selection only, a polygon name (exact, or a     }
+    { prefix ending in *), and an area: x1,y1,x2,y2 in mils, objects whose  }
+    { box touches it.                                                       }
+    Nets := Trim(ExtractJsonValue(Params, 'nets'));
+    SelOnly := LowerCase(Trim(ExtractJsonValue(Params, 'selected'))) = 'true';
+    NameMask := Trim(ExtractJsonValue(Params, 'name'));
+    BoxStr := Trim(ExtractJsonValue(Params, 'bounds'));
+    HasBox := BoxStr <> '';
+    BX1 := 0; BY1 := 0; BX2 := 0; BY2 := 0;
+    If HasBox Then
+    Begin
+        BoxV := TStringList.Create;
+        Try
+            PName := BoxStr + ',';
+            While PName <> '' Do
+            Begin
+                BoxV.Add(Trim(Copy(PName, 1, Pos(',', PName) - 1)));
+                PName := Copy(PName, Pos(',', PName) + 1, Length(PName));
+            End;
+            If BoxV.Count <> 4 Then
+            Begin
+                Response := BuildErrorResponse(RequestId, 'BAD_BOUNDS',
+                    'bounds is x1,y1,x2,y2 in mils: ' + BoxStr);
+                Result := Response;
+                Exit;
+            End;
+            BX1 := MilsToCoordF(StrToFloatDef(BoxV[0], 0));
+            BY1 := MilsToCoordF(StrToFloatDef(BoxV[1], 0));
+            BX2 := MilsToCoordF(StrToFloatDef(BoxV[2], 0));
+            BY2 := MilsToCoordF(StrToFloatDef(BoxV[3], 0));
+        Finally
+            BoxV.Free;
+        End;
+        If BX1 > BX2 Then Begin N := BX1; BX1 := BX2; BX2 := N; End;
+        If BY1 > BY2 Then Begin N := BY1; BY1 := BY2; BY2 := N; End;
+    End;
+
     NT := 0; NA := 0; NV := 0; NX := 0; NF := 0; NR := 0; NP := 0; NO := 0;
     Dump := TStringList.Create;
     LayerIds := TStringList.Create;
     Try
-        Iter := Board.BoardIterator_Create;
-        Try
-            Iter.AddFilter_ObjectSet(MkSet(eTrackObject));
-            Iter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
-            Iter.AddFilter_Method(eProcessAll);
-            Idx := 0;
-            Track := Iter.FirstPCBObject;
-            While Track <> Nil Do
-            Begin
-                If Not (Track.InComponent Or Track.InPolygon Or Track.InDimension) Then
+        { The walk, for the apply pass: it must walk the same set. }
+        If (Kinds <> '') Or (LayerStr <> '') Then
+            Dump.Add('W' + #9 + Kinds + #9 + LayerStr);
+        If GmWants(Kinds, 'track') Then
+        Begin
+            Iter := Board.BoardIterator_Create;
+            Try
+                Iter.AddFilter_ObjectSet(MkSet(eTrackObject));
+                If Walk = Nil Then
+                    Iter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers)
+                Else
+                    Iter.AddFilter_IPCB_LayerSet(Walk);
+                Iter.AddFilter_Method(eProcessAll);
+                Idx := 0;
+                Track := Iter.FirstPCBObject;
+                While Track <> Nil Do
                 Begin
-                    Lyr := Track.Layer;
-                    Dump.Add('T' + #9 + IntToStr(Idx) + #9 + IntToStr(Lyr) + #9
-                        + IntToStr(Track.Width) + #9 + IntToStr(Track.X1) + #9
-                        + IntToStr(Track.Y1) + #9 + IntToStr(Track.X2) + #9
-                        + IntToStr(Track.Y2));
-                    If LayerIds.IndexOf(IntToStr(Lyr)) < 0 Then LayerIds.Add(IntToStr(Lyr));
-                    Inc(NT);
+                    If Not (Track.InComponent Or Track.InPolygon Or Track.InDimension)
+                    And GmKeep(Track, Nets, SelOnly, HasBox, BX1, BY1, BX2, BY2) Then
+                    Begin
+                        Lyr := Track.Layer;
+                        Dump.Add('T' + #9 + IntToStr(Idx) + #9 + IntToStr(Lyr) + #9
+                            + IntToStr(Track.Width) + #9 + IntToStr(Track.X1) + #9
+                            + IntToStr(Track.Y1) + #9 + IntToStr(Track.X2) + #9
+                            + IntToStr(Track.Y2));
+                        If LayerIds.IndexOf(IntToStr(Lyr)) < 0 Then LayerIds.Add(IntToStr(Lyr));
+                        Inc(NT);
+                    End;
+                    Inc(Idx);
+                    Track := Iter.NextPCBObject;
                 End;
-                Inc(Idx);
-                Track := Iter.NextPCBObject;
+            Finally
+                Board.BoardIterator_Destroy(Iter);
             End;
-        Finally
-            Board.BoardIterator_Destroy(Iter);
         End;
 
-        Iter := Board.BoardIterator_Create;
-        Try
-            Iter.AddFilter_ObjectSet(MkSet(eArcObject));
-            Iter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
-            Iter.AddFilter_Method(eProcessAll);
-            Idx := 0;
-            Arc := Iter.FirstPCBObject;
-            While Arc <> Nil Do
-            Begin
-                If Not (Arc.InComponent Or Arc.InPolygon Or Arc.InDimension) Then
+        If GmWants(Kinds, 'arc') Then
+        Begin
+            Iter := Board.BoardIterator_Create;
+            Try
+                Iter.AddFilter_ObjectSet(MkSet(eArcObject));
+                If Walk = Nil Then
+                    Iter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers)
+                Else
+                    Iter.AddFilter_IPCB_LayerSet(Walk);
+                Iter.AddFilter_Method(eProcessAll);
+                Idx := 0;
+                Arc := Iter.FirstPCBObject;
+                While Arc <> Nil Do
                 Begin
-                    Lyr := Arc.Layer;
-                    Dump.Add('A' + #9 + IntToStr(Idx) + #9 + IntToStr(Lyr) + #9
-                        + IntToStr(Arc.LineWidth) + #9 + IntToStr(Arc.XCenter) + #9
-                        + IntToStr(Arc.YCenter) + #9 + IntToStr(Arc.Radius) + #9
-                        + FloatToJsonStr(Arc.StartAngle) + #9 + FloatToJsonStr(Arc.EndAngle));
-                    If LayerIds.IndexOf(IntToStr(Lyr)) < 0 Then LayerIds.Add(IntToStr(Lyr));
-                    Inc(NA);
+                    If Not (Arc.InComponent Or Arc.InPolygon Or Arc.InDimension)
+                    And GmKeep(Arc, Nets, SelOnly, HasBox, BX1, BY1, BX2, BY2) Then
+                    Begin
+                        Lyr := Arc.Layer;
+                        Dump.Add('A' + #9 + IntToStr(Idx) + #9 + IntToStr(Lyr) + #9
+                            + IntToStr(Arc.LineWidth) + #9 + IntToStr(Arc.XCenter) + #9
+                            + IntToStr(Arc.YCenter) + #9 + IntToStr(Arc.Radius) + #9
+                            + FloatToJsonStr(Arc.StartAngle) + #9 + FloatToJsonStr(Arc.EndAngle));
+                        If LayerIds.IndexOf(IntToStr(Lyr)) < 0 Then LayerIds.Add(IntToStr(Lyr));
+                        Inc(NA);
+                    End;
+                    Inc(Idx);
+                    Arc := Iter.NextPCBObject;
                 End;
-                Inc(Idx);
-                Arc := Iter.NextPCBObject;
+            Finally
+                Board.BoardIterator_Destroy(Iter);
             End;
-        Finally
-            Board.BoardIterator_Destroy(Iter);
         End;
 
-        Iter := Board.BoardIterator_Create;
-        Try
-            Iter.AddFilter_ObjectSet(MkSet(eViaObject));
-            Iter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
-            Iter.AddFilter_Method(eProcessAll);
-            Idx := 0;
-            Via := Iter.FirstPCBObject;
-            While Via <> Nil Do
-            Begin
-                If Not (Via.InComponent Or Via.InPolygon Or Via.InDimension) Then
+        If GmWants(Kinds, 'via') Then
+        Begin
+            Iter := Board.BoardIterator_Create;
+            Try
+                Iter.AddFilter_ObjectSet(MkSet(eViaObject));
+                If Walk = Nil Then
+                    Iter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers)
+                Else
+                    Iter.AddFilter_IPCB_LayerSet(Walk);
+                Iter.AddFilter_Method(eProcessAll);
+                Idx := 0;
+                Via := Iter.FirstPCBObject;
+                While Via <> Nil Do
                 Begin
-                    Dump.Add('V' + #9 + IntToStr(Idx) + #9 + IntToStr(Via.X) + #9
-                        + IntToStr(Via.Y));
-                    Inc(NV);
+                    If Not (Via.InComponent Or Via.InPolygon Or Via.InDimension)
+                    And GmKeep(Via, Nets, SelOnly, HasBox, BX1, BY1, BX2, BY2) Then
+                    Begin
+                        Dump.Add('V' + #9 + IntToStr(Idx) + #9 + IntToStr(Via.X) + #9
+                            + IntToStr(Via.Y));
+                        Inc(NV);
+                    End;
+                    Inc(Idx);
+                    Via := Iter.NextPCBObject;
                 End;
-                Inc(Idx);
-                Via := Iter.NextPCBObject;
+            Finally
+                Board.BoardIterator_Destroy(Iter);
             End;
-        Finally
-            Board.BoardIterator_Destroy(Iter);
         End;
 
-        Iter := Board.BoardIterator_Create;
-        Try
-            Iter.AddFilter_ObjectSet(MkSet(eTextObject));
-            Iter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
-            Iter.AddFilter_Method(eProcessAll);
-            Idx := 0;
-            Txt := Iter.FirstPCBObject;
-            While Txt <> Nil Do
-            Begin
-                If Not (Txt.InComponent Or Txt.InPolygon Or Txt.InDimension) Then
+        If GmWants(Kinds, 'text') Then
+        Begin
+            Iter := Board.BoardIterator_Create;
+            Try
+                Iter.AddFilter_ObjectSet(MkSet(eTextObject));
+                If Walk = Nil Then
+                    Iter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers)
+                Else
+                    Iter.AddFilter_IPCB_LayerSet(Walk);
+                Iter.AddFilter_Method(eProcessAll);
+                Idx := 0;
+                Txt := Iter.FirstPCBObject;
+                While Txt <> Nil Do
                 Begin
-                    Lyr := Txt.Layer;
-                    TxtStr := '';
-                    Try TxtStr := Txt.Text; Except TxtStr := ''; End;
-                    Cut := Pos(#13, TxtStr);
-                    If Cut > 0 Then TxtStr := Copy(TxtStr, 1, Cut - 1);
-                    Cut := Pos(#10, TxtStr);
-                    If Cut > 0 Then TxtStr := Copy(TxtStr, 1, Cut - 1);
-                    Dump.Add('X' + #9 + IntToStr(Idx) + #9 + IntToStr(Lyr) + #9
-                        + IntToStr(Txt.XLocation) + #9 + IntToStr(Txt.YLocation) + #9
-                        + TxtStr);
-                    If LayerIds.IndexOf(IntToStr(Lyr)) < 0 Then LayerIds.Add(IntToStr(Lyr));
-                    Inc(NX);
+                    If Not (Txt.InComponent Or Txt.InPolygon Or Txt.InDimension)
+                    And GmKeep(Txt, Nets, SelOnly, HasBox, BX1, BY1, BX2, BY2) Then
+                    Begin
+                        Lyr := Txt.Layer;
+                        TxtStr := '';
+                        Try TxtStr := Txt.Text; Except TxtStr := ''; End;
+                        Cut := Pos(#13, TxtStr);
+                        If Cut > 0 Then TxtStr := Copy(TxtStr, 1, Cut - 1);
+                        Cut := Pos(#10, TxtStr);
+                        If Cut > 0 Then TxtStr := Copy(TxtStr, 1, Cut - 1);
+                        Dump.Add('X' + #9 + IntToStr(Idx) + #9 + IntToStr(Lyr) + #9
+                            + IntToStr(Txt.XLocation) + #9 + IntToStr(Txt.YLocation) + #9
+                            + TxtStr);
+                        If LayerIds.IndexOf(IntToStr(Lyr)) < 0 Then LayerIds.Add(IntToStr(Lyr));
+                        Inc(NX);
+                    End;
+                    Inc(Idx);
+                    Txt := Iter.NextPCBObject;
                 End;
-                Inc(Idx);
-                Txt := Iter.NextPCBObject;
+            Finally
+                Board.BoardIterator_Destroy(Iter);
             End;
-        Finally
-            Board.BoardIterator_Destroy(Iter);
         End;
 
-        Iter := Board.BoardIterator_Create;
-        Try
-            Iter.AddFilter_ObjectSet(MkSet(eFillObject));
-            Iter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
-            Iter.AddFilter_Method(eProcessAll);
-            Idx := 0;
-            Fil := Iter.FirstPCBObject;
-            While Fil <> Nil Do
-            Begin
-                If Not (Fil.InComponent Or Fil.InPolygon Or Fil.InDimension) Then
+        If GmWants(Kinds, 'fill') Then
+        Begin
+            Iter := Board.BoardIterator_Create;
+            Try
+                Iter.AddFilter_ObjectSet(MkSet(eFillObject));
+                If Walk = Nil Then
+                    Iter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers)
+                Else
+                    Iter.AddFilter_IPCB_LayerSet(Walk);
+                Iter.AddFilter_Method(eProcessAll);
+                Idx := 0;
+                Fil := Iter.FirstPCBObject;
+                While Fil <> Nil Do
                 Begin
-                    Lyr := Fil.Layer;
-                    Dump.Add('F' + #9 + IntToStr(Idx) + #9 + IntToStr(Lyr) + #9
-                        + IntToStr(Fil.X1Location) + #9 + IntToStr(Fil.Y1Location) + #9
-                        + IntToStr(Fil.X2Location) + #9 + IntToStr(Fil.Y2Location));
-                    If LayerIds.IndexOf(IntToStr(Lyr)) < 0 Then LayerIds.Add(IntToStr(Lyr));
-                    Inc(NF);
+                    If Not (Fil.InComponent Or Fil.InPolygon Or Fil.InDimension)
+                    And GmKeep(Fil, Nets, SelOnly, HasBox, BX1, BY1, BX2, BY2) Then
+                    Begin
+                        Lyr := Fil.Layer;
+                        Dump.Add('F' + #9 + IntToStr(Idx) + #9 + IntToStr(Lyr) + #9
+                            + IntToStr(Fil.X1Location) + #9 + IntToStr(Fil.Y1Location) + #9
+                            + IntToStr(Fil.X2Location) + #9 + IntToStr(Fil.Y2Location));
+                        If LayerIds.IndexOf(IntToStr(Lyr)) < 0 Then LayerIds.Add(IntToStr(Lyr));
+                        Inc(NF);
+                    End;
+                    Inc(Idx);
+                    Fil := Iter.NextPCBObject;
                 End;
-                Inc(Idx);
-                Fil := Iter.NextPCBObject;
+            Finally
+                Board.BoardIterator_Destroy(Iter);
             End;
-        Finally
-            Board.BoardIterator_Destroy(Iter);
         End;
 
-        Iter := Board.BoardIterator_Create;
-        Try
-            Iter.AddFilter_ObjectSet(MkSet(eRegionObject));
-            Iter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
-            Iter.AddFilter_Method(eProcessAll);
-            Idx := 0;
-            Region := Iter.FirstPCBObject;
-            While Region <> Nil Do
-            Begin
-                If Not (Region.InComponent Or Region.InPolygon Or Region.InDimension) Then
+        If GmWants(Kinds, 'region') Then
+        Begin
+            Iter := Board.BoardIterator_Create;
+            Try
+                Iter.AddFilter_ObjectSet(MkSet(eRegionObject));
+                If Walk = Nil Then
+                    Iter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers)
+                Else
+                    Iter.AddFilter_IPCB_LayerSet(Walk);
+                Iter.AddFilter_Method(eProcessAll);
+                Idx := 0;
+                Region := Iter.FirstPCBObject;
+                While Region <> Nil Do
                 Begin
-                    Lyr := Region.Layer;
-                    N := 0;
-                    X0 := ''; Y0 := ''; X1 := ''; Y1 := '';
-                    Contour := Region.MainContour;
-                    Try N := Contour.Count; Except N := 0; End;
-                    Try X0 := IntToStr(Contour.X[0]); Except X0 := ''; End;
-                    Try Y0 := IntToStr(Contour.Y[0]); Except Y0 := ''; End;
-                    Try X1 := IntToStr(Contour.X[1]); Except X1 := ''; End;
-                    Try Y1 := IntToStr(Contour.Y[1]); Except Y1 := ''; End;
-                    Holes := 0;
-                    Try Holes := Region.HoleCount; Except Holes := 0; End;
-                    { Then the shape-segment count and the drawn box, which }
-                    { show whether the shape agrees with the contours.      }
-                    SC := 0;
-                    Try SC := Region.ShapeSegmentCount; Except SC := 0; End;
-                    BR := Region.BoundingRectangle;
-                    Dump.Add('R' + #9 + IntToStr(Idx) + #9 + IntToStr(Lyr) + #9
-                        + IntToStr(N) + #9 + X0 + #9 + Y0 + #9 + X1 + #9 + Y1 + #9
-                        + IntToStr(Holes) + #9 + IntToStr(SC) + #9 + IntToStr(BR.X1)
-                        + #9 + IntToStr(BR.Y1) + #9 + IntToStr(BR.X2) + #9 + IntToStr(BR.Y2));
-                    If LayerIds.IndexOf(IntToStr(Lyr)) < 0 Then LayerIds.Add(IntToStr(Lyr));
-                    Inc(NR);
+                    If Not (Region.InComponent Or Region.InPolygon Or Region.InDimension)
+                    And GmKeep(Region, Nets, SelOnly, HasBox, BX1, BY1, BX2, BY2) Then
+                    Begin
+                        Lyr := Region.Layer;
+                        N := 0;
+                        X0 := ''; Y0 := ''; X1 := ''; Y1 := '';
+                        Contour := Region.MainContour;
+                        Try N := Contour.Count; Except N := 0; End;
+                        Try X0 := IntToStr(Contour.X[0]); Except X0 := ''; End;
+                        Try Y0 := IntToStr(Contour.Y[0]); Except Y0 := ''; End;
+                        Try X1 := IntToStr(Contour.X[1]); Except X1 := ''; End;
+                        Try Y1 := IntToStr(Contour.Y[1]); Except Y1 := ''; End;
+                        Holes := 0;
+                        Try Holes := Region.HoleCount; Except Holes := 0; End;
+                        { Then the shape-segment count and the drawn box, which }
+                        { show whether the shape agrees with the contours.      }
+                        SC := 0;
+                        Try SC := Region.ShapeSegmentCount; Except SC := 0; End;
+                        BR := Region.BoundingRectangle;
+                        Dump.Add('R' + #9 + IntToStr(Idx) + #9 + IntToStr(Lyr) + #9
+                            + IntToStr(N) + #9 + X0 + #9 + Y0 + #9 + X1 + #9 + Y1 + #9
+                            + IntToStr(Holes) + #9 + IntToStr(SC) + #9 + IntToStr(BR.X1)
+                            + #9 + IntToStr(BR.Y1) + #9 + IntToStr(BR.X2) + #9 + IntToStr(BR.Y2));
+                        If LayerIds.IndexOf(IntToStr(Lyr)) < 0 Then LayerIds.Add(IntToStr(Lyr));
+                        Inc(NR);
+                    End;
+                    Inc(Idx);
+                    Region := Iter.NextPCBObject;
                 End;
-                Inc(Idx);
-                Region := Iter.NextPCBObject;
+            Finally
+                Board.BoardIterator_Destroy(Iter);
             End;
-        Finally
-            Board.BoardIterator_Destroy(Iter);
         End;
 
         { Every polygon, by its place in the iteration: a polygon is never  }
         { owned, and the index is the one pcb_modify_polygon counts.          }
-        Iter := Board.BoardIterator_Create;
-        Try
-            Iter.AddFilter_ObjectSet(MkSet(ePolyObject));
-            Iter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
-            Iter.AddFilter_Method(eProcessAll);
-            Idx := 0;
-            Poly := Iter.FirstPCBObject;
-            While Poly <> Nil Do
-            Begin
-                Lyr := Poly.Layer;
-                N := 0;
-                Try N := Poly.PointCount; Except N := 0; End;
-                X0 := ''; Y0 := '';
-                If N > 0 Then
+        If GmWants(Kinds, 'polygon') Then
+        Begin
+            Iter := Board.BoardIterator_Create;
+            Try
+                Iter.AddFilter_ObjectSet(MkSet(ePolyObject));
+                If Walk = Nil Then
+                    Iter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers)
+                Else
+                    Iter.AddFilter_IPCB_LayerSet(Walk);
+                Iter.AddFilter_Method(eProcessAll);
+                Idx := 0;
+                Poly := Iter.FirstPCBObject;
+                While Poly <> Nil Do
                 Begin
-                    Try X0 := IntToStr(Poly.Segments[0].vx); Except X0 := ''; End;
-                    Try Y0 := IntToStr(Poly.Segments[0].vy); Except Y0 := ''; End;
+                    PName := '';
+                    Try PName := Poly.Name; Except PName := ''; End;
+                    If GmKeep(Poly, Nets, SelOnly, HasBox, BX1, BY1, BX2, BY2)
+                        And GmNameOk(PName, NameMask) Then
+                    Begin
+                        Lyr := Poly.Layer;
+                        N := 0;
+                        Try N := Poly.PointCount; Except N := 0; End;
+                        X0 := ''; Y0 := '';
+                        If N > 0 Then
+                        Begin
+                            Try X0 := IntToStr(Poly.Segments[0].vx); Except X0 := ''; End;
+                            Try Y0 := IntToStr(Poly.Segments[0].vy); Except Y0 := ''; End;
+                        End;
+                        Dump.Add('P' + #9 + IntToStr(Idx) + #9 + IntToStr(Lyr) + #9
+                            + IntToStr(N) + #9 + X0 + #9 + Y0);
+                        If LayerIds.IndexOf(IntToStr(Lyr)) < 0 Then LayerIds.Add(IntToStr(Lyr));
+                        Inc(NP);
+                    End;
+                    Inc(Idx);
+                    Poly := Iter.NextPCBObject;
                 End;
-                Dump.Add('P' + #9 + IntToStr(Idx) + #9 + IntToStr(Lyr) + #9
-                    + IntToStr(N) + #9 + X0 + #9 + Y0);
-                If LayerIds.IndexOf(IntToStr(Lyr)) < 0 Then LayerIds.Add(IntToStr(Lyr));
-                Inc(NP);
-                Inc(Idx);
-                Poly := Iter.NextPCBObject;
+            Finally
+                Board.BoardIterator_Destroy(Iter);
             End;
-        Finally
-            Board.BoardIterator_Destroy(Iter);
         End;
 
         Try NO := Board.BoardOutline.PointCount; Except NO := 0; End;
@@ -23647,7 +26106,13 @@ Begin
         + ',"tracks":' + IntToStr(NT) + ',"arcs":' + IntToStr(NA)
         + ',"vias":' + IntToStr(NV) + ',"texts":' + IntToStr(NX)
         + ',"fills":' + IntToStr(NF) + ',"regions":' + IntToStr(NR)
-        + ',"polygons":' + IntToStr(NP) + ',"outline_segments":' + IntToStr(NO) + '}');
+        + ',"polygons":' + IntToStr(NP) + ',"outline_segments":' + IntToStr(NO)
+        + ',"kinds":"' + EscapeJsonString(Kinds) + '"'
+        + ',"layer":"' + EscapeJsonString(LayerStr) + '"'
+        + ',"nets":"' + EscapeJsonString(Nets) + '"'
+        + ',"selected":' + BoolToJsonStr(SelOnly)
+        + ',"name":"' + EscapeJsonString(NameMask) + '"'
+        + ',"bounds":"' + EscapeJsonString(BoxStr) + '"}');
     Result := Response;
 End;
 
@@ -23715,6 +26180,8 @@ Var
     BR : TCoordRect;
     ShapeMode : String;
     IsFree, Ok, HoleOk, DoRepour : Boolean;
+    LayerStr, Bad : String;
+    Walk : IPCB_LayerSet;
 Begin
     InPath := ExtractJsonValue(Params, 'in_path');
     If InPath = '' Then
@@ -23756,6 +26223,29 @@ Begin
         Result := Response;
         Exit;
     End;
+    { The dump's walk (its W line): the ordinals count over that set only. }
+    Walk := Nil;
+    For I := 0 To Lines.Count - 1 Do
+    Begin
+        If Copy(Lines[I], 1, 2) = 'W' + #9 Then
+        Begin
+            Rest := Lines[I];
+            SplitNextTab(Rest);
+            SplitNextTab(Rest);
+            LayerStr := Trim(SplitNextTab(Rest));
+            Walk := GmWalkSet(Board, LayerStr, Bad);
+            If Bad <> '' Then
+            Begin
+                Lines.Free;
+                Response := BuildErrorResponse(RequestId, 'UNKNOWN_LAYER',
+                    'The edit file walks layer ' + Bad
+                    + ', which this board does not have');
+                Result := Response;
+                Exit;
+            End;
+            Break;
+        End;
+    End;
 
     Stats := '';
     TotalApplied := 0;
@@ -23763,7 +26253,7 @@ Begin
     TotalMissing := 0;
     ReadbackOff := 0;
     WireOff := 0;
-    PCBServer.PreProcess;
+    PcbBeginEdit(0);
     Try
         { One pass per kind: T A V X F R P, then the outline. }
         For KindNo := 1 To 7 Do
@@ -23799,7 +26289,10 @@ Begin
                         If KindNo = 6 Then Iter.AddFilter_ObjectSet(MkSet(eRegionObject));
                         If KindNo = 7 Then Iter.AddFilter_ObjectSet(MkSet(ePolyObject));
                         { The same layer set as the dump, so ordinals agree. }
-                        Iter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
+                        If Walk = Nil Then
+                            Iter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers)
+                        Else
+                            Iter.AddFilter_IPCB_LayerSet(Walk);
                         Iter.AddFilter_Method(eProcessAll);
                         Idx := 0;
                         Prim := Iter.FirstPCBObject;
@@ -24222,7 +26715,10 @@ Begin
                         Iter := Board.BoardIterator_Create;
                         Try
                             Iter.AddFilter_ObjectSet(MkSet(ePolyObject));
-                            Iter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
+                            If Walk = Nil Then
+                                Iter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers)
+                            Else
+                                Iter.AddFilter_IPCB_LayerSet(Walk);
                             Iter.AddFilter_Method(eProcessAll);
                             Idx := 0;
                             I := 0;
@@ -24627,7 +27123,7 @@ Begin
             PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
                 PCBM_BoardRegisteration, c_NoEventData);
     Finally
-        PCBServer.PostProcess;
+        PcbEndEdit(0);
         Lines.Free;
     End;
     Try Board.ViewManager_FullUpdate; Except End;
@@ -24654,6 +27150,884 @@ Begin
         + ',"create_refused":[' + Refused + ']'
         + ',"by_kind":{' + Stats + '}}');
     Result := Response;
+End;
+
+{ SDK REACH: BOARD PICTURES, TEXT DUMPS, NET FIGURES, GUIDES AND GRIDS,      }
+{ PLANES, DRILL SYMBOLS, PART PARAMETERS, SIMPLE BODIES, BASELINE           }
+{ DIMENSIONS. Each reads its members inside Try, so a member this build     }
+{ does not give scripts costs that field and is counted, not the call.      }
+{ Coordinates are absolute mils, as pcb_place_via takes them.               }
+
+{ A file's age stamp, -1 when it is not there: a write shows as a change. }
+Function SdkFileStamp(Path : String) : Integer;
+Begin
+    Result := -1;
+    Try
+        If FileExists(Path) Then Result := FileAge(Path);
+    Except
+        Result := -1;
+    End;
+End;
+
+{..............................................................................}
+{ PCB_RenderPng - Altium's own picture of the board, written to a PNG.        }
+{ Params: path (required), dpi (default 300), side top|bottom,               }
+{ config_type, config (a view configuration; empty = the current one).       }
+{..............................................................................}
+Function PCB_RenderPng(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    BoardEx : IPCB_BoardEx;
+    Path, Side, CfgType, Cfg, Problem : String;
+    Dpi, Rc, Before, After : Integer;
+Begin
+    Path := ExtractJsonValue(Params, 'path');
+    If Path = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'path is required');
+        Exit;
+    End;
+    Dpi := StrToIntDef(ExtractJsonValue(Params, 'dpi'), 300);
+    If (Dpi < 25) Or (Dpi > 2400) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_PARAM', 'dpi must be 25 to 2400');
+        Exit;
+    End;
+    Side := LowerCase(ExtractJsonValue(Params, 'side'));
+    CfgType := ExtractJsonValue(Params, 'config_type');
+    Cfg := ExtractJsonValue(Params, 'config');
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+    Before := SdkFileStamp(Path);
+    Rc := -999;
+    Problem := '';
+    Try
+        BoardEx := Board;
+        Rc := BoardEx.RenderToPNG(Path, Dpi, Side <> 'bottom', CfgType, Cfg);
+    Except
+        Problem := 'the renderer raised an error';
+    End;
+    After := SdkFileStamp(Path);
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonBool('written', (After <> -1) And (After <> Before)) + ','
+        + JsonStr('path', Path) + ','
+        + JsonInt('dpi', Dpi) + ','
+        + JsonStr('side', Side) + ','
+        + JsonInt('return_code', Rc) + ','
+        + JsonStr('problem', Problem) + ','
+        + JsonStr('board', Board.FileName)));
+End;
+
+{..............................................................................}
+{ PCB_SaveBoardText - the whole board written as JSON or ASCII text to a      }
+{ separate file. The board document itself is not saved or renamed.         }
+{ Params: path (required), format json|ascii (default json).                  }
+{..............................................................................}
+Function PCB_SaveBoardText(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    BoardEx : IPCB_BoardEx;
+    Path, Fmt, Problem, NameBefore, NameAfter : String;
+    Before, After : Integer;
+Begin
+    Path := ExtractJsonValue(Params, 'path');
+    Fmt := LowerCase(ExtractJsonValue(Params, 'format'));
+    If Fmt = '' Then Fmt := 'json';
+    If Path = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'path is required');
+        Exit;
+    End;
+    If (Fmt <> 'json') And (Fmt <> 'ascii') Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_PARAM', 'format is json or ascii');
+        Exit;
+    End;
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+    If UpperCase(Path) = UpperCase(Board.FileName) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_PARAM', 'path is the board itself');
+        Exit;
+    End;
+    NameBefore := Board.FileName;
+    Before := SdkFileStamp(Path);
+    Problem := '';
+    Try
+        BoardEx := Board;
+        If Fmt = 'json' Then BoardEx.SaveToJSONFile(Path)
+        Else BoardEx.SaveToASCIIFile(Path);
+    Except
+        Problem := 'the writer raised an error';
+    End;
+    After := SdkFileStamp(Path);
+    NameAfter := Board.FileName;
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonBool('written', (After <> -1) And (After <> Before)) + ','
+        + JsonStr('path', Path) + ','
+        + JsonStr('format', Fmt) + ','
+        + JsonBool('board_name_kept', NameAfter = NameBefore) + ','
+        + JsonStr('problem', Problem)));
+End;
+
+{..............................................................................}
+{ PCB_NetFigures - Altium's own figures per net: routed and signal length,    }
+{ the delays it calculates, vias and pads.                                   }
+{ Params: nets (comma list, optional), limit (default 500).                  }
+{..............................................................................}
+Function PCB_NetFigures(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Iter : IPCB_BoardIterator;
+    Net : IPCB_Net;
+    Want, Items, Name : String;
+    Limit, Listed, Misses : Integer;
+    InPair : Boolean;
+    Routed, SigLen : Double;
+    Delay, SigDelay : Double;
+    Vias, Pins : Integer;
+Begin
+    Want := ',' + UpperCase(StringReplace(ExtractJsonValue(Params, 'nets'), ' ', '', -1)) + ',';
+    Limit := StrToIntDef(ExtractJsonValue(Params, 'limit'), 500);
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+    Items := '';
+    Listed := 0;
+    Misses := 0;
+    Iter := Board.BoardIterator_Create;
+    Try
+        Iter.AddFilter_ObjectSet(MkSet(eNetObject));
+        Iter.AddFilter_LayerSet(AllLayers);
+        Iter.AddFilter_Method(eProcessAll);
+        Net := Iter.FirstPCBObject;
+        While Net <> Nil Do
+        Begin
+            Name := Net.Name;
+            If (Want = ',,') Or (Pos(',' + UpperCase(Name) + ',', Want) > 0) Then
+            Begin
+                If Listed >= Limit Then Break;
+                Routed := 0; SigLen := 0; Delay := 0; SigDelay := 0;
+                Vias := 0; Pins := 0; InPair := False;
+                Try Routed := CoordToMilsF(Net.RoutedLength); Except Inc(Misses); End;
+                Try SigLen := Net.GetState_SignalLength / 10000; Except Inc(Misses); End;
+                Try Delay := Net.GetState_DelayTotal; Except Inc(Misses); End;
+                Try SigDelay := Net.GetState_SignalDelay; Except Inc(Misses); End;
+                Try Vias := Net.ViaCount; Except Inc(Misses); End;
+                Try Pins := Net.PinCount; Except Inc(Misses); End;
+                Try InPair := Net.InDifferentialPair; Except Inc(Misses); End;
+                If Items <> '' Then Items := Items + ',';
+                Items := Items + JsonObj(JsonStr('net', Name) + ','
+                    + JsonFloat('routed_length_mils', Routed) + ','
+                    + JsonFloat('signal_length_mils', SigLen) + ','
+                    + JsonFloat('delay_total', Delay) + ','
+                    + JsonFloat('signal_delay', SigDelay) + ','
+                    + JsonInt('vias', Vias) + ','
+                    + JsonInt('pads', Pins) + ','
+                    + JsonBool('in_differential_pair', InPair));
+                Inc(Listed);
+            End;
+            Net := Iter.NextPCBObject;
+        End;
+    Finally
+        Board.BoardIterator_Destroy(Iter);
+    End;
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonInt('nets_listed', Listed) + ','
+        + JsonInt('read_errors', Misses) + ','
+        + JsonRaw('nets', '[' + Items + ']')));
+End;
+
+{..............................................................................}
+{ PCB_Guides - removes every placement guide and snap point on the board.    }
+{ Scripts can delete guides through the grid manager but not add them.       }
+{ Params: action delete_all.                                                 }
+{..............................................................................}
+Function PCB_Guides(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Mgr : IPCB_GridManager;
+    Action, Problem : String;
+Begin
+    Action := LowerCase(ExtractJsonValue(Params, 'action'));
+    If Action <> 'delete_all' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_PARAM', 'action is delete_all');
+        Exit;
+    End;
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+    Mgr := Nil;
+    Try Mgr := Board.GetState_GridManager; Except Mgr := Nil; End;
+    If Mgr = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_SUPPORTED', 'The board gives scripts no grid manager');
+        Exit;
+    End;
+    Problem := '';
+    Try
+        Mgr.DeleteAllGuides;
+    Except
+        Problem := 'the grid manager raised an error';
+    End;
+    If Problem = '' Then MarkDocDirtyByPath(Board.FileName);
+    Try Board.GraphicallyInvalidate; Except End;
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonStr('action', Action) + ','
+        + JsonBool('done', Problem = '') + ','
+        + JsonStr('problem', Problem)));
+End;
+
+{..............................................................................}
+{ PCB_LocalGrid - a cartesian or polar grid for one area of the board.        }
+{ Params: action add_cartesian|add_polar|delete_all|at; x, y (origin, mils), }
+{ name, step_x, step_y, rotation (cartesian); angular_step, radial_step,     }
+{ min_radius, max_radius, start_angle, end_angle (polar).                   }
+{ 'at' reads the grid that applies at x, y.                                  }
+{..............................................................................}
+{ The members every placement grid has, as JSON members (no braces). }
+Function SdkGridCommonJson(G : IPCB_PlacementGrid) : String;
+Var
+    Name : String;
+    Pri, Misses : Integer;
+    IsDefault : Boolean;
+Begin
+    Name := ''; Pri := 0; Misses := 0; IsDefault := False;
+    Try Name := G.GetProperty_NameW; Except Inc(Misses); End;
+    Try Pri := G.GetProperty_Priority; Except Inc(Misses); End;
+    Try IsDefault := G.GetProperty_IsDefault; Except Inc(Misses); End;
+    Result := JsonStr('name', Name) + ','
+        + JsonInt('priority', Pri) + ','
+        + JsonBool('is_default', IsDefault) + ','
+        + JsonInt('read_errors', Misses);
+End;
+
+Function SdkCartesianJson(G : IPCB_CartesianGrid) : String;
+Var
+    StepX, StepY, Rot : Double;
+Begin
+    StepX := 0; StepY := 0; Rot := 0;
+    Try StepX := G.GetProperty_GridStepX; Except End;
+    Try StepY := G.GetProperty_GridStepY; Except End;
+    Try Rot := G.GetProperty_Rotation; Except End;
+    Result := JsonObj(SdkGridCommonJson(G) + ','
+        + JsonStr('kind', 'cartesian') + ','
+        + JsonFloat('step_x_mils', StepX / 10000) + ','
+        + JsonFloat('step_y_mils', StepY / 10000) + ','
+        + JsonFloat('rotation', Rot));
+End;
+
+Function SdkPolarJson(G : IPCB_PolarGrid) : String;
+Var
+    AStep, RStep, RMin, RMax, A1, A2 : Double;
+Begin
+    AStep := 0; RStep := 0; RMin := 0; RMax := 0; A1 := 0; A2 := 0;
+    Try AStep := G.GetProperty_AngularStep; Except End;
+    Try RStep := G.GetProperty_RadialStep; Except End;
+    Try RMin := G.GetProperty_MinRadius; Except End;
+    Try RMax := G.GetProperty_MaxRadius; Except End;
+    Try A1 := G.GetProperty_StartAngle; Except End;
+    Try A2 := G.GetProperty_EndAngle; Except End;
+    Result := JsonObj(SdkGridCommonJson(G) + ','
+        + JsonStr('kind', 'polar') + ','
+        + JsonFloat('angular_step', AStep) + ','
+        + JsonFloat('radial_step_mils', RStep / 10000) + ','
+        + JsonFloat('min_radius_mils', RMin / 10000) + ','
+        + JsonFloat('max_radius_mils', RMax / 10000) + ','
+        + JsonFloat('start_angle', A1) + ','
+        + JsonFloat('end_angle', A2));
+End;
+
+Function PCB_LocalGrid(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Mgr : IPCB_GridManager;
+    G : IPCB_PlacementGrid;
+    CG : IPCB_CartesianGrid;
+    PG : IPCB_PolarGrid;
+    Action, Name, Problem, Body, V : String;
+    X, Y : Integer;
+Begin
+    Action := LowerCase(ExtractJsonValue(Params, 'action'));
+    If Pos('|' + Action + '|', '|add_cartesian|add_polar|delete_all|at|') = 0 Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_PARAM',
+            'action is add_cartesian, add_polar, delete_all or at');
+        Exit;
+    End;
+    X := MilsToCoordF(StrToFloatDef(ExtractJsonValue(Params, 'x'), 0));
+    Y := MilsToCoordF(StrToFloatDef(ExtractJsonValue(Params, 'y'), 0));
+    Name := ExtractJsonValue(Params, 'name');
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+    Mgr := Nil;
+    Try Mgr := Board.GetState_GridManager; Except Mgr := Nil; End;
+    If Mgr = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_SUPPORTED', 'The board gives scripts no grid manager');
+        Exit;
+    End;
+    Problem := '';
+    If Action = 'delete_all' Then
+    Begin
+        Try Mgr.DeleteAllGrids; Except Problem := 'the grid manager raised an error'; End;
+        If Problem = '' Then MarkDocDirtyByPath(Board.FileName);
+        Result := BuildSuccessResponse(RequestId, JsonObj(JsonStr('action', Action) + ','
+            + JsonBool('done', Problem = '') + ',' + JsonStr('problem', Problem)));
+        Exit;
+    End;
+    If Action = 'at' Then
+    Begin
+        G := Nil;
+        Try G := Mgr.FindApplicableGridByXY(X, Y); Except G := Nil; End;
+        If G = Nil Then
+        Begin
+            Result := BuildSuccessResponse(RequestId, JsonObj(JsonBool('found', False)));
+            Exit;
+        End;
+        Result := BuildSuccessResponse(RequestId, JsonObj(JsonBool('found', True) + ','
+            + JsonRaw('grid', JsonObj(SdkGridCommonJson(G)))));
+        Exit;
+    End;
+    If Action = 'add_polar' Then
+    Begin
+        PG := Nil;
+        Try PG := Mgr.AddPolarGrid; Except PG := Nil; End;
+        If PG = Nil Then
+        Begin
+            Result := BuildSuccessResponse(RequestId, JsonObj(JsonBool('done', False) + ','
+                + JsonStr('problem', 'the grid manager made no polar grid')));
+            Exit;
+        End;
+        Try PG.SetProperty_Origin(Point(X, Y)); Except Problem := Problem + 'origin '; End;
+        If Name <> '' Then
+        Begin
+            Try PG.SetProperty_NameW(Name); Except Problem := Problem + 'name '; End;
+        End;
+        V := ExtractJsonValue(Params, 'angular_step');
+        If V <> '' Then
+        Begin
+            Try PG.SetProperty_AngularStep(StrToFloatDef(V, 15)); Except Problem := Problem + 'angular_step '; End;
+        End;
+        V := ExtractJsonValue(Params, 'radial_step');
+        If V <> '' Then
+        Begin
+            Try PG.SetProperty_RadialStep(MilsToCoordF(StrToFloatDef(V, 50))); Except Problem := Problem + 'radial_step '; End;
+        End;
+        V := ExtractJsonValue(Params, 'min_radius');
+        If V <> '' Then
+        Begin
+            Try PG.SetProperty_MinRadius(MilsToCoordF(StrToFloatDef(V, 0))); Except Problem := Problem + 'min_radius '; End;
+        End;
+        V := ExtractJsonValue(Params, 'max_radius');
+        If V <> '' Then
+        Begin
+            Try PG.SetProperty_MaxRadius(MilsToCoordF(StrToFloatDef(V, 1000))); Except Problem := Problem + 'max_radius '; End;
+        End;
+        V := ExtractJsonValue(Params, 'start_angle');
+        If V <> '' Then
+        Begin
+            Try PG.SetProperty_StartAngle(StrToFloatDef(V, 0)); Except Problem := Problem + 'start_angle '; End;
+        End;
+        V := ExtractJsonValue(Params, 'end_angle');
+        If V <> '' Then
+        Begin
+            Try PG.SetProperty_EndAngle(StrToFloatDef(V, 360)); Except Problem := Problem + 'end_angle '; End;
+        End;
+        Body := SdkPolarJson(PG);
+    End
+    Else
+    Begin
+        CG := Nil;
+        Try CG := Mgr.AddCartesianGrid; Except CG := Nil; End;
+        If CG = Nil Then
+        Begin
+            Result := BuildSuccessResponse(RequestId, JsonObj(JsonBool('done', False) + ','
+                + JsonStr('problem', 'the grid manager made no cartesian grid')));
+            Exit;
+        End;
+        Try CG.SetProperty_Origin(Point(X, Y)); Except Problem := Problem + 'origin '; End;
+        If Name <> '' Then
+        Begin
+            Try CG.SetProperty_NameW(Name); Except Problem := Problem + 'name '; End;
+        End;
+        V := ExtractJsonValue(Params, 'step_x');
+        If V <> '' Then
+        Begin
+            Try CG.SetProperty_GridStepX(MilsToCoordF(StrToFloatDef(V, 5))); Except Problem := Problem + 'step_x '; End;
+        End;
+        V := ExtractJsonValue(Params, 'step_y');
+        If V <> '' Then
+        Begin
+            Try CG.SetProperty_GridStepY(MilsToCoordF(StrToFloatDef(V, 5))); Except Problem := Problem + 'step_y '; End;
+        End;
+        V := ExtractJsonValue(Params, 'rotation');
+        If V <> '' Then
+        Begin
+            Try CG.SetProperty_Rotation(StrToFloatDef(V, 0)); Except Problem := Problem + 'rotation '; End;
+        End;
+        Body := SdkCartesianJson(CG);
+    End;
+    Try Mgr.ResolveGridPriorities; Except End;
+    MarkDocDirtyByPath(Board.FileName);
+    Try Board.GraphicallyInvalidate; Except End;
+    Result := BuildSuccessResponse(RequestId, JsonObj(JsonStr('action', Action) + ','
+        + JsonBool('done', True) + ','
+        + JsonRaw('grid', Body) + ','
+        + JsonStr('not_taken', Trim(Problem))));
+End;
+
+{..............................................................................}
+{ PCB_PlaneState - per internal plane layer, whether Altium holds it        }
+{ poured.                                                                    }
+{..............................................................................}
+Function PCB_PlaneState(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    BoardEx : IPCB_BoardEx;
+    LayerObj : IPCB_LayerObject_V7;
+    Items : String;
+    Lyr : TLayer;
+    Poured : Boolean;
+    Misses, Planes : Integer;
+Begin
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+    Items := '';
+    Misses := 0;
+    Planes := 0;
+    BoardEx := Board;
+    LayerObj := Board.LayerStack_V7.FirstLayer;
+    While LayerObj <> Nil Do
+    Begin
+        Lyr := LayerObj.LayerID;
+        If (Lyr >= eInternalPlane1) And (Lyr <= eInternalPlane16) Then
+        Begin
+            Inc(Planes);
+            Poured := False;
+            Try Poured := BoardEx.IsPlaneLayerIsPoured(Lyr); Except Inc(Misses); End;
+            If Items <> '' Then Items := Items + ',';
+            Items := Items + JsonObj(JsonStr('layer', LayerObj.Name) + ','
+                + JsonBool('poured', Poured));
+        End;
+        LayerObj := Board.LayerStack_V7.NextLayer(LayerObj);
+    End;
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonInt('plane_layers', Planes) + ','
+        + JsonInt('read_errors', Misses) + ','
+        + JsonRaw('planes', '[' + Items + ']')));
+End;
+
+{..............................................................................}
+{ PCB_HoleSymbols - show or hide the drill symbols Altium draws on holes.     }
+{ Params: show 'true'|'false', symbol_size (mils, default 50), symbol_type   }
+{ (Altium's code, default 0), layer_pair (index, default 0).                  }
+{..............................................................................}
+Function PCB_HoleSymbols(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Show, Problem : String;
+    SymSize, SymType, Pair : Integer;
+Begin
+    Show := LowerCase(ExtractJsonValue(Params, 'show'));
+    If (Show <> 'true') And (Show <> 'false') Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_PARAM', 'show is true or false');
+        Exit;
+    End;
+    SymSize := MilsToCoordF(StrToFloatDef(ExtractJsonValue(Params, 'symbol_size'), 50));
+    SymType := StrToIntDef(ExtractJsonValue(Params, 'symbol_type'), 0);
+    Pair := StrToIntDef(ExtractJsonValue(Params, 'layer_pair'), 0);
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+    Problem := '';
+    Try
+        If Show = 'true' Then Board.ShowHoleSymbols(SymType, SymSize, Pair)
+        Else Board.HideHoleSymbols;
+    Except
+        Problem := 'the board raised an error';
+    End;
+    Try Board.GraphicallyInvalidate; Except End;
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonBool('shown', Show = 'true') + ','
+        + JsonBool('done', Problem = '') + ','
+        + JsonStr('problem', Problem)));
+End;
+
+{..............................................................................}
+{ PCB_ComponentParameters - the parameters a placed part carries on the      }
+{ board: read, set or remove. Params: designator (required), action          }
+{ list|set|remove, name, value.                                              }
+{..............................................................................}
+Function PCB_ComponentParameters(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Comp : IPCB_Component;
+    Factory : IPCB_ParametersFactory;
+    Prims : IPCB_PrimitiveParameters;
+    Prm : IPCB_Parameter;
+    Desig, Action, PName, PValue, Items, Problem, Got, ReadBack, Name : String;
+    I, Count : Integer;
+    Present : Boolean;
+Begin
+    Desig := ExtractJsonValue(Params, 'designator');
+    Action := LowerCase(ExtractJsonValue(Params, 'action'));
+    If Action = '' Then Action := 'list';
+    PName := ExtractJsonValue(Params, 'name');
+    PValue := ExtractJsonValue(Params, 'value');
+    If Desig = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'designator is required');
+        Exit;
+    End;
+    If (Action <> 'list') And (Action <> 'set') And (Action <> 'remove') Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_PARAM', 'action is list, set or remove');
+        Exit;
+    End;
+    If (Action <> 'list') And (PName = '') Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'name is required to set or remove');
+        Exit;
+    End;
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+    Comp := Nil;
+    Try Comp := Board.GetPcbComponentByRefDes(Desig); Except Comp := Nil; End;
+    If Comp = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_FOUND', 'No part ' + Desig + ' on the board');
+        Exit;
+    End;
+    Factory := Nil;
+    Prims := Nil;
+    Try Factory := PCBServer.GetParametersFactory; Except Factory := Nil; End;
+    If Factory <> Nil Then
+    Begin
+        Try Prims := Factory.CreatePrimitiveParametersWithoutVariant(Comp); Except Prims := Nil; End;
+    End;
+    If Prims = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_SUPPORTED',
+            'This Altium build gives scripts no parameters of a placed part');
+        Exit;
+    End;
+    Problem := '';
+    If Action = 'set' Then
+    Begin
+        PcbBeginEdit(0);
+        Try
+            Try Prims.SetOrNewValueByName(PName, PValue); Except Problem := 'the value was not taken'; End;
+        Finally
+            PcbEndEdit(0);
+        End;
+        If Problem = '' Then MarkDocDirtyByPath(Board.FileName);
+    End;
+    If Action = 'remove' Then
+    Begin
+        PcbBeginEdit(0);
+        Try
+            Try
+                If Not Prims.TryRemoveByName(PName) Then Problem := 'no parameter of that name';
+            Except
+                Problem := 'the parameter was not removed';
+            End;
+        Finally
+            PcbEndEdit(0);
+        End;
+        If Problem = '' Then MarkDocDirtyByPath(Board.FileName);
+    End;
+    { The read-back comes from the same walk as the list: the getter by    }
+    { name is not given to scripts and halts the loop.                     }
+    Items := '';
+    ReadBack := '';
+    Present := False;
+    Count := 0;
+    Try Count := Prims.Count; Except Count := 0; End;
+    For I := 0 To Count - 1 Do
+    Begin
+        Prm := Nil;
+        Try Prm := Prims.GetParameterByIndex(I); Except Prm := Nil; End;
+        If Prm = Nil Then Continue;
+        If Items <> '' Then Items := Items + ',';
+        Got := '';
+        Name := '';
+        Try Got := Prm.GetValue; Except End;
+        Try Name := Prm.GetName; Except End;
+        If (PName <> '') And SameText(Name, PName) Then
+        Begin
+            Present := True;
+            ReadBack := Got;
+        End;
+        Items := Items + JsonObj(JsonStr('name', Name) + ',' + JsonStr('value', Got));
+    End;
+    If (Action = 'set') And (Problem = '') And ((Not Present) Or (ReadBack <> PValue)) Then
+        Problem := 'the value does not read back';
+    If (Action = 'remove') And (Problem = '') And Present Then
+        Problem := 'the parameter is still there';
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonStr('designator', Desig) + ','
+        + JsonStr('action', Action) + ','
+        + JsonBool('done', Problem = '') + ','
+        + JsonStr('problem', Problem) + ','
+        + JsonStr('read_back', ReadBack) + ','
+        + JsonBool('present', Present) + ','
+        + JsonRaw('parameters', '[' + Items + ']')));
+End;
+
+{..............................................................................}
+{ PCB_PlaceSimpleBody - a cylinder or sphere 3D body on the board, made by   }
+{ Altium's own model factory: no STEP file. Params: shape cylinder|sphere,  }
+{ x, y (centre, mils), radius, height (cylinder), standoff (mils), layer     }
+{ (default Mechanical1), side top|bottom, color (BGR integer), identifier.   }
+{..............................................................................}
+Function PCB_PlaceSimpleBody(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Body : IPCB_ComponentBody;
+    Model : IPCB_Model;
+    Shape, LayerStr, Ident, Problem : String;
+    X, Y, Radius, Height, Standoff : Double;
+    Color : Integer;
+    TargetLayer : TLayer;
+Begin
+    Shape := LowerCase(ExtractJsonValue(Params, 'shape'));
+    If (Shape <> 'cylinder') And (Shape <> 'sphere') Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_PARAM', 'shape is cylinder or sphere');
+        Exit;
+    End;
+    X := StrToFloatDef(ExtractJsonValue(Params, 'x'), 0);
+    Y := StrToFloatDef(ExtractJsonValue(Params, 'y'), 0);
+    Radius := StrToFloatDef(ExtractJsonValue(Params, 'radius'), 0);
+    Height := StrToFloatDef(ExtractJsonValue(Params, 'height'), 0);
+    Standoff := StrToFloatDef(ExtractJsonValue(Params, 'standoff'), 0);
+    Color := StrToIntDef(ExtractJsonValue(Params, 'color'), $00808080);
+    Ident := ExtractJsonValue(Params, 'identifier');
+    LayerStr := ExtractJsonValue(Params, 'layer');
+    If LayerStr = '' Then LayerStr := 'Mechanical1';
+    If (Radius <= 0) Or ((Shape = 'cylinder') And (Height <= 0)) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_PARAM',
+            'radius (and height for a cylinder) must be above 0');
+        Exit;
+    End;
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+    TargetLayer := ResolveLayerId(Board, LayerStr);
+    If TargetLayer = eNoLayer Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'UNKNOWN_LAYER',
+            'Unknown layer name: ' + LayerStr + '. ' + BoardLayerNamesHint(Board));
+        Exit;
+    End;
+    Problem := '';
+    Body := Nil;
+    PcbBeginEdit(0);
+    Try
+        Body := PCBServer.PCBObjectFactory(eComponentBodyObject, eNoDimension, eCreate_Default);
+        If Body <> Nil Then
+        Begin
+            Body.Layer := TargetLayer;
+            Body.StandoffHeight := MilsToCoordF(Standoff);
+            If LowerCase(ExtractJsonValue(Params, 'side')) = 'bottom' Then
+                Body.BodyProjection := eBoardSide_Bottom
+            Else
+                Body.BodyProjection := eBoardSide_Top;
+            Body.BodyColor3D := Color;
+            Body.BodyOpacity3D := 1.0;
+            If Ident <> '' Then Body.SetState_Identifier(Ident);
+            Model := Nil;
+            Try
+                If Shape = 'cylinder' Then
+                    Model := Body.ModelFactory_CreateCylinder(MilsToCoordF(Radius), MilsToCoordF(Height), Color)
+                Else
+                    Model := Body.ModelFactory_CreateSphere(MilsToCoordF(Radius), Color);
+            Except
+                Model := Nil;
+                Problem := 'the model factory raised an error';
+            End;
+            If Model <> Nil Then
+            Begin
+                Body.SetState_FromModel;
+                Body.Model := Model;
+                Body.MoveToXY(MilsToCoordF(X), MilsToCoordF(Y));
+                Board.AddPCBObject(Body);
+                PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
+                    PCBM_BoardRegisteration, Body.I_ObjectAddress);
+            End
+            Else
+            Begin
+                If Problem = '' Then Problem := 'the model factory made no model';
+            End;
+        End
+        Else
+            Problem := 'no body could be created';
+    Finally
+        PcbEndEdit(0);
+    End;
+    If Problem = '' Then MarkDocDirtyByPath(Board.FileName);
+    Try Board.GraphicallyInvalidate; Except End;
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonBool('placed', Problem = '') + ','
+        + JsonStr('shape', Shape) + ','
+        + JsonFloat('x', X) + ',' + JsonFloat('y', Y) + ','
+        + JsonFloat('radius', Radius) + ','
+        + JsonFloat('height', Height) + ','
+        + JsonStr('layer', LayerStr) + ','
+        + JsonStr('identifier', Ident) + ','
+        + JsonStr('problem', Problem)));
+End;
+
+{..............................................................................}
+{ PCB_PlaceBaselineDimension - one dimension measuring several points from a }
+{ common base. Params: x, y (base, mils), points 'x,y/x,y/...' (mils),       }
+{ layer (default TopOverlay), rotation (degrees, 0 = along X).               }
+{..............................................................................}
+Function PCB_PlaceBaselineDimension(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Dim : IPCB_BaselineDimension;
+    PointsStr, Pair, LayerStr, Problem, Rest : String;
+    X, Y, PX, PY, Rot : Double;
+    TargetLayer : TLayer;
+    Added, Count, Cut, Comma : Integer;
+Begin
+    X := StrToFloatDef(ExtractJsonValue(Params, 'x'), 0);
+    Y := StrToFloatDef(ExtractJsonValue(Params, 'y'), 0);
+    Rot := StrToFloatDef(ExtractJsonValue(Params, 'rotation'), 0);
+    PointsStr := ExtractJsonValue(Params, 'points');
+    LayerStr := ExtractJsonValue(Params, 'layer');
+    If LayerStr = '' Then LayerStr := 'TopOverlay';
+    If PointsStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'points is required: x,y/x,y/...');
+        Exit;
+    End;
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+    TargetLayer := ResolveLayerId(Board, LayerStr);
+    If TargetLayer = eNoLayer Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'UNKNOWN_LAYER',
+            'Unknown layer name: ' + LayerStr + '. ' + BoardLayerNamesHint(Board));
+        Exit;
+    End;
+    Problem := '';
+    Added := 0;
+    Count := -1;
+    PcbBeginEdit(0);
+    Try
+        Dim := PCBServer.PCBObjectFactory(eDimensionObject, eBaselineDimension, eCreate_Default);
+        If Dim = Nil Then
+            Problem := 'no baseline dimension could be created'
+        Else
+        Begin
+            Dim.Layer := TargetLayer;
+            Dim.X1Location := MilsToCoordF(X);
+            Dim.Y1Location := MilsToCoordF(Y);
+            Try Dim.SetState_Angle(Rot); Except Problem := 'rotation not taken'; End;
+            Rest := PointsStr + '/';
+            While Pos('/', Rest) > 0 Do
+            Begin
+                Cut := Pos('/', Rest);
+                Pair := Trim(Copy(Rest, 1, Cut - 1));
+                Rest := Copy(Rest, Cut + 1, Length(Rest));
+                If Pair = '' Then Continue;
+                Comma := Pos(',', Pair);
+                If Comma = 0 Then Continue;
+                PX := StrToFloatDef(Copy(Pair, 1, Comma - 1), 0);
+                PY := StrToFloatDef(Copy(Pair, Comma + 1, Length(Pair)), 0);
+                Try
+                    Dim.TextLocations_Add(Point(MilsToCoordF(PX), MilsToCoordF(PY)));
+                    Inc(Added);
+                Except
+                    Problem := 'a point was not taken';
+                End;
+            End;
+            Try Count := Dim.GetState_TextLocationsCount; Except Count := -1; End;
+            Board.AddPCBObject(Dim);
+            PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
+                PCBM_BoardRegisteration, Dim.I_ObjectAddress);
+        End;
+    Finally
+        PcbEndEdit(0);
+    End;
+    If Problem = '' Then MarkDocDirtyByPath(Board.FileName);
+    Try Board.GraphicallyInvalidate; Except End;
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonBool('placed', (Problem = '') And (Added > 0)) + ','
+        + JsonInt('points_sent', Added) + ','
+        + JsonInt('points_read_back', Count) + ','
+        + JsonStr('layer', LayerStr) + ','
+        + JsonStr('problem', Problem)));
+End;
+
+{..............................................................................}
+{ PCB_FileInfo - the file format version the board was last saved in, and   }
+{ the id Altium gives it while it is open.                                  }
+{..............................................................................}
+Function PCB_FileInfo(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Version : Double;
+    Id, Misses : Integer;
+Begin
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+    Version := 0;
+    Id := -1;
+    Misses := 0;
+    Try Version := Board.BoardVersion; Except Inc(Misses); End;
+    Try Id := Board.BoardID; Except Inc(Misses); End;
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonStr('board', Board.FileName) + ','
+        + JsonFloat('file_version', Version) + ','
+        + JsonInt('board_id', Id) + ','
+        + JsonInt('read_errors', Misses)));
 End;
 
 {..............................................................................}
@@ -24684,6 +28058,12 @@ Begin
         'copy_tracks_radial':      Result := PCB_CopyTracksRadial(Params, RequestId);
         'scale':                   Result := PCB_Scale(Params, RequestId);
         'save_copy_as':            Result := PCB_SaveCopyAs(Params, RequestId);
+        'make_library':            Result := PCB_MakeLibrary(Params, RequestId);
+        'get_pad_via_library':     Result := PCB_GetPadViaLibrary(Params, RequestId);
+        'add_pad_via_template':    Result := PCB_AddPadViaTemplate(Params, RequestId);
+        'make_pad_via_library':    Result := PCB_MakePadViaLibrary(Params, RequestId);
+        'part_outlines':           Result := PCB_PartOutlines(Params, RequestId);
+        'set_designator_texts':    Result := PCB_SetDesignatorTexts(Params, RequestId);
         'polygon_repour_mode':     Result := PCB_PolygonRepourMode(Params, RequestId);
         'dump_free_primitives':    Result := PCB_DumpFreePrimitives(Params, RequestId);
         'apply_free_primitives':   Result := PCB_ApplyFreePrimitives(Params, RequestId);
@@ -24702,6 +28082,17 @@ Begin
         'get_trace_lengths':       Result := PCB_GetTraceLengths(Params, RequestId);
         'get_layer_stackup':       Result := PCB_GetLayerStackup(Params, RequestId);
         'get_impedance_profiles':  Result := PCB_GetImpedanceProfiles(Params, RequestId);
+        'render_png':              Result := PCB_RenderPng(Params, RequestId);
+        'save_board_text':         Result := PCB_SaveBoardText(Params, RequestId);
+        'net_figures':             Result := PCB_NetFigures(Params, RequestId);
+        'guides':                  Result := PCB_Guides(Params, RequestId);
+        'local_grid':              Result := PCB_LocalGrid(Params, RequestId);
+        'plane_state':             Result := PCB_PlaneState(Params, RequestId);
+        'hole_symbols':            Result := PCB_HoleSymbols(Params, RequestId);
+        'component_parameters':    Result := PCB_ComponentParameters(Params, RequestId);
+        'place_simple_body':       Result := PCB_PlaceSimpleBody(Params, RequestId);
+        'place_baseline_dimension': Result := PCB_PlaceBaselineDimension(Params, RequestId);
+        'file_info':               Result := PCB_FileInfo(Params, RequestId);
         'find_dominant_rule':      Result := PCB_FindDominantRule(Params, RequestId);
         'rule_scope_check':        Result := PCB_RuleScopeCheck(Params, RequestId);
         'clean_net':               Result := PCB_CleanNet(Params, RequestId);
@@ -24728,6 +28119,9 @@ Begin
         'layer_stacks':            Result := PCB_LayerStacks(Params, RequestId);
         'gloss':                   Result := PCB_Gloss(Params, RequestId);
         'physical_stack':          Result := PCB_PhysicalStack(Params, RequestId);
+        'copper_layers':           Result := PCB_CopperLayers(Params, RequestId);
+        'drop_stack_layer':        Result := PCB_DropStackLayer(Params, RequestId);
+        'tune_copper_layer':       Result := PCB_TuneCopperLayer(Params, RequestId);
         'set_dielectric':          Result := PCB_SetDielectric(Params, RequestId);
         'stack_edit':              Result := PCB_StackEdit(Params, RequestId);
         'impedance_profile':       Result := PCB_ImpedanceProfile(Params, RequestId);
@@ -24745,6 +28139,7 @@ Begin
         'get_board_outline':       Result := PCB_GetBoardOutline(Params, RequestId);
         'get_selected_objects':    Result := PCB_GetSelectedObjects(Params, RequestId);
         'set_layer_visibility':    Result := PCB_SetLayerVisibility(Params, RequestId);
+        'layer_view':              Result := PCB_LayerView(Params, RequestId);
         'repour_polygons':         Result := PCB_RepourPolygons(Params, RequestId);
         'place_via':               Result := PCB_PlaceVia(Params, RequestId);
         'place_3d_body':           Result := PCB_Place3DBody(Params, RequestId);
@@ -24770,6 +28165,8 @@ Begin
         'set_track_width':         Result := PCB_SetTrackWidth(Params, RequestId);
         'get_unrouted_nets':       Result := PCB_GetUnroutedNets(Params, RequestId);
         'get_polygons':            Result := PCB_GetPolygons(Params, RequestId);
+        'pour_outline':            Result := PCB_PourOutline(Params, RequestId);
+        'pour_copper':             Result := PCB_PourCopper(Params, RequestId);
         'calc_polygon_area':       Result := PCB_CalcPolygonArea(Params, RequestId);
         'set_via_soldermask_relief': Result := PCB_SetViaSoldermaskRelief(Params, RequestId);
         'set_via_tenting': Result := PCB_SetViaTenting(Params, RequestId);

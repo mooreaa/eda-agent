@@ -122,16 +122,17 @@ def workspace(tmp_path, monkeypatch):
     return project
 
 
-def test_checkpoint_refuses_when_several_projects_are_open(monkeypatch, workspace):
+def test_checkpoint_names_the_other_open_projects(monkeypatch, workspace):
+    """Upstream's answer to the wrong-project checkpoint: it no longer
+    refuses, but the reply lists the other open projects, so a snapshot of
+    the wrong one is not silent."""
     bridge = _Bridge(projects=[r"R:\a\A.PrjPcb", r"R:\b\B.PrjPcb"],
                      project_dir=str(workspace))
     fns = _tools(application_tools, "register_application_tools",
                  monkeypatch, bridge)
     out = asyncio.run(fns["app_checkpoint"]("x"))
-    assert out["checkpoint"] is None
-    assert "project_path" in out["error"]
-    assert len(out["open_projects"]) == 2
-    assert "project.save" not in [c for c, _ in bridge.calls]
+    assert out["checkpoint"]["file_count"] >= 1
+    assert len(out["other_open_projects"]) == 2
 
 
 def test_free_documents_do_not_make_the_focus_ambiguous(monkeypatch, workspace):
@@ -164,7 +165,7 @@ def test_checkpoint_of_a_missing_project_file_is_refused(monkeypatch, workspace)
                  monkeypatch, bridge)
     out = asyncio.run(fns["app_checkpoint"](
         "x", project_path=str(workspace / "Nope.PrjPcb")))
-    assert out["checkpoint"] is None and "not found" in out["error"]
+    assert out["checkpoint"] is None and "no project file" in out["error"]
 
 
 # 11 -------------------------------------------------------------------------
@@ -205,8 +206,8 @@ def test_an_explicit_orientation_still_wins():
 def test_capture_png_is_native_unless_ocr_asks_for_more():
     from eda_agent.ui import ocr
 
-    assert inspect.signature(ocr.capture_png).parameters["scale"].default == 1
-    assert "scale=2" in inspect.getsource(ocr.read_window_text)
+    assert inspect.signature(ocr.capture_png).parameters["enlarge"].default == 1
+    assert "enlarge=2" in inspect.getsource(ocr.read_window_text)
 
 
 # 22, 25, 4 (Pascal) -----------------------------------------------------------
@@ -222,16 +223,12 @@ def test_schematic_deselect_runs_sch_deselect_with_action_all():
 
 def test_zoom_document_is_fit_document_on_a_schematic_only():
     fn = _function(_pascal("Generic.pas"), "Gen_Zoom")
-    assert "(Action <> 'document')" in fn
-    assert re.search(r"\(Action = 'document'\) And \(ZoomProcess <> 'Sch:Zoom'\)", fn)
+    assert "|document|" in fn
     assert "AddStringParameter('Action', 'Document')" in fn
 
 
 def test_close_refuses_a_document_resolved_under_another_name():
-    src = _pascal("Application.pas")
-    fn = _function(src, "App_CloseDocument")
-    assert fn.index("SameDocPath(ServerDoc.FileName, FilePath)") < fn.index(
+    fn = _function(_pascal("Application.pas"), "App_CloseDocument")
+    assert "OTHER_DOCUMENT" in fn
+    assert fn.index("PathKey(ServerDoc.FileName) <> PathKey(FilePath)") < fn.index(
         "Client.CloseDocument(ServerDoc)")
-    assert "PATH_MISMATCH" in fn
-    same = _function(src, "SameDocPath")
-    assert same.count("StringReplace(") == 2 and "LowerCase(" in same

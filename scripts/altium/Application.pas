@@ -161,6 +161,8 @@ Var
     Doc : IDocument;
     SchDoc : ISch_Document;
     Board : IPCB_Board;
+    View : IServerDocumentView;
+    ServerDoc : IServerDocument;
     Data, FileName : String;
 Begin
     Data := '';
@@ -180,9 +182,29 @@ Begin
 
     // DM_FocusedDocument is UI-focus-dependent and returns Nil when no
     // editor window holds focus (e.g. right after a programmatic
-    // create/place). Fall back to the SCH then PCB server module's
-    // current document, which track the last-shown sheet/board
-    // independent of workspace focus.
+    // create/place). The editor's current view names the document on
+    // screen, a free library included; the SCH and PCB servers' current
+    // documents come last, as they can name a sheet shown earlier.
+    If Data = '' Then
+    Begin
+        ServerDoc := Nil;
+        Try
+            View := Client.CurrentView;
+            If View <> Nil Then ServerDoc := View.OwnerDocument;
+        Except ServerDoc := Nil; End;
+        If ServerDoc <> Nil Then
+        Begin
+            FileName := '';
+            Try FileName := ServerDoc.FileName; Except End;
+            If FileName <> '' Then
+            Begin
+                Data := '{"file_name":"' + EscapeJsonString(ExtractFileName(FileName)) + '"';
+                Data := Data + ',"file_path":"' + EscapeJsonString(FileName) + '"';
+                Data := Data + ',"document_kind":"' + EscapeJsonString(ServerDoc.Kind) + '"';
+                Data := Data + ',"modified":' + BoolToJsonStr(DocIsModified(FileName)) + '}';
+            End;
+        End;
+    End;
     If Data = '' Then
     Begin
         SchDoc := Nil;
@@ -287,6 +309,44 @@ Begin
     Result := BuildSuccessResponse(RequestId, '{"success":true,"file_path":"' + EscapeJsonString(ServerDoc.FileName) + '"}');
 End;
 
+{ A path in one spelling: back slashes, lower case. }
+Function PathKey(Path : String) : String;
+Begin
+    Result := LowerCase(StringReplace(Path, '/', '\', MkSet(rfReplaceAll)));
+End;
+
+{ True when an open project has the document among its own. The project   }
+{ keeps its sheets apart from the editor tab, so an unsaved change can     }
+{ outlive the tab being closed (seen on AD 26.11).                         }
+Function DocBelongsToOpenProject(FilePath : String) : Boolean;
+Var
+    Workspace : IWorkspace;
+    Project : IProject;
+    Member : IDocument;
+    P, D : Integer;
+    Wanted : String;
+Begin
+    Result := False;
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then Exit;
+    Wanted := PathKey(FilePath);
+    P := 0;
+    While (Not Result) And (P < Workspace.DM_ProjectCount) Do
+    Begin
+        Project := Nil;
+        Try Project := Workspace.DM_Projects(P); Except Project := Nil; End;
+        D := 0;
+        While (Project <> Nil) And (Not Result) And (D < Project.DM_LogicalDocumentCount) Do
+        Begin
+            Member := Nil;
+            Try Member := Project.DM_LogicalDocuments(D); Except Member := Nil; End;
+            If Member <> Nil Then Result := PathKey(Member.DM_FullPath) = Wanted;
+            Inc(D);
+        End;
+        Inc(P);
+    End;
+End;
+
 { Close ONE document, found by its full path, whatever has the focus.        }
 { WorkspaceManager:CloseObject acts on the FOCUSED object, not the one named: }
 { a close by path once closed a different project. This closes the document }
@@ -294,23 +354,14 @@ End;
 { one that reads modified (a floor only: that read can miss editor edits),  }
 { and looks it up again afterwards to say whether it is really gone.        }
 { With discard, the modified flag is cleared first, unread, which is what   }
-{ keeps the save prompt away; the edits are lost.                           }
-{ GetDocumentByPath resolves a phantom copy's name ("/Hardware/x.SchLib",  }
-{ opened from a forward-slash path) to the REAL document on the current    }
-{ drive, so a close aimed at the phantom closed the real one. The answer is }
-{ compared with the path asked for, slashes and case aside, and a document }
-{ under another name is refused rather than closed.                        }
-Function SameDocPath(A : String; B : String) : Boolean;
-Begin
-    Result := LowerCase(StringReplace(A, '/', '\', -1))
-        = LowerCase(StringReplace(B, '/', '\', -1));
-End;
-
+{ keeps the save prompt away. For a schematic that belongs to an open      }
+{ project, discarded stays false: the project can keep the change until it }
+{ is itself closed without saving.                                          }
 Function App_CloseDocument(Params : String; RequestId : String) : String;
 Var
     FilePath : String;
     ServerDoc, Again : IServerDocument;
-    WasModified, Discard : Boolean;
+    WasModified, Discard, KeptByProject, Closed : Boolean;
 Begin
     FilePath := ExtractJsonValue(Params, 'file_path');
     Discard := LowerCase(ExtractJsonValue(Params, 'discard')) = 'true';
@@ -325,16 +376,22 @@ Begin
         Result := BuildErrorResponse(RequestId, 'NOT_LOADED', 'Document not loaded: ' + FilePath);
         Exit;
     End;
-    If Not SameDocPath(ServerDoc.FileName, FilePath) Then
+    { Asked for a copy opened under a forward-slash path, Altium hands back }
+    { the original document, and closing it closed the wrong one (AD 25.8). }
+    { Only the document named is closed.                                    }
+    If PathKey(ServerDoc.FileName) <> PathKey(FilePath) Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'PATH_MISMATCH',
-            'Altium resolved ' + FilePath + ' to a different document, '
-            + ServerDoc.FileName + ', so nothing was closed. A copy opened under '
-            + 'a forward-slash path is one; close it from Altium''s tab.');
+        Result := BuildErrorResponse(RequestId, 'OTHER_DOCUMENT',
+            FilePath + ' led to ' + ServerDoc.FileName + ' instead; nothing was '
+            + 'closed. A copy opened under a forward-slash path does this: close '
+            + 'it from its tab.');
         Exit;
     End;
     WasModified := False;
     Try WasModified := ServerDoc.Modified; Except WasModified := False; End;
+    { Changes a tool made through the API do not set Modified; the bridge }
+    { keeps its own list of them.                                         }
+    If DocWasEdited(FilePath) Then WasModified := True;
     If WasModified And Not Discard Then
     Begin
         Result := BuildErrorResponse(RequestId, 'MODIFIED',
@@ -348,9 +405,15 @@ Begin
     Client.CloseDocument(ServerDoc);
     Again := Nil;
     Try Again := Client.GetDocumentByPath(FilePath); Except Again := Nil; End;
-    Result := BuildSuccessResponse(RequestId, '{"closed":' + BoolToJsonStr(Again = Nil)
-        + ',"discarded":' + BoolToJsonStr(Discard And WasModified)
-        + ',"file_path":"' + EscapeJsonString(FilePath) + '"}');
+    Closed := Again = Nil;
+    If Closed Then ForgetDocEdited(FilePath);
+    KeptByProject := False;
+    If Discard And WasModified And (UpperCase(ExtractFileExt(FilePath)) = '.SCHDOC') Then
+        KeptByProject := DocBelongsToOpenProject(FilePath);
+    Result := BuildSuccessResponse(RequestId, JsonObj(JsonBool('closed', Closed)
+        + ',' + JsonBool('discarded', Discard And WasModified And Not KeptByProject)
+        + ',' + JsonBool('project_may_hold_edit', KeptByProject)
+        + ',' + JsonStr('file_path', FilePath)));
 End;
 
 Function App_RunProcess(Params : String; RequestId : String) : String;
@@ -508,7 +571,7 @@ Begin
     Else If MenuPath = 'Edit|Select All' Then
         ProcessName := 'Sch:SelectAll'
     Else If MenuPath = 'Edit|Deselect All' Then
-        ProcessName := 'Sch:DeSelectAll'
+        ProcessName := 'Sch:DeSelect'
     Else If MenuPath = 'View|Zoom Fit' Then
         ProcessName := 'Sch:ZoomFit'
     Else If MenuPath = 'Tools|Preferences' Then
@@ -541,6 +604,9 @@ Begin
     End;
 
     ResetParameters;
+    { Sch:DeSelectAll left the selection standing (AD 26.11.1.5);  }
+    { Sch:DeSelect with Action=All clears it.                      }
+    If ProcessName = 'Sch:DeSelect' Then AddStringParameter('Action', 'All');
     RunProcess(ProcessName);
 
     { DISPATCHED, not "succeeded". RunProcess is fire and forget: it       }
@@ -676,6 +742,7 @@ Var
     Workspace : IWorkspace;
     Project : IProject;
     AddToProject, Saved, Added, Focused, ProjSaved : Boolean;
+    AgeBefore : Integer;
 Begin
     DocKind := ExtractJsonValue(Params, 'kind');
     FilePath := ExtractJsonValue(Params, 'file_path');
@@ -718,6 +785,16 @@ Begin
     End;
     If DocName = '' Then DocName := ExtractFileName(FilePath);
 
+    { NO FOLDER, NO DOCUMENT. Saving into a folder that is not there put up }
+    { Altium's "Save file error" dialog (AD 26.11), and the polling loop    }
+    { waits on it until someone clicks OK.                                  }
+    If Not DirectoryExists(ExtractFilePath(FilePath)) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_SAVED',
+            'Nothing was created: there is no folder ' + ExtractFilePath(FilePath));
+        Exit;
+    End;
+
     { A DOCUMENT ALREADY OPEN AT THIS PATH IS REFUSED. Creating a blank over }
     { it raised "object accessed after being destroyed" in ADVPCB and halted }
     { the script (a PcbLib, 2026-10-20). The caller wants the open one.      }
@@ -750,12 +827,17 @@ Begin
       reason, fall back to WorkspaceManager:SaveObject with an explicit
       FileName, that path is effectively Save-As, which is what we
       want for a previously-unsaved document. }
+    { An old file at the path is overwritten, so only a new file time   }
+    { shows that the save happened.                                     }
+    AgeBefore := -1;
+    If FileExists(FilePath) Then
+        Try AgeBefore := FileAge(FilePath); Except AgeBefore := -1; End;
     Saved := False;
     Try ServerDoc.SetFileName(FilePath); Except End;
     Try
         ServerDoc.SetModified(True);
         ServerDoc.DoFileSave('');
-        Saved := FileExists(FilePath);
+        Saved := FileExists(FilePath) And (FileAge(FilePath) <> AgeBefore);
     Except Saved := False; End;
     If Not Saved Then
     Begin
@@ -765,8 +847,18 @@ Begin
             AddStringParameter('ObjectKind', 'Document');
             AddStringParameter('FileName', FilePath);
             RunProcess('WorkspaceManager:SaveObject');
-            Saved := FileExists(FilePath);
+            Saved := FileExists(FilePath) And (FileAge(FilePath) <> AgeBefore);
         Except Saved := False; End;
+    End;
+
+    { NOT SAVED IS NOT CREATED. Answering success with saved:false let the }
+    { next call carry on as if the file existed. This comes before the     }
+    { project add, so an unsaved document never joins a project.           }
+    If Not Saved Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_SAVED',
+            'The new document could not be saved to ' + FilePath);
+        Exit;
     End;
 
     { Add to the focused project via IProject.DM_AddSourceDocument.            }
@@ -784,21 +876,6 @@ Begin
         Except Added := False; End;
         { Written now, or the add is gone after a reopen. }
         If Added Then ProjSaved := SaveProjectFile(Project);
-    End;
-
-    { NOT SAVED IS NOT CREATED. It answered success with saved:false, which }
-    { is what a missing folder produces, and the next call went on as if   }
-    { the file were there.                                                 }
-    If Not Saved Then
-    Begin
-        If DirectoryExists(ExtractFilePath(FilePath)) Then
-            Result := BuildErrorResponse(RequestId, 'NOT_SAVED',
-                'The new document could not be saved to ' + FilePath)
-        Else
-            Result := BuildErrorResponse(RequestId, 'NOT_SAVED',
-                'The new document was not saved: the folder does not exist: '
-                + ExtractFilePath(FilePath));
-        Exit;
     End;
 
     { FOCUS THE NEW DOCUMENT. It stayed behind whatever was in front, and  }
@@ -855,6 +932,9 @@ Begin
 
     WasModified := False;
     Try WasModified := ServerDoc.Modified; Except End;
+    { Edits made through the API leave Modified False; the bridge's own   }
+    { record of them counts too, as it does when a document is closed.    }
+    If DocWasEdited(FilePath) Then WasModified := True;
     AgeBefore := -1;
     Try If FileExists(FilePath) Then AgeBefore := FileAge(FilePath); Except End;
     Try ServerDoc.SetModified(True); Except End;
@@ -1096,6 +1176,10 @@ Begin
             PCBServer.PostProcess;
             PcbOk := True;
         Except End;
+    { Raw calls on purpose, past the PcbEndEdit count, which now matches. }
+    PcbEditDepth := 0;
+    SchEditOpen := '|';
+    SchHeld := False;
 
     { The schematic server keeps its own transaction, and a SchLib handler    }
     { can die the same way, so close that too. Its PostProcess takes the      }

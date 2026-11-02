@@ -42,6 +42,9 @@ from .plan import register_plan_tools
 from .parts import register_parts_tools
 from .live import register_live_tools
 from .footprint import register_footprint_tools
+from .conventions import register_convention_tools
+from .altium365 import register_altium365_tools
+from .requests import register_request_prompts
 
 # Recognised backends. "altium" is the default and stays the full historical
 # suite; "kicad" exposes only the KiCad-native tools; "easyeda" drives
@@ -102,6 +105,9 @@ OFFLINE_DESIGN_TOOLS = (
     "design_list_stackups",
     "design_load_fab_profile",
     "design_next_action",
+    "design_phase_answer",
+    "design_phase_gate",
+    "design_phase_standing",
     "design_plan_hierarchy",
     "design_review_file",
     "design_session_log",
@@ -109,6 +115,7 @@ OFFLINE_DESIGN_TOOLS = (
     "design_session_resume",
     "design_session_start",
     "design_session_status",
+    "design_simulate_deck",
     "design_solve_netlist_file",
     "design_suggest_diff_pair_traces",
     "design_suggest_partition",
@@ -196,6 +203,8 @@ def register_all_tools(mcp):
     register_audit_tools(mcp)
     register_route_tools(mcp)
     register_sch_template_tools(mcp)
+    register_convention_tools(mcp)
+    register_altium365_tools(mcp)
 
 
 def register_backend(
@@ -216,8 +225,13 @@ def register_backend(
     if toolset not in TOOLSETS:
         toolset = DEFAULT_TOOLSET
     if toolset == "minimal":
-        return _register_minimal(mcp, backend)
-    return _register_full(mcp, backend)
+        name = _register_minimal(mcp, backend)
+    else:
+        name = _register_full(mcp, backend)
+    # The canned requests go on the real server under either toolset: a
+    # minimal server hides tools, not the prompts a user picks from.
+    register_request_prompts(mcp, name)
+    return name
 
 
 def _register_minimal(mcp, backend: str) -> str:
@@ -241,7 +255,17 @@ def _register_minimal(mcp, backend: str) -> str:
     return name
 
 
-def _register_full(mcp, backend: str = DEFAULT_BACKEND) -> str:
+def _register_full(server, backend: str = DEFAULT_BACKEND) -> str:
+    # Families of tools that differ by a mode register as one tool each;
+    # see folds.py. The members stay reachable through tool_invoke.
+    from .folds import FoldingServer
+    mcp = FoldingServer(server)
+    backend = _register_surface(mcp, backend)
+    mcp.finish()
+    return backend
+
+
+def _register_surface(mcp, backend: str = DEFAULT_BACKEND) -> str:
     backend = (backend or DEFAULT_BACKEND).strip().lower()
     if backend not in BACKENDS:
         backend = DEFAULT_BACKEND
@@ -327,6 +351,9 @@ __all__ = [
     "register_parts_tools",
     "register_live_tools",
     "register_footprint_tools",
+    "register_convention_tools",
+    "register_altium365_tools",
+    "register_request_prompts",
     "register_project_tools",
     "register_library_tools",
     "register_generic_tools",

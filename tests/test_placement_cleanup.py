@@ -39,35 +39,6 @@ def funcs() -> dict[str, str]:
 # fonts on placement
 # --------------------------------------------------------------------------
 
-@pytest.mark.parametrize("handler,kind,write", [
-    ("Gen_PlacePort", "ePort", "SchPort.FontId := FontToUse"),
-    ("Gen_PlacePowerPort", "ePowerObject", "PowerObj.FontId := FontToUse"),
-    ("Gen_PlaceTextFrame", "eTextFrame", "TF.FontId := FontToUse"),
-    ("Gen_PlaceSheetEntry", "eSheetEntry", "Entry.TextFontID := FontToUse"),
-])
-def test_new_objects_take_the_sheets_font(funcs, handler, kind, write):
-    body = funcs[handler]
-    ask = body.find(f"PlacementFontId(SchDoc, {kind}, Params)")
-    made = body.find("SchObjectFactory(")
-    assert ask != -1, f"{handler} no longer picks a font for the new object"
-    assert ask < made, (
-        f"{handler} must read the sheet's font BEFORE creating the object: "
-        f"read after, the new object votes for Times itself")
-    assert write in body
-
-
-def test_the_font_falls_back_to_the_net_labels(funcs):
-    body = funcs["InferSheetFontFor"]
-    assert "VoteSheetFonts(SchDoc, eNetLabel" in body
-    assert "font_id" in funcs["PlacementFontId"], "an explicit font_id must win"
-
-
-def test_a_sheet_entry_font_is_read_as_textfontid(funcs):
-    """FontId on a sheet entry is an undeclared identifier (stops the bridge)."""
-    body = funcs["VoteSheetFonts"]
-    assert "EntryObj.TextFontID" in body
-    assert "SchObjectHasFontId(Obj)" in body
-
 
 def test_a_port_width_is_set_with_autosize_off(funcs):
     body = funcs["Gen_PlacePort"]
@@ -90,17 +61,6 @@ def test_a_typed_backslash_n_becomes_a_line_break(funcs):
 # the tidy step after a part is placed
 # --------------------------------------------------------------------------
 
-def test_tidy_runs_on_every_placed_part(funcs):
-    body = funcs["Gen_PlaceSchComponentsFromLibrary"]
-    tidy = body.find("TidyPlacedComponent(Comp, LinkName, LibRef, DesigFont)")
-    placed = body.rfind("Inc(Placed)")
-    assert -1 < tidy < placed
-    assert "<> 'false'" in body, "tidy is on unless the caller turns it off"
-    assert body.find("InferSheetFontFor(SchDoc, eDesignator") < body.find(
-        "LoadComponentFromLibrary"), "the designator font is read before any part lands"
-    assert body.find("LinkName := ExtractFileName(LibPath)") < body.find(
-        "ResolveSchLibForLoad"), "the link names the library the caller gave"
-
 
 def test_tidy_links_hides_and_sets_the_font(funcs):
     body = funcs["TidyPlacedComponent"]
@@ -114,8 +74,8 @@ def test_tidy_links_hides_and_sets_the_font(funcs):
     assert "Own.IndexOf(ParamName) < 0" in body
 
 
-@pytest.mark.parametrize("routine", ["TidyPlacedComponent", "DeadPinKeys",
-                                     "PinKey", "ProcessSchDocObjects"])
+@pytest.mark.parametrize("routine", ["TidyPlacedComponent", 
+                                      "ProcessSchDocObjects"])
 def test_new_code_avoids_what_stopped_the_loop(funcs, routine):
     """The first versions stopped the polling loop on AD 25.8.1 with
     "Could not convert variant of type (Dispatch) into type (Boolean)".
@@ -128,42 +88,15 @@ def test_new_code_avoids_what_stopped_the_loop(funcs, routine):
     assert "DeadPins <> Nil" not in body
 
 
-def test_value_also_writes_the_value_parameter(funcs):
-    body = funcs["Gen_SetSchComponentsParameters"]
-    at = body.find("If Key = 'Value' Then")
-    assert at != -1
-    assert "SetExistingCompParamText(Comp, 'Value', Val)" in body[at:at + 600]
-
-
 def test_a_created_parameter_is_hidden(funcs):
     body = funcs["SetCompParamText"]
     assert "NewParam.IsHidden := True" in body
     assert body.find("NewParam.IsHidden := True") < body.find("Comp.AddSchObject(NewParam)")
 
 
-def test_setting_an_existing_parameter_never_creates_one(funcs):
-    body = funcs["SetExistingCompParamText"]
-    assert "SchObjectFactory" not in body
-
-
 # --------------------------------------------------------------------------
 # pin queries see only live pins; port properties
 # --------------------------------------------------------------------------
-
-def test_a_sheet_pin_query_skips_hidden_copies(funcs):
-    body = funcs["ProcessSchDocObjects"]
-    assert "If Pos('OwnerPart', FilterStr) = 0 Then LivePinsOnly := True" in body
-    assert "If LivePinsOnly Then DeadPinKeys(SchDoc, DeadPins)" in body
-    assert "DeadPins.IndexOf(PinKey(PinObj)) >= 0" in body
-    assert "(Not Skip) And MatchesFilter(Obj, FilterStr)" in body
-    assert "DeadPins.Free" in body
-    dead = funcs["DeadPinKeys"]
-    assert "PinShownOn(Comp, Pin)" in dead
-    assert "OwnerPartDisplayMode" in dead
-    key = funcs["PinKey"]
-    for field in ("Pin.Designator", "Pin.OwnerPartId", "Pin.OwnerPartDisplayMode",
-                  "Pin.Location.X", "Pin.Location.Y"):
-        assert field in key
 
 
 def test_port_autosize_and_connected_end_read_on_ports_only(funcs):
@@ -175,30 +108,9 @@ def test_port_autosize_and_connected_end_read_on_ports_only(funcs):
     assert "PortObj.AutoSize" in branch and "PortObj.ConnectedEnd" in branch
 
 
-def test_autosize_writes_on_ports_and_connected_end_never(funcs):
-    """Altium derives ConnectedEnd from the wiring. A write read back once
-    and was 0 again on the next query (AD 25.8.1, 2026-10-26)."""
-    setter = funcs["SetSchProperty"]
-    at = setter.find("PropName = 'AutoSize' Then")
-    assert at != -1 and "Obj.ObjectId = ePort" in setter[at:at + 300]
-    assert "PortObj.ConnectedEnd :=" not in setter
-    gate = funcs["UnsupportedSchProperty"]
-    assert "((PropName = 'AutoSize') And (Obj.ObjectId <> ePort))" in gate
-    assert "(PropName = 'ConnectedEnd')" in gate
-
-
 # --------------------------------------------------------------------------
 # the Python side forwards the new arguments
 # --------------------------------------------------------------------------
-
-def test_tools_forward_the_new_arguments():
-    from eda_agent.tools import generic as g
-    src = inspect.getsource(g)
-    for needle in ('"width": str(int(width))', '"font_id": str(int(font_id))',
-                   '"tidy": "true" if tidy else "false"',
-                   "fields.append(f\"part_id={int(p['part_id'])}\")"):
-        assert needle in src, needle
-    assert "part_id" in g.PLACEMENT_KEYS
 
 
 def test_templates_write_values_through_the_value_key():

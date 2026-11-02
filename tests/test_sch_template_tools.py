@@ -98,6 +98,7 @@ def test_a_clean_template_is_drawn_in_order(tools):
         "generic.set_sch_components_parameters")]
     assert order == sorted(order)
     stamps = dict(bridge.calls)["generic.set_sch_components_parameters"]["stamps"]
+    # Value writes the Comment and the part's own Value parameter.
     assert "designator=R1;Value=10k" in stamps
     ports = dict(bridge.calls)["generic.place_power_ports"]["ports"]
     assert "text=GND" in ports and "style=gnd_power;orientation=3" in ports

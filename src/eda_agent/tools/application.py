@@ -5,6 +5,7 @@
 import functools
 import os
 import re
+import sys
 from typing import Any, Optional
 from .. import __version__ as _mcp_server_version
 from ..bridge import get_bridge, AltiumNotRunningError
@@ -86,6 +87,23 @@ def _reports_update(fn):
             reply["update"] = news
         return reply
     return wrapper
+
+
+def _screen_capture_warning() -> Optional[str]:
+    """Say which Python lacks the screen capture packages, when one does:
+    a server started from another Python than the one updated reads the
+    screen through nothing, and app_screenshot is the first to find out."""
+    if os.name != "nt":
+        return None
+    try:
+        from ..ui import ocr
+        if ocr.available():
+            return None
+    except Exception:  # noqa: BLE001  a warning never breaks a ping
+        pass
+    return (f"screen capture is off: pywin32 or Pillow is missing from the "
+            f"Python that runs this server ({sys.executable}). Install them "
+            f"with: \"{sys.executable}\" -m pip install pywin32 Pillow")
 
 
 def _bundled_script_version() -> Optional[str]:
@@ -243,7 +261,7 @@ def register_meta_tools(mcp):
         Filters (all optional, AND-combined):
             category: core, application, project, library, generic,
                 schematic, pcb, audit, design, simulation, routing, meta,
-                parts (and kicad on the KiCad backend). "core" is the
+                parts, altium365 (and kicad on the KiCad backend). "core" is the
                 EDA-agnostic main flow and the usual start. No filter
                 returns the live ``categories`` map.
             maturity: ``offline`` (no Altium), ``simulator`` or
@@ -264,12 +282,20 @@ def register_meta_tools(mcp):
 
         _SCHEMA_CAP = 40
 
-        tools = await mcp.list_tools()
+        from .folds import reach_of
+
+        tools = list(await mcp.list_tools())
+        # Members of a family tool and single-item tools are not
+        # advertised; they are listed with how to reach them.
+        tools += list((getattr(mcp, "hidden", {}) or {}).values())
         q = query.lower().strip()
         out = []
         cat_counts: dict[str, int] = {}
         for t in tools:
             md = tool_metadata(t.name)
+            reach = reach_of(t.name)
+            if reach:
+                md = dict(md, reach=reach)
             if category and md["category"] != category:
                 continue
             if maturity and md["maturity"] != maturity:
@@ -334,7 +360,7 @@ def register_meta_tools(mcp):
         import json as _json
 
         tools = await mcp.list_tools()
-        known = {t.name for t in tools}
+        known = {t.name for t in tools} | set(getattr(mcp, "hidden", {}) or {})
         if name not in known:
             return {"error": f"unknown tool: {name}"}
         # Prevent self-recursion; tool_catalog is fine to invoke.
@@ -348,10 +374,16 @@ def register_meta_tools(mcp):
         content = result[0] if isinstance(result, tuple) else result
         if isinstance(content, list) and content and hasattr(content[0], "text"):
             try:
-                return {"tool": name, "result": _json.loads(content[0].text)}
+                out = {"tool": name, "result": _json.loads(content[0].text)}
             except (ValueError, TypeError):
-                return {"tool": name, "result": content[0].text}
-        return {"tool": name, "result": content}
+                out = {"tool": name, "result": content[0].text}
+        else:
+            out = {"tool": name, "result": content}
+        from .folds import FOLDED_BATCH
+        if name in FOLDED_BATCH:
+            out["note"] = (f"{name} is now {FOLDED_BATCH[name]}(items=[...]), "
+                           "which runs the same handler")
+        return out
 
 
 async def _run_declared_menu(bridge, menu_path: str) -> dict:
@@ -686,24 +718,6 @@ def register_application_tools(mcp):
             }
         return project_dir, (info or {}).get("project_name", ""), None
 
-    async def _open_project_paths() -> list[str]:
-        """Paths of the real projects open in Altium, [] if unknown.
-
-        Free Documents and other entries without a project file are left
-        out. A failed listing counts as unknown, not as ambiguous.
-        """
-        try:
-            listing = await get_bridge().send_command_async(
-                "project.get_open_projects", {})
-        except Exception:                           # noqa: BLE001
-            return []
-        projects = (listing or {}).get("projects", []) if isinstance(
-            listing, dict) else []
-        return [str(p.get("project_path", "")) for p in projects
-                if isinstance(p, dict)
-                and str(p.get("project_path", "")).lower().endswith(
-                    (".prjpcb", ".prjscr", ".prjfpg", ".prjemb", ".prjmbd"))]
-
     def _checkpoint_store():
         from ..config import get_config
         from ..checkpoint import CheckpointStore
@@ -727,10 +741,15 @@ def register_application_tools(mcp):
             discard_changes: close it even when it reads modified, and
                 LOSE the unsaved edits: the modified flag is cleared first
                 so no save prompt appears. For scratch copies and documents
-                Altium changed by merely opening them, never for work.
+                Altium changed by merely opening them, never for work. A
+                schematic an open project lists may keep the edit in the
+                project after its tab closes: ``discarded`` is then false
+                and ``project_may_hold_edit`` true; proj_close with
+                save=False drops it.
 
         Returns:
-            ``{"closed": bool, "discarded": bool, "file_path": ...}``; an
+            ``{"closed": bool, "discarded": bool, "project_may_hold_edit":
+            bool, "file_path": ...}``; an
             error when the path is not open, or when the document reads
             modified and ``discard_changes`` is not set.
         """
@@ -740,15 +759,24 @@ def register_application_tools(mcp):
         return await get_bridge().send_command_async(
             "application.close_document", params, timeout=120.0)
 
+    async def _other_open_projects(besides: str) -> list[str]:
+        """Projects open in Altium other than ``besides``; empty when the
+        list cannot be read, since it only informs the reply."""
+        import os
+        try:
+            reply = await get_bridge().send_command_async("project.get_open_projects", {})
+        except Exception:  # noqa: BLE001
+            return []
+        rows = reply.get("projects", []) if isinstance(reply, dict) else []
+        kinds = (".prjpcb", ".prjscr", ".libpkg", ".prjmbd")
+        return [path for path in (str(r.get("project_path", "")) for r in rows)
+                if path.lower().endswith(kinds)
+                and os.path.normcase(path) != os.path.normcase(besides)]
+
     @mcp.tool()
     async def app_checkpoint(label: str = "", save_first: bool = True,
                              project_path: str = "") -> dict[str, Any]:
-        """Snapshot one project so the session is revertible.
-
-        Name the project with ``project_path``. Without it the focused
-        project is taken, and the call refuses when several projects are
-        open: with three open on the Rosen controller it silently backed
-        up a different one.
+        """Snapshot a project so the session can be rolled back.
 
         Copies the project's design files into a content-addressed store under
         the workspace (unchanged files are deduplicated, so repeat checkpoints
@@ -760,11 +788,13 @@ def register_application_tools(mcp):
             label: optional human note ("before routing pass").
             save_first: flush dirty Altium docs to disk before snapshotting
                 so the checkpoint reflects in-editor changes (default True).
-            project_path: the project file (.PrjPcb) to snapshot, as
-                proj_list_open reports it.
+            project_path: the .PrjPcb to snapshot. Left empty, the focused
+                project is taken; with several open that may not be the one
+                you are editing, so the reply names it and lists the rest.
 
         Returns:
-            The checkpoint manifest summary (id, created, file_count, ...).
+            The checkpoint manifest summary (id, created, file_count, ...),
+            ``project`` (the one snapshotted) and ``other_open_projects``.
             With ``save_first``, also ``saved``: True when the flush
             worked, False with ``save_error`` and a ``note`` when it did
             not. A checkpoint is still taken either way, but one taken
@@ -774,23 +804,16 @@ def register_application_tools(mcp):
         import os
         saved: Optional[bool] = None
         save_error = ""
-        if project_path:
-            project_dir = os.path.dirname(project_path)
-            project_file = os.path.basename(project_path)
-            if not os.path.isfile(project_path):
-                return {"error": f"project file not found: {project_path}",
-                        "checkpoint": None}
-        else:
-            ambiguous = await _open_project_paths()
-            if len(ambiguous) > 1:
-                return {"error": (
-                    f"{len(ambiguous)} projects are open, so the focused "
-                    "one may not be the one being edited. Pass "
-                    "project_path."),
-                    "open_projects": ambiguous, "checkpoint": None}
+        if not project_path:
             project_dir, project_file, err = await _resolve_project_dir()
             if err:
                 return err
+        elif os.path.isfile(project_path):
+            project_dir, project_file = os.path.split(project_path)
+        else:
+            return {"error": f"no project file at {project_path}", "checkpoint": None}
+        snapshot_of = os.path.join(project_dir or "", project_file or "")
+        others = await _other_open_projects(snapshot_of)
         if save_first:
             # THE PROJECT BEING CHECKPOINTED, not the workspace. save_all
             # wrote every open document, other projects' included, to
@@ -814,7 +837,8 @@ def register_application_tools(mcp):
         from pathlib import Path
         store = _checkpoint_store()
         info = store.create(Path(project_dir), project_file=project_file or "", label=label)
-        result: dict[str, Any] = {"checkpoint": info.summary()}
+        result: dict[str, Any] = {"checkpoint": info.summary(), "project": snapshot_of,
+                                  "other_open_projects": others}
         if save_first:
             result["saved"] = saved
             if not saved:
@@ -851,6 +875,9 @@ def register_application_tools(mcp):
         Returns:
             {restored, removed, missing_blobs}.
         """
+        from ..saving import refused, saving_off
+        if saving_off():
+            return refused("A restore overwrites the project's files.")
         project_dir, _project_file, err = await _resolve_project_dir()
         if err:
             return err
@@ -891,7 +918,8 @@ def register_application_tools(mcp):
         if isinstance(reply, dict) and reply.get("stopped") is True:
             out = {"attached": False, "stopped": True,
                    "message": "Detached from Altium Designer and stopped MCP server"}
-            for key in ("edited_saved", "clean_left_alone"):
+            for key in ("edited_saved", "clean_left_alone",
+                        "saving_off", "not_saved", "saving_note"):
                 if key in reply:
                     out[key] = reply[key]
             return out
@@ -922,13 +950,18 @@ def register_application_tools(mcp):
             Altium loaded scripts from elsewhere), ``loop_workspace_dir``
             (the folder the answering loop takes requests from) and
             ``server_workspace_dir`` (this server's), ``unit_stamps``,
-            ``stale_units``, ``unstamped_units``, ``other_servers`` (other
-            eda-agent servers on this workspace) and ``warnings``.
+            ``stale_units``, ``unstamped_units``, ``saving_allowed`` (False
+            while the dashboard's Saving switch is off), ``other_servers``
+            (other eda-agent servers on this workspace) and ``warnings``.
         """
+        from ..saving import saving_off
         bridge = get_bridge()
         script_path = _bundled_script_path()
         servers, duplicate = _other_servers()
         warnings: list[str] = [duplicate] if duplicate else []
+        capture = _screen_capture_warning()
+        if capture:
+            warnings.append(capture)
         if not bridge.is_altium_running():
             return {
                 "success": False,
@@ -1005,6 +1038,8 @@ def register_application_tools(mcp):
             # reports it. Empty from a script older than 2026.10.21.
             "loop_workspace_dir": result.get("workspace_dir") or "",
             "server_workspace_dir": _server_workspace_dir(),
+            # The dashboard's Saving switch: False means every save is refused.
+            "saving_allowed": not saving_off(),
             **stamp_fields,
             "other_servers": servers,
             "warnings": warnings,
@@ -1121,6 +1156,12 @@ def register_application_tools(mcp):
             Dictionary with kind, file_path, saved, focused,
             added_to_project and member_of (project paths).
         """
+        # A missing folder made Altium raise a modal save error that holds
+        # the bridge until someone answers it; refused here first.
+        folder = os.path.dirname(file_path)
+        if os.path.isabs(file_path) and folder and not os.path.isdir(folder):
+            return {"success": False, "error": "NOT_SAVED",
+                    "reason": f"the folder does not exist: {folder}"}
         bridge = get_bridge()
         params: dict[str, Any] = {
             "kind": kind,

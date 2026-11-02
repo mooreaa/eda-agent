@@ -448,8 +448,9 @@ def register_sch_template_tools(mcp):
             stamped.add(ref)
             fields = dict(plan_stamps.get(ref, {}))
             if str(p.get("value", "")).strip():
-                # The Value key writes the Comment and, when the symbol has
-                # one, its Value parameter, which is what most symbols show.
+                # Value writes the Comment and the part's own Value
+                # parameter: Comment alone left a shown Value at the
+                # library's placeholder.
                 fields["Value"] = str(p["value"])
             if fields:
                 stamps.append(";".join([f"designator={payload_safe(ref)}"] + [

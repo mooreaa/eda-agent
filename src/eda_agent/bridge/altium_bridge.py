@@ -11,6 +11,7 @@ user tool calls.
 
 import itertools
 import json
+import locale
 import logging
 import os
 import re
@@ -38,10 +39,12 @@ from ..config import get_config
 from .path_spelling import one_spelling
 from .process_manager import AltiumProcessManager
 from .exceptions import (
+    AltiumError,
     AltiumNotRunningError,
     AltiumTimeoutError,
     AltiumCommandError,
     AltiumProtocolError,
+    AltiumScriptCrashError,
     ScriptNotLoadedError,
     raise_for_code,
 )
@@ -96,6 +99,26 @@ _DIALOG_PROBE_EVERY = 3.0
 
 # Thread pool for blocking I/O
 _executor = ThreadPoolExecutor(max_workers=1)
+
+#: The command in flight on this thread and any error box answered for it,
+#: per thread because the keep-alive pings on its own.
+_CALL = threading.local()
+
+
+def _read_response_json(path: Path) -> Any:
+    """A reply file as JSON: UTF-8 (a byte-order mark dropped), else the
+    Windows codepage. Older Altium builds (AD 25) can
+    write the reply in the system codepage; a whole UTF-8 file always
+    decodes as UTF-8, so the fallback only reads what UTF-8 cannot."""
+    raw = path.read_bytes()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        codepage = locale.getencoding()
+        if codepage.lower().replace("-", "") in ("utf8", "utf8sig"):
+            raise
+        text = raw.decode(codepage)
+    return json.loads(text)
 
 
 def _trace_log(workspace_dir: Path, msg: str) -> None:
@@ -920,6 +943,15 @@ class AltiumBridge:
             if first_appearance is None and now >= next_dialog_probe:
                 next_dialog_probe = now + _DIALOG_PROBE_EVERY
                 early = self._dialog_probe()
+                if early and early.get("blocked") and self._recover_script_crash(
+                        request_id, response_path, early) == "continue":
+                    continue
+                # Another session is clearing a crash or restarting the
+                # loop: a request not yet taken waits for the new loop.
+                if (early and early.get("blocked")
+                        and maintenance_in_progress(workspace_dir)
+                        and self._request_path(request_id).exists()):
+                    continue
                 if early and early.get("blocked"):
                     waited = now - start
                     _trace_log(
@@ -970,10 +1002,7 @@ class AltiumBridge:
 
             if ready:
                 try:
-                    # utf-8-sig drops a byte-order mark at the start,
-                    # which json.load would otherwise reject.
-                    with open(response_path, "r", encoding="utf-8-sig") as f:
-                        data = json.load(f)
+                    data = _read_response_json(response_path)
                 except (json.JSONDecodeError, IOError, UnicodeDecodeError) as e:
                     parse_errors += 1
                     if parse_errors <= 3 or parse_errors % 50 == 0:
@@ -1021,6 +1050,13 @@ class AltiumBridge:
                     return CommandResponse.from_dict(data)
 
             if time.monotonic() >= deadline:
+                # A handler can halt with no box on screen, the box answered
+                # already: its progress file stays, so without this the
+                # wait below ran out every extension first.
+                if (progress_path.exists() and first_appearance is None
+                        and self._recover_script_crash(
+                            request_id, response_path, None) == "continue"):
+                    continue
                 # Window expired. Heartbeat still ticking? extend.
                 if progress_path.exists() and extensions < _MAX_HEARTBEAT_EXTENSIONS:
                     extensions += 1
@@ -1115,9 +1151,12 @@ class AltiumBridge:
                          "dialogs": probe},
             )
         self._note_fault(workspace_dir, recovery_guidance(DEAD_LOOP))
+        from ..config import pointer_mismatch
+        elsewhere = pointer_mismatch(workspace_dir)
         raise AltiumTimeoutError(
             f"No response within {timeout}s and no progress heartbeat. "
-            + ("The Altium polling loop is probably not running. "
+            + (elsewhere + " " if elsewhere else
+               "The Altium polling loop is probably not running. "
                if not probe else "")
             + recovery_message(DEAD_LOOP)
             + self._dialog_suffix(probe),
@@ -1153,6 +1192,109 @@ class AltiumBridge:
             return report if report.get("dialog_count") else None
         except Exception:                        # pragma: no cover - guard
             return None
+
+    def _recover_script_crash(self, request_id: str, response_path: Path,
+                              probe: Optional[dict]) -> Optional[str]:
+        """Clear a handler that crashed the script, and restart the loop.
+
+        Only for THIS call's handler: Altium has taken the request and not
+        answered. With ``probe`` it acts on a script error box in it; with
+        None, on a script halted with no box up. Returns None when there
+        is nothing to recover, "continue" when the call should go on
+        waiting (the handler survived an error box), and raises
+        AltiumScriptCrashError, saying so, after a crash. See
+        bridge/script_crash.py.
+        """
+        from . import script_crash
+
+        workspace_dir = self.config.workspace_dir
+        if self._request_path(request_id).exists() or response_path.exists():
+            return None
+        dialog = script_crash.script_error_dialog(probe) if probe else None
+        if probe is not None and dialog is None:
+            return None
+        try:
+            from ..ui import windows
+
+            if not windows.available():
+                return None
+            process = self.process_manager.get_altium_info()
+            if not process:
+                return None
+            if dialog is None:
+                frame = script_crash._main_frame(process.pid)
+                if frame is None or not script_crash.title_shows_halt(frame.title):
+                    return None
+        except Exception:                        # pragma: no cover - guard
+            return None
+
+        command = getattr(_CALL, "command", "") or "a command"
+        _trace_log(workspace_dir,
+                   f"SCRIPT_CRASH_CHECK id={request_id[:8]} cmd={command} "
+                   f"box={'yes' if dialog else 'no'}")
+
+        def reply_came(seconds: float) -> bool:
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline:
+                if response_path.exists():
+                    return True
+                time.sleep(0.1)
+            return response_path.exists()
+
+        # Other sessions' calls wait through the recovery, as through a
+        # restart, rather than failing on the box this one is answering.
+        marker = Path(workspace_dir) / MAINTENANCE_FILE
+        try:
+            marker.write_text(json.dumps({"reason": "script crash recovery",
+                                          "started": time.time()}),
+                              encoding="utf-8")
+        except OSError:
+            pass
+        def drop_marker() -> None:
+            try:
+                marker.unlink()
+            except OSError:
+                pass
+
+        # The restart runs on in the background and drops the marker when
+        # it is over; this call reports the crash at once (see recover).
+        outcome = None
+        try:
+            outcome = script_crash.recover(workspace_dir, process.pid,
+                                           command, request_id, dialog,
+                                           reply_came,
+                                           on_restarted=drop_marker)
+        finally:
+            restarting = bool(outcome and (outcome.get("restart") or {})
+                              .get("in_background"))
+            if not restarting:
+                drop_marker()
+        if not outcome.get("halted"):
+            _trace_log(workspace_dir,
+                       f"SCRIPT_CRASH_NONE id={request_id[:8]} "
+                       f"title={outcome.get('title', '')[:60]}")
+            if dialog is None:
+                return None
+            # OK was pressed on a box the caller never saw: it goes on the
+            # reply (see _execute_command), with its screenshot.
+            _CALL.answered_box = {
+                "title": dialog.get("title"),
+                "said": dialog.get("message") or dialog.get("ocr_text") or [],
+                "screenshots": outcome.get("screenshots") or [],
+                "note": ("Altium showed this error box during the command and "
+                         "OK was pressed for it; the command then went on."),
+            }
+            return "continue"
+        script_crash.stale_progress(workspace_dir, request_id)
+        restart = outcome.get("restart") or {}
+        _trace_log(workspace_dir,
+                   f"SCRIPT_CRASH id={request_id[:8]} cmd={command} "
+                   f"restarted={restart.get('restarted')} "
+                   f"record={outcome.get('record', '')}")
+        logger.error("The Altium script crashed in %s; restarted=%s; %s",
+                     command, restart.get("restarted"), outcome.get("record"))
+        raise AltiumScriptCrashError(script_crash.crash_message(outcome),
+                                     details=outcome)
 
     @staticmethod
     def _dialog_suffix(probe: Optional[dict]) -> str:
@@ -1265,6 +1407,8 @@ class AltiumBridge:
         workspace_dir = self.config.workspace_dir
 
         _trace_log(workspace_dir, f"SEND cmd={command} id={request.id[:8]}")
+        _CALL.command = command
+        _CALL.answered_box = None
         self._publish_request(request)
         logger.info("Sent command: %s (id=%s)", command, request.id[:8])
 
@@ -1295,6 +1439,7 @@ class AltiumBridge:
                 self._session_doc, command, params, response)
 
         shown = self._reshow_hidden_frame(command, request.id)
+        answered = getattr(_CALL, "answered_box", None)
 
         if response.success:
             logger.info("Command %s succeeded", command)
@@ -1309,6 +1454,9 @@ class AltiumBridge:
                     "Altium's main window was hidden and has been shown "
                     "again. bridge_trace.log has a FRAME_SHOWN line naming "
                     "what ran before it.")
+            if answered and isinstance(data, dict):
+                data = dict(data)
+                data["error_box_answered"] = answered
             return self._maybe_attach_detach_hint(command, data)
 
         error = response.error or {}
@@ -1322,6 +1470,12 @@ class AltiumBridge:
             message = f"{message} Next step: {response.next_step}"
             details = dict(details) if isinstance(details, dict) else {}
             details["next_step"] = response.next_step
+        if answered:
+            message = (f"{message} Altium showed the error box "
+                       f"{answered['title']!r} during it; OK was pressed "
+                       f"(screenshot: {', '.join(answered['screenshots']) or 'none'}).")
+            details = dict(details) if isinstance(details, dict) else {}
+            details["error_box_answered"] = answered
         logger.warning("Command %s failed: %s - %s", command, code, message)
         raise_for_code(code, message, details)
 
@@ -1348,6 +1502,76 @@ class AltiumBridge:
         params: Optional[dict[str, Any]] = None,
         timeout: Optional[float] = None,
     ) -> Any:
+        # An item of a bulk call: its request waits with the others' and
+        # goes to Altium in one bulk request. See bridge/bulk.py.
+        from . import bulk
+        collector = bulk.current()
+        if collector is not None and refuse_command(command) is None:
+            return await collector.submit(command, params or {}, timeout)
+        return await self.send_command_direct(command, params, timeout)
+
+    async def send_bulk_async(
+        self,
+        command: str,
+        items: list,
+        timeout: Optional[float] = None,
+        keep_going: bool = False,
+    ) -> list:
+        """Run one command for many items in ONE request, and so in one
+        Altium edit (ProcessBulk in StatusForm.pas).
+
+        Returns one (ok, value) per item, in order: the item's data, or
+        the exception its own call would have raised. Items after a failed
+        one are not run unless ``keep_going``.
+        """
+        params: dict[str, Any] = {"bulk_count": len(items),
+                                  "bulk_continue": bool(keep_going)}
+        for index, item in enumerate(items):
+            params[f"bulk_item_{index}"] = item or {}
+        data = await self.send_command_direct(command, params, timeout)
+        envelopes = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(envelopes, list):
+            raise AltiumCommandError(
+                f"{command} answered a bulk request without per-item replies; "
+                f"the running script may predate bulk calls: deploy it.",
+                code="BULK_UNSUPPORTED", details={"reply": data})
+        out = [self._bulk_item_outcome(env) for env in envelopes]
+        while len(out) < len(items):
+            out.append((False, AltiumCommandError(
+                "No reply for this item.", code="BULK_ITEM_MISSING")))
+        return out
+
+    @staticmethod
+    def _bulk_item_outcome(envelope: Any) -> tuple:
+        """(ok, data or exception) for one item's reply in a bulk reply."""
+        if not isinstance(envelope, dict):
+            return False, AltiumCommandError("Unreadable item reply.",
+                                             code="BULK_ITEM_UNREADABLE")
+        if envelope.get("skipped"):
+            return False, AltiumCommandError(
+                "Not run: an earlier item in the same bulk call failed.",
+                code="SKIPPED")
+        response = CommandResponse.from_dict(envelope)
+        if response.success:
+            return True, _with_envelope_notes(response.data, response)
+        error = response.error or {}
+        message = error.get("message", "Unknown error")
+        if response.next_step:
+            message = f"{message} Next step: {response.next_step}"
+        try:
+            raise_for_code(error.get("code", "UNKNOWN_ERROR"), message,
+                           error.get("details"))
+        except AltiumError as exc:
+            return False, exc
+        return False, AltiumCommandError(message)
+
+    async def send_command_direct(
+        self,
+        command: str,
+        params: Optional[dict[str, Any]] = None,
+        timeout: Optional[float] = None,
+    ) -> Any:
+        """Send one request now, collector or not."""
         refusal = refuse_command(command)
         if refusal is not None:
             return {"success": False, "error": {
