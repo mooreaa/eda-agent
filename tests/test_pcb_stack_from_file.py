@@ -209,7 +209,9 @@ def test_a_name_or_copper_change_needs_no_flag(monkeypatch):
     tools, bridge = _tools(monkeypatch)
     out = asyncio.run(tools["pcb_modify_layer"](
         layer="TopLayer", name="L1 Top", copper_thickness_mils=1.378))
-    assert bridge.sent == ["pcb.modify_layer"] and "verify" not in out
+    # the write goes alone; the Layer Stack Manager resync follows it
+    assert bridge.sent[0] == "pcb.modify_layer" and "pcb.modify_layer" not in bridge.sent[1:]
+    assert "verify" not in out
 
 
 def test_the_stack_reader_is_classed_offline():

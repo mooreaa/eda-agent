@@ -975,6 +975,31 @@ _RECIPES: tuple[dict[str, Any], ...] = (
                  "outline and holes. A hatched pour's tracks are read by pcb_get_copper."),
     },
     {
+        "task": "Store an application's own data inside the board file",
+        "keywords": ("embedded", "store", "record", "hidden"),
+        "when": (("store", "board"), ("embedded", "data"), ("hidden", "data"),
+                 ("record", "board")),
+        "document_kind": "board",
+        "backends": ("altium",),
+        "use": ["pcb_embedded_data"],
+        "avoid": ["pcb_place_text"],
+        "note": ("Named plain-text records kept as embedded objects: saved with the "
+                 "PcbDoc, not drawn or selectable. A visible text can be moved or "
+                 "deleted by a designer. Not for secrets."),
+    },
+    {
+        "task": "Find the copper physically connected to a pad or other object",
+        "keywords": ("connected", "touches", "touching"),
+        "when": (("connected", "copper"), ("copper", "touches"),
+                 ("copper", "touching"), ("touches", "pad")),
+        "document_kind": "board",
+        "backends": ("altium",),
+        "use": ["pcb_connected_copper"],
+        "avoid": ["obj_select"],
+        "note": ("Walks the copper by geometry, not net name: other nets in its "
+                 "nets list are shorts. Seed with pad='U1.3' or object_type and filter."),
+    },
+    {
         "task": "Rename or swap designators across a whole project",
         "keywords": ("swap", "designator", "designators"),
         "when": (("swap", "designator"), ("rename", "designator"),
@@ -1321,6 +1346,18 @@ _RECIPES: tuple[dict[str, Any], ...] = (
                  "any order) through the AD19+ stack and undoes itself on a "
                  "wrong read-back. After any stack change, save and run "
                  "pcb_stack_from_file."),
+    },
+    {
+        "task": "The Layer Stack Manager shows old values after a scripted stack change",
+        "keywords": ("manager", "stale", "old", "values", "sync", "resync"),
+        "when": (("stack", "manager", "old"), ("stack", "manager", "stale"),
+                 ("stack", "manager", "sync"), ("layer", "stack", "manager")),
+        "document_kind": "board",
+        "backends": ("altium",),
+        "use": ["pcb_layer_stack_manager", "pcb_sync_stack_manager"],
+        "avoid": [("pcb_move_layer", "applies the manager's copy, old values included")],
+        "note": ("pcb_layer_stack_manager reports out_of_step; pcb_sync_stack_manager "
+                 "writes the board's values into the manager's copy through Altium."),
     },
     {
         "task": "Highlight nets in a colour on the board",
