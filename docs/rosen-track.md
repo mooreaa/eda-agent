@@ -62,6 +62,21 @@ Done in 2026.10.27.102: mainline merge, 4 (refusal half), 5, 11, 22, 24, 25, 26.
 
 ## Releases
 
+### 2026.11.03.101 (deployed 11-03, tested on a scratch board, AD 26.12.0.7)
+
+Mainline merged to f2abac3 (upstream script 2026.11.03.5): the Layer Stack Manager resync through
+Altium's API (`pcb_sync_stack_manager`, run after `pcb_make_layer_stack` / `pcb_modify_layer`),
+`pcb_move_layer`, and CONTRIBUTING's rule that design files are edited only through the bridge.
+Upstream closed our #178 (file-based reset) for that rule; the fork no longer sends work upstream
+(Aaron, 11-03). `pcb_build_stack` now runs the same resync after a build that matches.
+
+Altium here is now 26.12.0.7 (`application.get_version`), not 25.8.1. Live, on a scratch copy of
+afe927c's four-layer board: the manager read in step before; `pcb_build_stack` to the six-layer plan
+gave 22 ops, no mismatches, and the manager in step on every layer straight after; saved, the file
+check had no findings (no `stack_manager_model_stale`; 62.2 mil); closed, reopened, still in step.
+So on 26.12 `pcb_reset_stack_manager_model` is no longer needed after a build. Not yet re-checked
+on 26.12: the PDF print-dialog refusal and the legacy stack-write guards, both added for 25.8.
+
 ### 2026.11.02.101 (deployed 11-02, tested on scratch boards)
 
 Deployed 11-02 with no live session on the bridge (the loop was not running; `relaunch --restart`
