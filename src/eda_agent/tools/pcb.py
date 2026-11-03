@@ -7170,7 +7170,9 @@ def register_pcb_tools(mcp):
 
         Returns:
             ``{"ok", "ops", "dry_run"}``, plus when applied ``applied``,
-            ``mismatches``, ``undone`` and the read-back ``stack``.
+            ``mismatches``, ``undone`` and the read-back ``stack``; after a
+            build that matches, ``stack_manager``: the Layer Stack Manager's
+            own copy brought in step, as pcb_sync_stack_manager reports it.
         """
         from ..design import stack_build
 
@@ -7262,11 +7264,20 @@ def register_pcb_tools(mcp):
                 out["undo_error"] = (f"{exc}. The board is open with a partial "
                                      "stack: close it without saving.")
         else:
-            out["next"] = (
-                "save the board. The Layer Stack Manager's own model still has "
-                "the old values for every layer kept here: close the board, run "
-                "pcb_reset_stack_manager_model on it, reopen and save, then run "
-                "pcb_stack_from_file with this plan as expected")
+            # The build does not reach the Layer Stack Manager's own copy of
+            # the layers it kept; bring that copy in step through Altium.
+            sync = await sync_stack_manager(bridge)
+            out["stack_manager"] = sync
+            if isinstance(sync, dict) and (sync.get("in_step")
+                                           or sync.get("in_step_after")):
+                out["next"] = ("save the board, then run pcb_stack_from_file "
+                               "with this plan as expected")
+            else:
+                out["next"] = (
+                    "save the board. The Layer Stack Manager could not be brought "
+                    "in step (stack_manager): close the board, run "
+                    "pcb_reset_stack_manager_model on it, reopen and save, then "
+                    "run pcb_stack_from_file with this plan as expected")
         return out
 
     @mcp.tool()

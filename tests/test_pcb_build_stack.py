@@ -189,6 +189,13 @@ class _FakeAltium:
             return [{"file_path": BOARD, "modified": self.modified, "loaded": True}]
         if command == "pcb.physical_stack":
             return {"layers": [dict(layer) for layer in self.layers]}
+        if command == "pcb.layer_stack_manager":
+            # in step with the board unless a test says the manager is unreachable
+            if getattr(self, "manager_unreachable", False):
+                return {"success": False, "error": "LSM_UNAVAILABLE"}
+            # the manager names the board's ``constant`` dielectric_constant
+            return {"layers": [dict(layer, dielectric_constant=layer.get("constant"))
+                               for layer in self.layers]}
         if command == "application.close_document":
             self.closed = True
             return {"closed": True}
@@ -279,6 +286,17 @@ def test_a_build_gives_the_planned_six_layer_stack(monkeypatch):
         "L4 Power", "Dielectric 4", "L5 GND", "Dielectric 5", "L6 Bottom"]
     assert fake.layers[0]["name"] == "Top Overlay" and fake.layers[-1]["name"] == "Bottom Solder"
     assert not fake.closed and "pcb_stack_from_file" in out["next"]
+    assert out["stack_manager"]["in_step"] is True
+    assert "pcb_reset_stack_manager_model" not in out["next"]
+
+
+def test_a_build_falls_back_to_the_reset_when_the_manager_cannot_sync(monkeypatch):
+    fake = _FakeAltium(FOUR_LAYER)
+    fake.manager_unreachable = True
+    out = _build(monkeypatch, fake, dry_run=False)
+    assert out["ok"] is True and not fake.closed
+    assert out["stack_manager"]["error"] == "LSM_UNAVAILABLE"
+    assert "pcb_reset_stack_manager_model" in out["next"]
 
 
 def test_an_unsaved_board_is_refused(monkeypatch):
